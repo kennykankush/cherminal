@@ -1,0 +1,270 @@
+import Foundation
+
+/// Walks `~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl` and produces
+/// conversation summaries for Codex sessions.
+///
+/// Two metadata sources are used together:
+///   • `~/.codex/session_index.jsonl` — Codex's own precomputed index. One
+///     line per session with `{id, thread_name, updated_at}`. We use it for
+///     the human-readable title; it's also our cheapest signal that a
+///     session has been finalized.
+///   • Rollout file `session_meta` record (always line 1) — gives us the
+///     `cwd` so we know which room the session belongs to.
+///
+/// Cache-aware. Two-pass emission (hits first, misses parsed concurrently).
+struct CodexSessionScanner {
+    private static let concurrencyLimit: Int = 8
+
+    let cache: SessionCache?
+
+    enum Update: Sendable {
+        case cacheHits([Conversation])
+        case parsed(Conversation)
+        case finished(livePaths: Set<String>)
+    }
+
+    func scan() -> AsyncStream<Update> {
+        AsyncStream(bufferingPolicy: .unbounded) { continuation in
+            Task.detached(priority: .utility) {
+                await self.run(into: continuation)
+                continuation.finish()
+            }
+        }
+    }
+
+    // MARK: - Run
+
+    private func run(into continuation: AsyncStream<Update>.Continuation) async {
+        let sessionsRoot = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex/sessions", isDirectory: true)
+        let indexFile = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex/session_index.jsonl")
+
+        let titles = readTitleIndex(at: indexFile)
+        let candidates = enumerateRolloutFiles(under: sessionsRoot)
+
+        var hits: [Conversation] = []
+        var misses: [Candidate] = []
+
+        for candidate in candidates {
+            if let cache,
+               let entry = cache.get(path: candidate.file.path,
+                                     mtime: candidate.mtime,
+                                     size: candidate.size),
+               let convo = Conversation(persisted: entry.summary, sessionFile: candidate.file) {
+                hits.append(convo)
+            } else {
+                misses.append(candidate)
+            }
+        }
+
+        if !hits.isEmpty {
+            continuation.yield(.cacheHits(hits.sorted { $0.lastActivityAt > $1.lastActivityAt }))
+        }
+
+        if !misses.isEmpty {
+            await parseConcurrently(misses, titles: titles, continuation: continuation)
+        }
+
+        // Reconcile is the registry's job (it owns the union of all
+        // scanners' live paths). Just report what we saw.
+        let live = Set(candidates.map { $0.file.path })
+        continuation.yield(.finished(livePaths: live))
+    }
+
+    // MARK: - Title index
+
+    /// Build {session-id → thread_name} from `session_index.jsonl`. Duplicates
+    /// in the file are normal (Codex appends a new line each time a session
+    /// is finalized); we keep the most recent name.
+    private func readTitleIndex(at url: URL) -> [String: String] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        var out: [String: String] = [:]
+        let newline = UInt8(ascii: "\n")
+        var start = data.startIndex
+        for index in data.indices {
+            guard data[index] == newline else { continue }
+            ingest(line: data[start..<index], into: &out)
+            start = data.index(after: index)
+        }
+        if start < data.endIndex {
+            ingest(line: data[start..<data.endIndex], into: &out)
+        }
+        return out
+    }
+
+    private func ingest(line: Data.SubSequence, into out: inout [String: String]) {
+        guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        guard let id = obj["id"] as? String, let name = obj["thread_name"] as? String, !name.isEmpty else { return }
+        out[id] = name
+    }
+
+    // MARK: - File enumeration
+
+    private struct Candidate: Sendable {
+        let file: URL
+        let mtime: Double
+        let size: Int64
+    }
+
+    private func enumerateRolloutFiles(under root: URL) -> [Candidate] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        var out: [Candidate] = []
+        for case let url as URL in enumerator {
+            let name = url.lastPathComponent
+            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else { continue }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey])
+            guard values?.isRegularFile == true else { continue }
+            let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+            let size = Int64(values?.fileSize ?? 0)
+            guard size > 0 else { continue }
+            out.append(Candidate(file: url, mtime: mtime, size: size))
+        }
+        return out
+    }
+
+    // MARK: - Parse pass
+
+    private func parseConcurrently(
+        _ candidates: [Candidate],
+        titles: [String: String],
+        continuation: AsyncStream<Update>.Continuation
+    ) async {
+        await withTaskGroup(of: Conversation?.self) { group in
+            var iterator = candidates.makeIterator()
+
+            for _ in 0..<Self.concurrencyLimit {
+                guard let next = iterator.next() else { break }
+                group.addTask { Self.parseOne(next, titles: titles, cache: self.cache) }
+            }
+
+            while let result = await group.next() {
+                if let convo = result {
+                    continuation.yield(.parsed(convo))
+                }
+                if let next = iterator.next() {
+                    group.addTask { Self.parseOne(next, titles: titles, cache: self.cache) }
+                }
+            }
+        }
+    }
+
+    private static func parseOne(
+        _ candidate: Candidate,
+        titles: [String: String],
+        cache: SessionCache?
+    ) -> Conversation? {
+        guard let meta = parseSessionMeta(from: candidate.file) else { return nil }
+        let id = meta.id
+        let cwd = meta.cwd
+        let firstTimestamp = meta.timestamp
+
+        // For Codex the tail of the file is structurally heavier than Claude
+        // (response_item records, not single-line user prompts), but we only
+        // need a last activity timestamp. Read the tail and grab the most
+        // recent `timestamp` field.
+        let lastTimestamp = parseLastTimestamp(from: candidate.file) ?? firstTimestamp
+
+        let persisted = SessionCache.PersistedSummary(
+            id: id,
+            agentRaw: AgentKind.codex.rawValue,
+            roomPath: cwd,
+            firstTimestamp: firstTimestamp,
+            lastTimestamp: lastTimestamp,
+            messageCount: 0, // Codex's record types make this expensive; skip for v0.1.
+            previewText: titles[id]
+        )
+        cache?.put(path: candidate.file.path,
+                   mtime: candidate.mtime,
+                   size: candidate.size,
+                   summary: persisted)
+
+        return Conversation(persisted: persisted, sessionFile: candidate.file)
+    }
+
+    // MARK: - Session_meta extraction
+
+    private struct CodexMeta {
+        let id: String
+        let cwd: String
+        let timestamp: Date
+    }
+
+    /// `session_meta` is always the first line of a Codex rollout file, but
+    /// that line is huge — the embedded `base_instructions.text` alone runs
+    /// tens of KB. A fixed-size head read isn't safe; we chunk-read until we
+    /// hit the first newline, capped at 1 MB to guard against malformed
+    /// files (none observed in the wild, but worth a ceiling).
+    private static func parseSessionMeta(from url: URL) -> CodexMeta? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+
+        let chunkSize = 64 * 1024
+        let ceiling = 1024 * 1024
+        var collected = Data()
+        while collected.firstIndex(of: UInt8(ascii: "\n")) == nil, collected.count < ceiling {
+            let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
+            if chunk.isEmpty { break }
+            collected.append(chunk)
+        }
+
+        guard let newlineIndex = collected.firstIndex(of: UInt8(ascii: "\n")) else { return nil }
+        let firstLine = collected[collected.startIndex..<newlineIndex]
+        guard let obj = try? JSONSerialization.jsonObject(with: firstLine) as? [String: Any] else { return nil }
+        guard (obj["type"] as? String) == "session_meta",
+              let payload = obj["payload"] as? [String: Any],
+              let id = payload["id"] as? String,
+              let cwd = payload["cwd"] as? String else { return nil }
+
+        let timestampString = (payload["timestamp"] as? String) ?? (obj["timestamp"] as? String) ?? ""
+        let ts = isoDate(from: timestampString) ?? Date()
+        return CodexMeta(id: id, cwd: cwd, timestamp: ts)
+    }
+
+    /// Read the last 8KB of the file, scan from the end backward through the
+    /// JSON-Lines records, return the most recent `timestamp` field we find.
+    private static func parseLastTimestamp(from url: URL) -> Date? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let chunk: UInt64 = 8 * 1024
+        let from: UInt64 = size > chunk ? size - chunk : 0
+        try? handle.seek(toOffset: from)
+        let data = (try? handle.readToEnd()) ?? Data()
+        guard !data.isEmpty else { return nil }
+
+        // Walk lines in reverse.
+        let newline = UInt8(ascii: "\n")
+        var end = data.endIndex
+        while end > data.startIndex {
+            guard let lineStart = data[data.startIndex..<end].lastIndex(of: newline) else {
+                // Final unterminated chunk at the head — skip; it may be partial.
+                break
+            }
+            let line = data[data.index(after: lineStart)..<end]
+            end = lineStart
+            if let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+               let ts = obj["timestamp"] as? String,
+               let date = isoDate(from: ts) {
+                return date
+            }
+        }
+        return nil
+    }
+
+    private static func isoDate(from string: String) -> Date? {
+        if string.isEmpty { return nil }
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = withFraction.date(from: string) { return d }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: string)
+    }
+}
