@@ -1,6 +1,6 @@
-# Belvedere
+# Cherminal
 
-> **Belvedere**: an architectural feature meaning "beautiful view." A room you go to specifically to look out from.
+> **Cherminal**: chat + terminal. The room you enter to see every AI conversation across your rooms, and jump back into any one.
 
 A room-driven Ghostty manager for living with AI agents. The room you enter to see all your other rooms.
 
@@ -24,15 +24,15 @@ The product is the claude.ai / chatgpt.com 3-pane layout retargeted at the CLI.
 
 ## Experience Promise
 
-> "Open Belvedere, see every AI conversation you've started across your `~/dev` rooms, jump back into any one without losing your place."
+> "Open Cherminal, see every AI conversation you've started across your `~/dev` rooms, jump back into any one without losing your place."
 
-Belvedere is the room you enter to see all your other rooms. You stand in it and look out.
+Cherminal is the room you enter to see all your other rooms. You stand in it and look out.
 
 It should feel:
 
 - **Calm** — never spammy. No notification storms.
 - **Always there** — the conversation rail is your home base.
-- **Out of the way** — the agent never knows Belvedere exists. The middle pane is a plain Ghostty terminal.
+- **Out of the way** — the agent never knows Cherminal exists. The middle pane is a plain Ghostty terminal.
 - **Personal** — built for one user (Hadi), tightly coupled to his actual workflow.
 
 ---
@@ -52,7 +52,7 @@ It should feel:
 
 **Conversations on the left, agent in the middle, context watch on the right.** ChatGPT/Claude web UX, retargeted at the CLI.
 
-Belvedere is **not an IDE**. An IDE's primitive is the file. Belvedere's primitive is the **conversation**. The agent does the file editing; Hadi navigates conversations. The 3-pane layout overlap with IDEs is superficial — it's the universal *list-of-things + active-thing + meta-about-active-thing* pattern that Slack, Linear, Notion, and ChatGPT all share.
+Cherminal is **not an IDE**. An IDE's primitive is the file. Cherminal's primitive is the **conversation**. The agent does the file editing; Hadi navigates conversations. The 3-pane layout overlap with IDEs is superficial — it's the universal *list-of-things + active-thing + meta-about-active-thing* pattern that Slack, Linear, Notion, and ChatGPT all share.
 
 ---
 
@@ -60,13 +60,13 @@ Belvedere is **not an IDE**. An IDE's primitive is the file. Belvedere's primiti
 
 > **Observe externally. Never inject.**
 
-Belvedere watches agents the way a window manager watches windows — by looking at the OS, not by injecting into each app. This single rule is what separates Belvedere from cmux, and it's what keeps Belvedere fast.
+Cherminal watches agents the way a window manager watches windows — by looking at the OS, not by injecting into each app. This single rule is what separates Cherminal from cmux, and it's what keeps Cherminal fast.
 
 Concretely:
 
 - **No hooks** into Claude Code, Codex, or any other agent. Their hot path stays clean.
 - **No wrapper binary.** Don't intercept the `claude` command.
-- **No env injection.** Agents don't know Belvedere is running.
+- **No env injection.** Agents don't know Cherminal is running.
 - **Read-only out-of-band observation only:**
   - Read Claude Code session files from `~/.claude/projects/<encoded-cwd>/`
   - Read Codex session history from its persistence dir
@@ -100,7 +100,7 @@ These exist so future-Hadi can resist the temptation to re-bloat:
 - ❌ No nested window / workspace / surface / pane hierarchy — flat rooms + conversations. **(Tabs reinstated 2026-05-28: a top tab bar above the terminal pane keeps multiple sessions alive concurrently. Original anti-tab stance was wrong for this workflow — switching conversations without killing the underlying agent process is the load-bearing UX. Tabs are flat: one row, no nesting.)**
 - ❌ No "user settings" UI for everything — settings live in code or one JSON
 - ❌ No general-purpose abstractions — hardcoded to Hadi's stack (Claude Code, Codex, Ghostty, `~/dev/*`)
-- ❌ **No file tree, quick-edit, problems panel, or any other IDE-shaped feature.** Belvedere knows about *conversations*, not files. Files are the agent's job.
+- ❌ **No file tree, quick-edit, problems panel, or any other IDE-shaped feature.** Cherminal knows about *conversations*, not files. Files are the agent's job.
 
 If a feature you're tempted to add isn't about conversations, don't add it.
 
@@ -119,7 +119,7 @@ Leftmost Ghostty split runs a conversation-list TUI. Rightmost runs a context TU
 
 ### B. Native SwiftUI macOS app hosting libghostty  *(what cmux did, stripped)*
 
-A real `Belvedere.app`. SwiftUI sidebars left and right, libghostty embedded in the middle.
+A real `Cherminal.app`. SwiftUI sidebars left and right, libghostty embedded in the middle.
 
 - ✅ Matches the visual mockup exactly, native polish, GUI sidebars
 - ❌ Architecturally identical to cmux v0.1 — full discipline burden on builder to never let it grow
@@ -142,7 +142,7 @@ No 3-pane window. Sidebar = Raycast-style command palette (`Cmd+Shift+Space` →
 - **Conversation identity granularity**: every session a row, or latest-per-(room, agent), or only-pinned?
 - **Sidebar host** if option B/C: separate window, menu bar, command palette overlay, or all three?
 - **Multi-agent breadth** at v1: just Claude Code and Codex, or also Cursor / Gemini / Aider?
-- **State persistence**: is the registry purely derived from session files + process inspection, or does Belvedere maintain its own state file for things like pins?
+- **State persistence**: is the registry purely derived from session files + process inspection, or does Cherminal maintain its own state file for things like pins?
 
 ---
 
@@ -150,7 +150,7 @@ No 3-pane window. Sidebar = Raycast-style command palette (`Cmd+Shift+Space` →
 
 The smallest serious thing that should work end-to-end:
 
-1. Hadi opens Belvedere.
+1. Hadi opens Cherminal.
 2. Left pane shows every Ghostty pane currently running `claude` or `codex`, grouped by their cwd's room name. Plus a section for recent dormant conversations (resumable from disk).
 3. Hadi clicks a conversation → the corresponding Ghostty pane comes to focus.
 4. Right pane shows files the active conversation has touched this turn + live git diff in that room.
@@ -171,4 +171,4 @@ Full thinking trail and birdwatch findings preserved in the Warroom:
 
 ## Name
 
-**Belvedere**: from Italian, "beautiful view" — an architectural feature, a room or pavilion built specifically for looking out from. Chosen for aesthetic fit: calm, architectural, gracious. Maps the watching theme + room theme without being on-the-nose. Carries Hadi's existing taste pattern (references with soul, single evocative word).
+**Cherminal**: a portmanteau of **ch**at + t**erminal** — the two halves of what the app is. A conversations rail (chat) wrapped around a real Ghostty terminal. Plain-spoken and literal where the old name (Belvedere, "beautiful view") was evocative; the product is exactly what the name says. Renamed 2026-05-29.

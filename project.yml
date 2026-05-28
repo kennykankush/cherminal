@@ -1,4 +1,4 @@
-name: Belvedere
+name: Cherminal
 options:
   bundleIdPrefix: dev.hamulia
   deploymentTarget:
@@ -18,21 +18,21 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "26.0"
 
 targets:
-  Belvedere:
+  Cherminal:
     type: application
     platform: macOS
     sources:
-      - path: Belvedere
+      - path: Cherminal
     dependencies:
       - framework: vendor/GhosttyKit.xcframework
         embed: false
         codeSign: false
       - sdk: Carbon.framework
     info:
-      path: Belvedere/Info.plist
+      path: Cherminal/Info.plist
       properties:
-        CFBundleName: Belvedere
-        CFBundleDisplayName: Belvedere
+        CFBundleName: Cherminal
+        CFBundleDisplayName: Cherminal
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "1"
         LSMinimumSystemVersion: "26.0"
@@ -41,14 +41,14 @@ targets:
         NSHighResolutionCapable: true
         CFBundleIconName: AppIcon
     entitlements:
-      path: Belvedere/Belvedere.entitlements
+      path: Cherminal/Cherminal.entitlements
       properties:
         com.apple.security.app-sandbox: false
         com.apple.security.files.user-selected.read-only: true
         com.apple.security.files.user-selected.read-write: true
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Belvedere
+        PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_PREVIEWS: YES
