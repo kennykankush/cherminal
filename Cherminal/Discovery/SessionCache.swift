@@ -401,8 +401,12 @@ final class SessionCache: @unchecked Sendable {
             appropriateFor: nil,
             create: true
         )
+        // Key the data dir off the running bundle id so a "Cherminal Dev"
+        // debug build (dev.hamulia.Cherminal.dev) keeps its own cache and
+        // never collides with the installed release app's data.
+        let bundleID = Bundle.main.bundleIdentifier ?? "dev.hamulia.Cherminal"
         return support
-            .appendingPathComponent("dev.hamulia.Cherminal", isDirectory: true)
+            .appendingPathComponent(bundleID, isDirectory: true)
             .appendingPathComponent("registry.sqlite", isDirectory: false)
     }
 

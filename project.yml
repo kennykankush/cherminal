@@ -49,8 +49,19 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal
+        APP_DISPLAY_NAME: Cherminal
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_PREVIEWS: YES
         OTHER_LDFLAGS: "-lstdc++"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # Debug = a side-by-side "Cherminal Dev" app: separate bundle id (so
+        # its data dir / Dock entry are independent) and a distinct name, so it
+        # never collides with the installed release "Cherminal".
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal.dev
+          APP_DISPLAY_NAME: Cherminal Dev
+        Release:
+          PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal
+          APP_DISPLAY_NAME: Cherminal
