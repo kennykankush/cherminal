@@ -36,16 +36,13 @@ final class TabWindowCoordinator: ObservableObject {
             return existing
         }
 
-        guard let app = ghostty.app else {
+        guard ghostty.app != nil else {
             Self.logger.error("openOrFocus before ghostty ready")
             return nil
         }
 
-        let config = TerminalCommand.surfaceConfig(for: conversation)
-        let surface = Ghostty.SurfaceView(app, baseConfig: config)
         let controller = TerminalTabWindowController(
             conversation: conversation,
-            surfaceView: surface,
             registry: registry,
             ghostty: ghostty,
             bookmarks: bookmarks,
@@ -59,6 +56,21 @@ final class TabWindowCoordinator: ObservableObject {
         }
         controllers.append(controller)
         select(controller)
+
+        // Lay out the panes now, then spawn the surface on the next runloop —
+        // once the sidebar + inspector have claimed their widths and the
+        // terminal pane is at its real size. The shell (and its fastfetch
+        // banner, which can't reflow) then start at the correct width instead
+        // of into the momentarily-squished pane.
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self, weak controller] in
+            guard let self,
+                  let controller,
+                  controller.holder.surfaceView == nil,
+                  let app = self.ghostty.app else { return }
+            let config = TerminalCommand.surfaceConfig(for: conversation)
+            controller.holder.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+        }
         return controller
     }
 

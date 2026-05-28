@@ -7,9 +7,9 @@ import SwiftUI
 struct TabWindowRootView: View {
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
+    @ObservedObject var holder: TabSurfaceHolder
 
     let conversation: Conversation
-    let surfaceView: Ghostty.SurfaceView
 
     @State private var sidebarMode: SidebarView.Mode = .byRoom
     @State private var showContext = true
@@ -19,7 +19,7 @@ struct TabWindowRootView: View {
             SidebarView(mode: $sidebarMode, selection: sidebarSelection)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 420)
         } detail: {
-            Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+            terminal
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .inspector(isPresented: $showContext) {
                     ContextWatchPane(conversation: conversation)
@@ -35,6 +35,18 @@ struct TabWindowRootView: View {
                         .help(showContext ? "Hide context" : "Show context")
                     }
                 }
+        }
+    }
+
+    /// The surface is created lazily once the pane has laid out (see
+    /// TabWindowCoordinator), so until then we show the window's background
+    /// color — no flash of mis-sized terminal.
+    @ViewBuilder
+    private var terminal: some View {
+        if let surfaceView = holder.surfaceView {
+            Ghostty.SurfaceWrapper(surfaceView: surfaceView)
+        } else {
+            Color.clear
         }
     }
 

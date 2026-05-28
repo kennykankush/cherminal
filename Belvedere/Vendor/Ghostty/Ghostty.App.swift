@@ -1994,18 +1994,17 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
-
-                guard config.progressStyle else {
-                    Ghostty.logger.debug("progress_report action blocked by config")
-                    DispatchQueue.main.async {
-                        surfaceView.progressReport = nil
-                    }
-                    return
-                }
-
+                // Belvedere reads config via AppEnvironment rather than the
+                // `NSApplication.shared.delegate as? AppDelegate` cast used by
+                // upstream Ghostty: our real delegate is BelvedereAppDelegate,
+                // so that cast always returns nil and the handler bailed —
+                // which silently prevented progress bars from ever rendering.
                 let progressReport = Ghostty.Action.ProgressReport(c: v)
                 DispatchQueue.main.async {
+                    guard AppEnvironment.shared.ghostty.config.progressStyle else {
+                        surfaceView.progressReport = nil
+                        return
+                    }
                     if progressReport.state == .remove {
                         surfaceView.progressReport = nil
                     } else {
