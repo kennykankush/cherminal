@@ -13,6 +13,9 @@ struct SidebarView: View {
 
     @State private var search: String = ""
     @State private var expandedRooms: Set<String> = []
+    /// Full-text body matches: session-file path → matched snippet.
+    @State private var bodyHits: [String: String] = [:]
+    @State private var searchingBodies = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,6 +24,22 @@ struct SidebarView: View {
             list
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
+        // Debounced full-text body search. Title/room filtering stays instant
+        // (in-memory); this adds matches found inside conversation bodies.
+        .task(id: search) {
+            let query = search
+            bodyHits = [:]
+            guard query.trimmingCharacters(in: .whitespaces).count >= 2 else { return }
+            try? await Task.sleep(for: .milliseconds(180))   // debounce
+            guard !Task.isCancelled else { return }
+            searchingBodies = true
+            let hits = await Task.detached(priority: .userInitiated) {
+                ConversationSearcher.search(query: query)
+            }.value
+            guard !Task.isCancelled else { return }
+            bodyHits = Dictionary(hits.map { ($0.path, $0.snippet) }, uniquingKeysWith: { a, _ in a })
+            searchingBodies = false
+        }
     }
 
     // MARK: - Chrome
@@ -68,6 +87,8 @@ struct SidebarView: View {
             ProgressView()
                 .controlSize(.small)
                 .frame(maxHeight: .infinity)
+        } else if !search.isEmpty {
+            searchResultsList
         } else if filteredConversations.isEmpty {
             emptyState
         } else {
@@ -128,6 +149,51 @@ struct SidebarView: View {
         }
         .frame(maxHeight: .infinity)
         .padding(.bottom, CHM.Space.xxl)
+    }
+
+    // MARK: - Search results (title/room + full-text body)
+
+    @ViewBuilder
+    private var searchResultsList: some View {
+        let results = searchResults
+        if results.isEmpty {
+            if searchingBodies {
+                ProgressView().controlSize(.small).frame(maxHeight: .infinity)
+            } else {
+                emptyState
+            }
+        } else {
+            List(selection: $selection) {
+                if searchingBodies {
+                    Label("Searching conversations…", systemImage: "magnifyingglass")
+                        .font(CHM.Font.caption)
+                        .foregroundStyle(.tertiary)
+                        .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 6, trailing: 8))
+                }
+                ForEach(results) { convo in
+                    ConversationRow(
+                        conversation: convo,
+                        showRoom: true,
+                        snippet: bodyHits[convo.sessionFile.path]
+                    )
+                    .tag(convo.id as Conversation.ID?)
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+        }
+    }
+
+    /// Conversations matching the query by title/room OR body, most recent
+    /// first. Body matches come from the debounced full-text searcher.
+    private var searchResults: [Conversation] {
+        let needle = search.lowercased()
+        let matched = registry.conversations.filter { convo in
+            (convo.previewText?.lowercased().contains(needle) ?? false)
+            || convo.roomName.lowercased().contains(needle)
+            || bodyHits[convo.sessionFile.path] != nil
+        }
+        return matched.sorted { $0.lastActivityAt > $1.lastActivityAt }
     }
 
     // MARK: - Computed
@@ -261,6 +327,8 @@ private struct RoomDisclosureHeader: View {
 private struct ConversationRow: View {
     let conversation: Conversation
     var showRoom: Bool = false
+    /// Matched body excerpt when this row came from a full-text search.
+    var snippet: String? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: CHM.Space.sm) {
@@ -283,6 +351,13 @@ private struct ConversationRow: View {
                         .foregroundStyle(.tertiary)
                 }
                 .font(.system(size: 11))
+                if let snippet {
+                    Text(snippet)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .padding(.top, 1)
+                }
             }
             Spacer(minLength: 0)
         }
