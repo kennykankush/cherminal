@@ -12,6 +12,7 @@ final class AppEnvironment {
     let bookmarks: BookmarksManager
     let pins: PinsManager
     let coordinator: TabWindowCoordinator
+    let ports: PortsManager
 
     private init() {
         let cache = try? SessionCache()
@@ -19,11 +20,13 @@ final class AppEnvironment {
         let ghostty = Ghostty.App()
         let bookmarks = BookmarksManager(cache: cache)
         let pins = PinsManager(cache: cache)
+        let coordinator = TabWindowCoordinator(
+            registry: registry, ghostty: ghostty, bookmarks: bookmarks)
         self.registry = registry
         self.ghostty = ghostty
         self.bookmarks = bookmarks
         self.pins = pins
-        self.coordinator = TabWindowCoordinator(
-            registry: registry, ghostty: ghostty, bookmarks: bookmarks)
+        self.coordinator = coordinator
+        self.ports = PortsManager(registry: registry, coordinator: coordinator)
     }
 }

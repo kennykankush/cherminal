@@ -87,6 +87,21 @@ final class TabWindowCoordinator: ObservableObject {
         openOrFocus(Conversation.shellConversation(cwd: cwd))
     }
 
+    // MARK: - Ports
+
+    /// Maps each open tab's foreground process pid → its conversation id, so
+    /// the port watcher can attribute a dev server (a descendant of that
+    /// process) to the conversation that spawned it.
+    func tabForegroundPIDs() -> [Int32: String] {
+        var out: [Int32: String] = [:]
+        for c in controllers {
+            guard let surface = c.holder.surfaceView?.surface else { continue }
+            let pid = ghostty_surface_foreground_pid(surface)
+            if pid > 0 { out[Int32(pid)] = c.conversation.id }
+        }
+        return out
+    }
+
     // MARK: - Bookmarks
 
     /// Snapshot of every open tab, for saving as a bookmark group.

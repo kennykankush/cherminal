@@ -1,10 +1,12 @@
 import SwiftUI
+import AppKit
 
 struct ContextWatchPane: View {
     enum Tab: String, CaseIterable, Identifiable {
         case context = "Context"
         case pin = "Pin"
         case group = "Group"
+        case port = "Port"
         var id: String { rawValue }
     }
 
@@ -14,6 +16,7 @@ struct ContextWatchPane: View {
     @EnvironmentObject private var bookmarks: BookmarksManager
     @EnvironmentObject private var pins: PinsManager
     @EnvironmentObject private var coordinator: TabWindowCoordinator
+    @EnvironmentObject private var ports: PortsManager
 
     @State private var tab: Tab = .context
     @State private var usage: ConversationUsage?
@@ -28,8 +31,14 @@ struct ContextWatchPane: View {
             case .context: contextTab
             case .pin: pinTab
             case .group: groupTab
+            case .port: portTab
             }
         }
+        // Poll dev ports only while the Port tab is visible.
+        .onChange(of: tab) { _, newTab in
+            if newTab == .port { ports.start() } else { ports.stop() }
+        }
+        .onDisappear { ports.stop() }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
         // Load + live-refresh usage for the active conversation. Re-parses
         // every few seconds so the context gauge tracks the conversation as
@@ -170,6 +179,51 @@ struct ContextWatchPane: View {
             }
             .padding(CHM.Space.lg)
         }
+    }
+
+    // MARK: - Port tab (dev-server port watcher)
+
+    @ViewBuilder
+    private var portTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CHM.Space.lg) {
+                if ports.ports.isEmpty {
+                    placeholder("network", "No dev servers",
+                                "Listening ports for servers started in your rooms (frontend, backend, DB) show up here, grouped and tagged with the chat that spawned them.")
+                } else {
+                    ForEach(DevPort.Category.allCases, id: \.self) { category in
+                        let rows = ports.ports.filter { $0.category == category }
+                        if !rows.isEmpty {
+                            VStack(alignment: .leading, spacing: CHM.Space.xs) {
+                                Text(category.rawValue)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+                                    .textCase(.uppercase)
+                                    .tracking(0.7)
+                                ForEach(rows) { p in
+                                    PortRow(port: p, chatName: chatName(for: p))
+                                        .onTapGesture { openInBrowser(p.port) }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(CHM.Space.lg)
+        }
+    }
+
+    /// Friendly name for the chat/room a port is attributed to.
+    private func chatName(for p: DevPort) -> String? {
+        if let cid = p.conversationID, let convo = registry.conversation(id: cid) {
+            return convo.previewText ?? convo.roomName
+        }
+        return p.roomName
+    }
+
+    private func openInBrowser(_ port: Int) {
+        guard let url = URL(string: "http://localhost:\(port)") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - Usage sections
@@ -372,6 +426,46 @@ struct ContextWatchPane: View {
                 .lineLimit(mono ? 3 : 2)
                 .truncationMode(.middle)
         }
+    }
+}
+
+/// One dev-server port row: port number, process, attributed chat/room, and
+/// an open-in-browser affordance.
+private struct PortRow: View {
+    let port: DevPort
+    let chatName: String?
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: CHM.Space.sm) {
+            Text(":\(port.port)")
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.primary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(port.command)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let chatName {
+                    Text(chatName)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: CHM.Space.xs)
+            Image(systemName: hovering ? "arrow.up.forward.app.fill" : "arrow.up.forward.app")
+                .font(.system(size: 12))
+                .foregroundStyle(hovering ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.tertiary))
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, CHM.Space.sm)
+        .contentShape(Rectangle())
+        .background(RoundedRectangle(cornerRadius: CHM.Radius.chip)
+            .fill(Color.primary.opacity(hovering ? 0.07 : 0.04)))
+        .onHover { hovering = $0 }
+        .help("Open http://localhost:\(port.port)")
     }
 }
 
