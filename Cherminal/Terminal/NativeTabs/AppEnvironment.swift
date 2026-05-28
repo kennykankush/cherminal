@@ -10,6 +10,7 @@ final class AppEnvironment {
     let registry: ConversationRegistry
     let ghostty: Ghostty.App
     let bookmarks: BookmarksManager
+    let pins: PinsManager
     let coordinator: TabWindowCoordinator
 
     private init() {
@@ -17,9 +18,11 @@ final class AppEnvironment {
         let registry = ConversationRegistry(cache: cache)
         let ghostty = Ghostty.App()
         let bookmarks = BookmarksManager(cache: cache)
+        let pins = PinsManager(cache: cache)
         self.registry = registry
         self.ghostty = ghostty
         self.bookmarks = bookmarks
+        self.pins = pins
         self.coordinator = TabWindowCoordinator(
             registry: registry, ghostty: ghostty, bookmarks: bookmarks)
     }

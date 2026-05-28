@@ -26,33 +26,40 @@ struct SidebarView: View {
     // MARK: - Chrome
 
     private var topControls: some View {
-        VStack(spacing: CHM.Space.sm) {
-            HStack(spacing: 6) {
+        VStack(spacing: 10) {
+            HStack(spacing: 7) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.tertiary)
-                TextField("Search", text: $search)
+                TextField("Search conversations", text: $search)
                     .textFieldStyle(.plain)
-                    .font(CHM.Font.body)
+                    .font(.system(size: 13))
+                if !search.isEmpty {
+                    Button { search = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .padding(.horizontal, CHM.Space.sm)
-            .padding(.vertical, 5)
+            .frame(height: 30)
+            .padding(.horizontal, 9)
             .background(
-                RoundedRectangle(cornerRadius: CHM.Radius.chip)
-                    .fill(CHM.Color.hoverFill)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
             )
 
-            Picker("", selection: $mode) {
-                ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
+            ModeToggle(mode: $mode)
         }
         // Top padding clears the traffic-light overlay (hiddenTitleBar window).
         .padding(.top, 28)
         .padding(.horizontal, CHM.Space.md)
-        .padding(.bottom, CHM.Space.sm)
+        .padding(.bottom, 10)
     }
 
     @ViewBuilder
@@ -176,6 +183,44 @@ struct SidebarView: View {
     }
 }
 
+// MARK: - Mode toggle
+
+/// A muted, modern segmented toggle — subtle track, soft sliding selection
+/// fill (not the heavy system blue). Crisp, pro-dashboard mood.
+private struct ModeToggle: View {
+    @Binding var mode: SidebarView.Mode
+    @Namespace private var ns
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(SidebarView.Mode.allCases) { option in
+                let selected = mode == option
+                Text(option.rawValue)
+                    .font(.system(size: 12, weight: selected ? .semibold : .medium))
+                    .foregroundStyle(selected ? Color.primary : Color.secondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background {
+                        if selected {
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(Color.primary.opacity(0.10))
+                                .matchedGeometryEffect(id: "seg", in: ns)
+                        }
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeOut(duration: 0.18)) { mode = option }
+                    }
+            }
+        }
+        .padding(3)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
+        )
+    }
+}
+
 // MARK: - Row + section header
 
 private struct RoomDisclosureHeader: View {
@@ -192,17 +237,20 @@ private struct RoomDisclosureHeader: View {
                     .foregroundStyle(.tertiary)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 Text(name)
-                    .font(CHM.Font.eyebrow)
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
-                    .tracking(0.6)
+                    .tracking(0.7)
                 Spacer(minLength: CHM.Space.xs)
                 Text("\(count)")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
             }
-            .padding(.vertical, 2)
+            // Generous space above each room header so sections read as
+            // distinct groups (cf. ChatGPT/Claude sidebars).
+            .padding(.top, 12)
+            .padding(.bottom, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -216,9 +264,9 @@ private struct ConversationRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: CHM.Space.sm) {
-            AgentBadge(agent: conversation.agent, size: 16)
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 1) {
+            AgentBadge(agent: conversation.agent, size: 17)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
                 Text(conversation.previewText ?? "Untitled conversation")
                     .font(.system(size: 13))
                     .foregroundStyle(conversation.previewText == nil ? .secondary : .primary)
@@ -238,8 +286,8 @@ private struct ConversationRow: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
-        .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+        .padding(.vertical, 6)
+        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
     }
 }
 

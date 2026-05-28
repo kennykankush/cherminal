@@ -1,28 +1,33 @@
 import SwiftUI
 
 struct ContextWatchPane: View {
+    enum Tab: String, CaseIterable, Identifiable {
+        case context = "Context"
+        case pin = "Pin"
+        case group = "Group"
+        var id: String { rawValue }
+    }
+
     let conversation: Conversation?
 
+    @EnvironmentObject private var registry: ConversationRegistry
+    @EnvironmentObject private var bookmarks: BookmarksManager
+    @EnvironmentObject private var pins: PinsManager
+    @EnvironmentObject private var coordinator: TabWindowCoordinator
+
+    @State private var tab: Tab = .context
     @State private var usage: ConversationUsage?
+    @State private var renamingGroup: Bookmark?
+    @State private var renameText: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.5)
-            if let convo = conversation {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: CHM.Space.xl) {
-                        if let usage {
-                            contextSection(usage)
-                            tokensSection(usage)
-                        }
-                        sessionSection(convo)
-                        roomSection(convo)
-                    }
-                    .padding(CHM.Space.xl)
-                }
-            } else {
-                emptyState
+            switch tab {
+            case .context: contextTab
+            case .pin: pinTab
+            case .group: groupTab
             }
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
@@ -41,6 +46,129 @@ struct ContextWatchPane: View {
                 usage = parsed
                 try? await Task.sleep(for: .seconds(8))
             }
+        }
+        .alert("Rename group", isPresented: Binding(
+            get: { renamingGroup != nil },
+            set: { if !$0 { renamingGroup = nil } }
+        )) {
+            TextField("Name", text: $renameText)
+            Button("Cancel", role: .cancel) { renamingGroup = nil }
+            Button("Save") {
+                if let g = renamingGroup { bookmarks.rename(g.id, to: renameText) }
+                renamingGroup = nil
+            }
+        }
+    }
+
+    // MARK: - Context tab
+
+    @ViewBuilder
+    private var contextTab: some View {
+        if let convo = conversation {
+            ScrollView {
+                VStack(alignment: .leading, spacing: CHM.Space.xl) {
+                    if let usage {
+                        contextSection(usage)
+                        tokensSection(usage)
+                    }
+                    sessionSection(convo)
+                    roomSection(convo)
+                }
+                .padding(CHM.Space.xl)
+            }
+        } else {
+            emptyState
+        }
+    }
+
+    // MARK: - Pin tab (single conversations)
+
+    @ViewBuilder
+    private var pinTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CHM.Space.md) {
+                if let convo = conversation {
+                    Button {
+                        pins.toggle(convo.id)
+                    } label: {
+                        Label(
+                            pins.isPinned(convo.id) ? "Unpin this conversation" : "Pin this conversation",
+                            systemImage: pins.isPinned(convo.id) ? "pin.slash" : "pin"
+                        )
+                        .font(CHM.Font.captionEmphasis)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: CHM.Radius.chip).fill(CHM.Color.hoverFill))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if pinnedConversations.isEmpty {
+                    placeholder("pin", "No pinned conversations",
+                                "Pin a conversation to keep it one click away, no matter which room it lives in.")
+                } else {
+                    ForEach(pinnedConversations) { convo in
+                        SavedRow(icon: "pin.fill", title: convo.previewText ?? "Untitled conversation",
+                                 subtitle: convo.roomName, count: nil)
+                            .onTapGesture { coordinator.openOrFocus(convo) }
+                            .contextMenu {
+                                Button("Open") { coordinator.openOrFocus(convo) }
+                                Button("Unpin", role: .destructive) { pins.toggle(convo.id) }
+                            }
+                    }
+                }
+            }
+            .padding(CHM.Space.lg)
+        }
+    }
+
+    private var pinnedConversations: [Conversation] {
+        pins.pinnedIDs.compactMap { registry.conversation(id: $0) }
+            .sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    // MARK: - Group tab (saved tab sets)
+
+    @ViewBuilder
+    private var groupTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: CHM.Space.md) {
+                Button {
+                    let tabs = coordinator.snapshot()
+                    if !tabs.isEmpty { bookmarks.create(name: "", tabs: tabs) }
+                } label: {
+                    Label(
+                        coordinator.tabCount > 0
+                            ? "Save \(coordinator.tabCount) open tab\(coordinator.tabCount == 1 ? "" : "s") as a group"
+                            : "No open tabs to save",
+                        systemImage: "square.stack.3d.up"
+                    )
+                    .font(CHM.Font.captionEmphasis)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: CHM.Radius.chip).fill(CHM.Color.hoverFill))
+                }
+                .buttonStyle(.plain)
+                .disabled(coordinator.tabCount == 0)
+
+                if bookmarks.bookmarks.isEmpty {
+                    placeholder("square.stack.3d.up", "No saved groups",
+                                "Save the set of tabs you're working in as a group, then reopen them all at once.")
+                } else {
+                    ForEach(bookmarks.bookmarks) { group in
+                        SavedRow(icon: "square.stack.3d.up.fill", title: group.name,
+                                 subtitle: nil, count: group.tabs.count)
+                            .onTapGesture { bookmarks.open(group, registry: registry, coordinator: coordinator) }
+                            .contextMenu {
+                                Button("Open") { bookmarks.open(group, registry: registry, coordinator: coordinator) }
+                                Button("Rename…") { renameText = group.name; renamingGroup = group }
+                                Divider()
+                                Button("Delete", role: .destructive) { bookmarks.delete(group.id) }
+                            }
+                    }
+                }
+            }
+            .padding(CHM.Space.lg)
         }
     }
 
@@ -175,18 +303,32 @@ struct ContextWatchPane: View {
     // MARK: - Chrome
 
     private var header: some View {
-        HStack(spacing: CHM.Space.sm) {
-            Text("Context")
-                .font(CHM.Font.eyebrow)
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .tracking(0.6)
-            Spacer()
+        Picker("", selection: $tab) {
+            ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
         }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
         .padding(.top, 28)
-        .padding(.horizontal, CHM.Space.lg)
-        .padding(.bottom, CHM.Space.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, CHM.Space.md)
+        .padding(.bottom, CHM.Space.sm)
+    }
+
+    private func placeholder(_ icon: String, _ title: String, _ detail: String) -> some View {
+        VStack(spacing: CHM.Space.sm) {
+            Image(systemName: icon)
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text(title)
+                .font(CHM.Font.bodyEmphasis)
+            Text(detail)
+                .font(CHM.Font.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, CHM.Space.xxl)
+        .padding(.horizontal, CHM.Space.sm)
     }
 
     private var emptyState: some View {
@@ -230,5 +372,46 @@ struct ContextWatchPane: View {
                 .lineLimit(mono ? 3 : 2)
                 .truncationMode(.middle)
         }
+    }
+}
+
+/// A tappable row for a saved pin or group in the context pane.
+private struct SavedRow: View {
+    let icon: String
+    let title: String
+    var subtitle: String?
+    var count: Int?
+
+    var body: some View {
+        HStack(spacing: CHM.Space.sm) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundStyle(CHM.Color.accent)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title.isEmpty ? "Untitled" : title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: CHM.Space.xs)
+            if let count {
+                Text("\(count)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, CHM.Space.sm)
+        .contentShape(Rectangle())
+        .background(RoundedRectangle(cornerRadius: CHM.Radius.chip).fill(Color.primary.opacity(0.04)))
     }
 }

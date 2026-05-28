@@ -18,7 +18,12 @@ final class TabWindowCoordinator: ObservableObject {
     /// Ordered, and the strong refs that keep the windows alive. A window's
     /// controller is dropped here on close, which deallocates the window and
     /// SIGHUPs its PTY.
-    private var controllers: [TerminalTabWindowController] = []
+    private var controllers: [TerminalTabWindowController] = [] {
+        didSet { tabCount = controllers.count }
+    }
+
+    /// Published so bookmark UI can reflect how many tabs would be saved.
+    @Published private(set) var tabCount: Int = 0
 
     init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager) {
         self.registry = registry
@@ -80,6 +85,19 @@ final class TabWindowCoordinator: ObservableObject {
             ?? activeConversation?.roomPath
             ?? URL(fileURLWithPath: NSHomeDirectory())
         openOrFocus(Conversation.shellConversation(cwd: cwd))
+    }
+
+    // MARK: - Bookmarks
+
+    /// Snapshot of every open tab, for saving as a bookmark group.
+    func snapshot() -> [PersistedTab] {
+        controllers.map { c in
+            PersistedTab(
+                conversationID: c.conversation.id,
+                agentRaw: c.conversation.agent.rawValue,
+                roomPath: c.conversation.roomPath.path
+            )
+        }
     }
 
     // MARK: - Active

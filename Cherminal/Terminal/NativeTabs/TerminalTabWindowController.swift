@@ -68,6 +68,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
             .environmentObject(registry)
             .environmentObject(ghostty)
             .environmentObject(bookmarks)
+            .environmentObject(AppEnvironment.shared.pins)
             .environmentObject(coordinator)
         window.contentViewController = NSHostingController(rootView: AnyView(root))
 
