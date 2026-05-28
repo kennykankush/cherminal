@@ -48,7 +48,7 @@ struct ContextWatchPane: View {
                 emptyState
             }
         }
-        .background(.regularMaterial)
+        .background(AppEnvironment.shared.ghostty.config.backgroundColor)
     }
 
     // MARK: - Chrome

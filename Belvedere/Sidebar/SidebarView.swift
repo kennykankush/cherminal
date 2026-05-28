@@ -12,62 +12,46 @@ struct SidebarView: View {
     @Binding var selection: Conversation.ID?
 
     @State private var search: String = ""
+    @State private var expandedRooms: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            searchField
+            topControls
             Divider().opacity(0.5)
             list
         }
-        .background(.regularMaterial)
+        .background(AppEnvironment.shared.ghostty.config.backgroundColor)
     }
 
     // MARK: - Chrome
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: BLV.Space.sm) {
-                Circle()
-                    .fill(BLV.Color.accent)
-                    .frame(width: 8, height: 8)
-                Text("Belvedere")
-                    .font(BLV.Font.brand)
-                Spacer()
+    private var topControls: some View {
+        VStack(spacing: BLV.Space.sm) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                TextField("Search", text: $search)
+                    .textFieldStyle(.plain)
+                    .font(BLV.Font.body)
             }
-            Text(subtitle)
-                .font(BLV.Font.caption)
-                .foregroundStyle(.secondary)
-                .contentTransition(.numericText())
-                .animation(BLV.Motion.appear, value: registry.conversations.count)
-        }
-        // Clear the traffic-light overlay (window has hiddenTitleBar style).
-        .padding(.top, 28)
-        .padding(.horizontal, BLV.Space.lg)
-        .padding(.bottom, BLV.Space.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+            .padding(.horizontal, BLV.Space.sm)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: BLV.Radius.chip)
+                    .fill(BLV.Color.hoverFill)
+            )
 
-    private var searchField: some View {
-        HStack(spacing: BLV.Space.sm) {
             Picker("", selection: $mode) {
                 ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
-
-            TextField("Search", text: $search, prompt: Text("Filter…"))
-                .textFieldStyle(.plain)
-                .font(BLV.Font.body)
-                .padding(.horizontal, BLV.Space.sm)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: BLV.Radius.chip)
-                        .fill(BLV.Color.hoverFill)
-                )
         }
-        .padding(.horizontal, BLV.Space.lg)
+        // Top padding clears the traffic-light overlay (hiddenTitleBar window).
+        .padding(.top, 28)
+        .padding(.horizontal, BLV.Space.md)
         .padding(.bottom, BLV.Space.sm)
     }
 
@@ -85,17 +69,28 @@ struct SidebarView: View {
                 List(selection: $selection) {
                     ForEach(filteredRooms) { room in
                         Section {
-                            ForEach(room.conversations) { convo in
-                                ConversationRow(conversation: convo)
-                                    .tag(convo.id as Conversation.ID?)
+                            if roomIsExpanded(room) {
+                                ForEach(room.conversations) { convo in
+                                    ConversationRow(conversation: convo)
+                                        .tag(convo.id as Conversation.ID?)
+                                }
                             }
                         } header: {
-                            SectionHeader(name: room.name)
+                            RoomDisclosureHeader(
+                                name: room.name,
+                                count: room.conversations.count,
+                                isExpanded: roomIsExpanded(room)
+                            ) { toggleRoom(room) }
                         }
                     }
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+                .onChange(of: selection) { _, newID in
+                    guard let newID, let convo = registry.conversation(id: newID) else { return }
+                    expandedRooms.insert(convo.roomPath.path)
+                }
+                .onAppear(perform: seedExpandedRoom)
             case .byRecent:
                 List(selection: $selection) {
                     ForEach(filteredConversations) { convo in
@@ -130,12 +125,6 @@ struct SidebarView: View {
 
     // MARK: - Computed
 
-    private var subtitle: String {
-        let count = registry.conversations.count
-        let suffix = count == 1 ? "conversation" : "conversations"
-        return "\(count) \(suffix)"
-    }
-
     private var filteredConversations: [Conversation] {
         guard !search.isEmpty else { return registry.conversations }
         let needle = search.lowercased()
@@ -157,19 +146,67 @@ struct SidebarView: View {
             return Room(id: room.id, path: room.path, conversations: matching)
         }
     }
+
+    // MARK: - Section expansion
+
+    /// A room is open when the user expanded it, or whenever a search is
+    /// active (so matches are always visible). Collapsed by default to tame
+    /// the ~48-room flood.
+    private func roomIsExpanded(_ room: Room) -> Bool {
+        !search.isEmpty || expandedRooms.contains(room.id)
+    }
+
+    private func toggleRoom(_ room: Room) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            if expandedRooms.contains(room.id) {
+                expandedRooms.remove(room.id)
+            } else {
+                expandedRooms.insert(room.id)
+            }
+        }
+    }
+
+    /// Open the active conversation's room on first appearance so you land
+    /// looking at where you already are.
+    private func seedExpandedRoom() {
+        guard expandedRooms.isEmpty,
+              let selected = selection,
+              let convo = registry.conversation(id: selected) else { return }
+        expandedRooms.insert(convo.roomPath.path)
+    }
 }
 
 // MARK: - Row + section header
 
-private struct SectionHeader: View {
+private struct RoomDisclosureHeader: View {
     let name: String
+    let count: Int
+    let isExpanded: Bool
+    let toggle: () -> Void
+
     var body: some View {
-        Text(name)
-            .font(BLV.Font.eyebrow)
-            .foregroundStyle(.secondary)
-            .textCase(.uppercase)
-            .tracking(0.6)
-            .padding(.top, BLV.Space.xs)
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                Text(name)
+                    .font(BLV.Font.eyebrow)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+                Spacer(minLength: BLV.Space.xs)
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .padding(.vertical, 2)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .animation(.easeOut(duration: 0.18), value: isExpanded)
     }
 }
 
@@ -177,37 +214,32 @@ private struct ConversationRow: View {
     let conversation: Conversation
     var showRoom: Bool = false
 
-    @State private var isHovering = false
-
     var body: some View {
         HStack(alignment: .top, spacing: BLV.Space.sm) {
-            AgentBadge(agent: conversation.agent, size: 22)
+            AgentBadge(agent: conversation.agent, size: 16)
                 .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(conversation.previewText ?? "Untitled conversation")
-                    .font(BLV.Font.bodyEmphasis)
+                    .font(.system(size: 13))
+                    .foregroundStyle(conversation.previewText == nil ? .secondary : .primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                HStack(spacing: BLV.Space.xs) {
+                HStack(spacing: 4) {
                     if showRoom {
                         Text(conversation.roomName)
-                            .font(BLV.Font.captionEmphasis)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        Text("·").foregroundStyle(.tertiary)
+                        Text("·").foregroundStyle(.quaternary)
                     }
                     Text(conversation.lastActivityAt.relativeShort)
-                        .font(BLV.Font.caption)
                         .foregroundStyle(.tertiary)
                 }
+                .font(.system(size: 11))
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 2)
         .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
-        .onHover { hovering in
-            withAnimation(BLV.Motion.hover) { isHovering = hovering }
-        }
     }
 }
 
