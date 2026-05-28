@@ -19,6 +19,10 @@ enum SessionParser {
         var lastTimestamp: Date?
         var userMessageCount: Int = 0
         var totalLines: Int = 0
+        /// The real working directory recorded in the session. Authoritative
+        /// for the room — the encoded folder name can't be reversed when a
+        /// room name contains a hyphen (e.g. `fantopy-hadi`).
+        var cwd: String?
     }
 
     static func summarize(file: URL) throws -> Summary {
@@ -54,6 +58,7 @@ enum SessionParser {
         if summary.lastTimestamp == nil { summary.lastTimestamp = tailSummary.lastTimestamp }
         if summary.firstTimestamp == nil { summary.firstTimestamp = tailSummary.firstTimestamp }
         if tailSummary.aiTitle != nil, summary.aiTitle == nil { summary.aiTitle = tailSummary.aiTitle }
+        if summary.cwd == nil { summary.cwd = tailSummary.cwd }
 
         // Message count and line count from head+tail are a lower bound. For
         // an exact count we'd need the full file; rough is good enough for
@@ -120,6 +125,10 @@ enum SessionParser {
     ) {
         summary.totalLines += 1
         guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+
+        if summary.cwd == nil, let cwd = obj["cwd"] as? String, !cwd.isEmpty {
+            summary.cwd = cwd
+        }
 
         if let ts = obj["timestamp"] as? String {
             let parsed = iso.date(from: ts) ?? isoPlain.date(from: ts)

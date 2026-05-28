@@ -13,7 +13,7 @@ import os
 /// safe to call from any thread — internal access is serialized by a lock.
 final class SessionCache: @unchecked Sendable {
     private static let logger = Logger(subsystem: "dev.hamulia.Cherminal", category: "cache")
-    private static let schemaVersion: Int = 2
+    private static let schemaVersion: Int = 3
 
     private var db: OpaquePointer?
     private let lock = NSLock()
@@ -106,6 +106,11 @@ final class SessionCache: @unchecked Sendable {
 
         let currentVersion = try scalarInt("SELECT COALESCE(MAX(version), 0) FROM schema_version") ?? 0
         if currentVersion < Self.schemaVersion {
+            // The conversations table is a pure derived cache — clear it on any
+            // schema upgrade so rows are re-parsed with the latest logic (e.g.
+            // the cwd-based room fix in v3). Pins / bookmarks / last_session
+            // are user data and are preserved.
+            try exec("DELETE FROM conversations;")
             try exec("INSERT OR REPLACE INTO schema_version (version) VALUES (\(Self.schemaVersion));")
         }
     }

@@ -162,10 +162,15 @@ struct ClaudeSessionScanner {
         let preview = summary.aiTitle ?? summary.lastPrompt
         let id = candidate.file.deletingPathExtension().lastPathComponent
 
+        // Prefer the real cwd recorded in the session over the lossy decode of
+        // the encoded folder name (which mis-splits rooms whose names contain
+        // a hyphen, e.g. `fantopy-hadi` → `…/fantopy/hadi`).
+        let roomPath = summary.cwd ?? candidate.roomPath.path
+
         let persisted = SessionCache.PersistedSummary(
             id: id,
             agentRaw: AgentKind.claudeCode.rawValue,
-            roomPath: candidate.roomPath.path,
+            roomPath: roomPath,
             firstTimestamp: summary.firstTimestamp,
             lastTimestamp: lastActivity,
             messageCount: summary.userMessageCount,
