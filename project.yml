@@ -62,6 +62,11 @@ targets:
         Debug:
           PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal.dev
           APP_DISPLAY_NAME: Cherminal Dev
+          # Distinct executable/bundle name (no space, scriptable) so the dev
+          # build is fully separable from the installed "Cherminal" — killing
+          # or relaunching it never touches the daily-driver app.
+          PRODUCT_NAME: CherminalDev
         Release:
           PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal
           APP_DISPLAY_NAME: Cherminal
+          PRODUCT_NAME: Cherminal
