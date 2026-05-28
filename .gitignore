@@ -21,3 +21,6 @@ Package.resolved
 # Vendored libghostty build outputs
 vendor/GhosttyKit.xcframework/
 vendor/.build-cache/
+
+# Vendored Zig toolchain (downloaded by scripts/build-libghostty.sh)
+vendor/zig/
