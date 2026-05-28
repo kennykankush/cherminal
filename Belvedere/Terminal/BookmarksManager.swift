@@ -54,15 +54,13 @@ final class BookmarksManager: ObservableObject {
         cache?.deleteBookmark(id: id)
     }
 
-    /// Open every tab in the bookmark, reusing TabsManager's openOrFocus so
+    /// Open every tab in the bookmark via the coordinator's openOrFocus so
     /// duplicates collapse and existing tabs just get focused. Shell entries
     /// synthesize a shell Conversation at the persisted cwd.
     func open(
         _ bookmark: Bookmark,
-        tabs tabsManager: TabsManager,
         registry: ConversationRegistry,
-        ghosttyApp: ghostty_app_t,
-        configBuilder: (Conversation) -> Ghostty.SurfaceConfiguration
+        coordinator: TabWindowCoordinator
     ) {
         for persisted in bookmark.tabs {
             let convo: Conversation
@@ -73,7 +71,7 @@ final class BookmarksManager: ObservableObject {
             } else {
                 continue
             }
-            tabsManager.openOrFocus(convo, in: ghosttyApp, configBuilder: configBuilder)
+            coordinator.openOrFocus(convo)
         }
     }
 
