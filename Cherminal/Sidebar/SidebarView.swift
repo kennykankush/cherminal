@@ -434,7 +434,10 @@ private struct ConversationRow: View {
             }
             .opacity(breathing ? 1.0 : 0.85)
             .animation(reduceMotion ? nil : CHM.Motion.breathe, value: breathing)
+            // Reset on disappear so each awaiting→idle→awaiting cycle produces a
+            // real false→true transition and re-arms the repeatForever pulse.
             .onAppear { breathing = true }
+            .onDisappear { breathing = false }
             .help("Waiting for you")
         } else if isLive {
             Circle()

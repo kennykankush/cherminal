@@ -122,6 +122,9 @@ final class TabWindowCoordinator: ObservableObject {
         DispatchQueue.main.async { [weak self, weak controller] in
             guard let self,
                   let controller,
+                  // The tab may have closed in this same runloop turn — never
+                  // spawn a libghostty surface into a window mid-teardown.
+                  self.controllers.contains(where: { $0 === controller }),
                   controller.holder.surfaceView == nil,
                   let app = self.ghostty.app else { return }
             let config = TerminalCommand.surfaceConfig(for: conversation)
@@ -197,6 +200,12 @@ final class TabWindowCoordinator: ObservableObject {
     /// strong ref deallocates the window + surface.
     func windowClosed(_ controller: TerminalTabWindowController) {
         controllers.removeAll { $0 === controller }
+        // The attention light is insert-on-bell / remove-on-focus; a tab that
+        // closes while flagged would leak its id forever (clearAwaiting only
+        // fires for still-registered windows). Clear both the effective and
+        // base identity so a shell↔agent flip can't strand it either.
+        awaitingTurnIDs.remove(controller.conversation.id)
+        awaitingTurnIDs.remove(controller.base.id)
     }
 
     private func select(_ controller: TerminalTabWindowController) {

@@ -50,6 +50,7 @@ struct ContextWatchPane: View {
         // its tail. Fully local — reads the session JSONL only.
         .task(id: conversation?.id) {
             usage = nil
+            showTokenDetails = false   // per-conversation; don't carry across switches
             guard let convo = conversation,
                   convo.agent == .claudeCode || convo.agent == .codex else { return }
             let file = convo.sessionFile

@@ -154,12 +154,18 @@ final class ClaudeUsageAccumulator: @unchecked Sendable {
             cacheCreate: max(existing.cacheCreate, cacheCreate)
         )
 
-        // Track the latest turn for the context-fill calc (input > 1 skips the
-        // cache-only continuation rows).
-        if input > 1 { lastInput = input }
-        if output > 0 { lastOutput = output }
-        if cacheRead > 0 { lastCacheRead = cacheRead }
-        if cacheCreate > 0 { lastCacheCreate = cacheCreate }
+        // The context-window footprint is the latest *real* turn (input > 1
+        // skips cache-only continuation rows). Capture all four components from
+        // that one turn ATOMICALLY — independent per-field ">0" guards would
+        // keep stale cache values after a /compact, where the new turn
+        // legitimately reports cacheRead/cacheCreate = 0, over-reporting the
+        // gauge (and even flipping a 200K model into the 1M bucket).
+        if input > 1 {
+            lastInput = input
+            lastOutput = output
+            lastCacheRead = cacheRead
+            lastCacheCreate = cacheCreate
+        }
     }
 
     /// Claude writes tool results back as synthetic `user` records; those aren't
@@ -258,10 +264,14 @@ enum ConversationUsageParser {
             // them so cache-hit math matches Claude's (fresh input vs cached).
             let cached = intValue(total["cached_input_tokens"])
             let freshInput = max(0, intValue(total["input_tokens"]) - cached)
+            let used = intValue(last["total_tokens"])
             var usage = ConversationUsage(
                 model: "Codex",
-                contextUsedTokens: intValue(last["total_tokens"]),
-                contextWindowTokens: window > 0 ? window : 256_000,
+                contextUsedTokens: used,
+                // Never let the window read smaller than what's already used, so
+                // the gauge can't show "260k / 256k" (Claude self-corrects via
+                // inferContextWindow; Codex needs this clamp).
+                contextWindowTokens: max(window > 0 ? window : 256_000, used),
                 totalInputTokens: freshInput,
                 totalOutputTokens: intValue(total["output_tokens"]),
                 cacheReadTokens: cached,

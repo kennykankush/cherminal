@@ -101,9 +101,10 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         let item = NSMenuItem()
         item.title = "Groups"
         item.submenu = menu
-        // Sit just left of the Window menu (fall back to appending).
-        let idx = mainMenu.indexOfItem(withTitle: "Window")
-        if idx >= 0 { mainMenu.insertItem(item, at: idx) } else { mainMenu.addItem(item) }
+        // Sit just left of the Window menu — found by reference, not title, so
+        // it's correct on non-English locales (fall back to appending).
+        let idx = mainMenu.items.firstIndex { $0.submenu === NSApp.windowsMenu }
+        if let idx { mainMenu.insertItem(item, at: idx) } else { mainMenu.addItem(item) }
         groupsMenu = menu
         MainActor.assumeIsolated { rebuildGroupsMenu() }
     }

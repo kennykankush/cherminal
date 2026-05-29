@@ -39,11 +39,15 @@ enum PathEncoder {
                 break
             }
         }
+        if ok {
+            cacheLock.lock(); cache[encoded] = url; cacheLock.unlock()
+            return url
+        }
         // Fallback: join segments with `/`. Loses any original `-` in names, but
-        // the sidebar still has *something* to render and group by.
-        let result = ok ? url : URL(fileURLWithPath: "/" + segments.joined(separator: "/"))
-
-        cacheLock.lock(); cache[encoded] = result; cacheLock.unlock()
-        return result
+        // the sidebar still has *something* to render and group by. NOT cached —
+        // the dir may simply not exist yet (or have a hyphen we mis-split), so a
+        // later rescan should re-probe and self-heal rather than be stuck on the
+        // lossy guess for the whole session.
+        return URL(fileURLWithPath: "/" + segments.joined(separator: "/"))
     }
 }

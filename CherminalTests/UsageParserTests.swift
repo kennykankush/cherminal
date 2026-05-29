@@ -31,8 +31,9 @@ struct UsageAccumulatorTests {
         #expect(u?.cacheReadTokens == 55)          // 5 + 50
         #expect(u?.cacheCreateTokens == 2)         // 2 + 0
         #expect(u?.messageCount == 2)              // two real user turns
-        // Latest turn footprint: 200 + 50 + 2 (carried) + 5.
-        #expect(u?.contextUsedTokens == 257)
+        // Latest turn footprint, captured atomically from m2: 200 + 50 + 0 + 5.
+        // (cacheCreate is m2's actual 0, not m1's stale 2 — see fold().)
+        #expect(u?.contextUsedTokens == 255)
         #expect(u?.contextWindowTokens == 1_000_000)   // [1m] model
     }
 
