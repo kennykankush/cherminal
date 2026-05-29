@@ -15,6 +15,11 @@ struct ConversationUsage: Sendable, Equatable {
     var totalOutputTokens: Int
     var cacheReadTokens: Int
     var cacheCreateTokens: Int
+    /// Exact user-message count, derived from the same full pass we already do
+    /// for token math. nil when we can't count truthfully (Codex, where the
+    /// record format makes a tail-only read insufficient) — the UI hides the
+    /// row rather than show a wrong number.
+    var messageCount: Int? = nil
     /// Account-wide rate-limit windows. Codex records these in-file
     /// (primary = 5h, secondary = weekly); Claude would need the OAuth API,
     /// so they stay empty there for now.
@@ -75,6 +80,7 @@ final class ClaudeUsageAccumulator: @unchecked Sendable {
     private var byKey: [String: Row] = [:]
     private var model: String?
     private var lastInput = 0, lastOutput = 0, lastCacheRead = 0, lastCacheCreate = 0
+    private var userMessages = 0     // real count of non-echo user turns
     private var offset: UInt64 = 0   // bytes folded in; always ends on a newline
 
     /// Fold in newly-appended lines and return the current usage (nil until at
@@ -107,13 +113,26 @@ final class ClaudeUsageAccumulator: @unchecked Sendable {
     private func reset() {
         byKey.removeAll(); model = nil
         lastInput = 0; lastOutput = 0; lastCacheRead = 0; lastCacheCreate = 0
+        userMessages = 0
         offset = 0
     }
 
     private func fold(line: Data.SubSequence) {
         guard !line.isEmpty,
-              let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-              (obj["type"] as? String) == "assistant",
+              let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
+        let type = obj["type"] as? String
+
+        // Count real user turns — skip the tool-result echoes Claude writes back
+        // as synthetic "user" records, same rule the sidebar parser uses.
+        if type == "user" {
+            if let message = obj["message"] as? [String: Any],
+               let content = message["content"], !Self.isToolResultEcho(content) {
+                userMessages += 1
+            }
+            return
+        }
+
+        guard type == "assistant",
               let message = obj["message"] as? [String: Any],
               let usage = message["usage"] as? [String: Any] else { return }
 
@@ -143,6 +162,16 @@ final class ClaudeUsageAccumulator: @unchecked Sendable {
         if cacheCreate > 0 { lastCacheCreate = cacheCreate }
     }
 
+    /// Claude writes tool results back as synthetic `user` records; those aren't
+    /// real user turns, so they don't count toward the message total.
+    private static func isToolResultEcho(_ content: Any) -> Bool {
+        if let array = content as? [[String: Any]],
+           array.contains(where: { ($0["type"] as? String) == "tool_result" }) {
+            return true
+        }
+        return false
+    }
+
     private func snapshot() -> ConversationUsage? {
         guard !byKey.isEmpty else { return nil }
         var totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheCreate = 0
@@ -160,7 +189,8 @@ final class ClaudeUsageAccumulator: @unchecked Sendable {
             totalInputTokens: totalInput,
             totalOutputTokens: totalOutput,
             cacheReadTokens: totalCacheRead,
-            cacheCreateTokens: totalCacheCreate
+            cacheCreateTokens: totalCacheCreate,
+            messageCount: userMessages
         )
     }
 }

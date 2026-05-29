@@ -24,6 +24,10 @@ struct DevPort: Identifiable, Equatable, Sendable {
         static func of(_ port: Int) -> Category {
             // Database first (specific, unambiguous).
             if [5432, 5433, 3306, 27017, 6379, 9042].contains(port) { return .database }
+            // Specific backend ports that sit *inside* a frontend band — checked
+            // before the ranges below or they'd be miscategorized as frontend
+            // (3001 = API next to a 3000 frontend; 8787 = wrangler).
+            if port == 3001 || port == 8787 { return .backend }
             // Frontend dev-server bands.
             if (3000...3099).contains(port)      // Next / CRA / Remix (+worktree offsets)
                 || (4200...4299).contains(port)  // Angular (+offsets)
@@ -34,7 +38,6 @@ struct DevPort: Identifiable, Equatable, Sendable {
             if (4000...4099).contains(port)      // common Node/Go API (+offsets)
                 || (8000...8099).contains(port)  // Django / FastAPI / misc (+offsets)
                 || (9000...9099).contains(port)
-                || port == 3001 || port == 8787  // API-next-to-3000 / wrangler
             { return .backend }
             return .other
         }

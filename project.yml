@@ -50,6 +50,10 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal
         APP_DISPLAY_NAME: Cherminal
+        # Keep the Swift module name stable as `Cherminal` even though the Debug
+        # product is renamed CherminalDev — so `@testable import Cherminal`
+        # works in both configs.
+        PRODUCT_MODULE_NAME: Cherminal
         GENERATE_INFOPLIST_FILE: NO
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_PREVIEWS: YES
@@ -66,7 +70,36 @@ targets:
           # build is fully separable from the installed "Cherminal" — killing
           # or relaunching it never touches the daily-driver app.
           PRODUCT_NAME: CherminalDev
+          # Let the test bundle reach internal symbols via @testable import.
+          ENABLE_TESTABILITY: YES
         Release:
           PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.Cherminal
           APP_DISPLAY_NAME: Cherminal
           PRODUCT_NAME: Cherminal
+
+  CherminalTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: CherminalTests
+    dependencies:
+      - target: Cherminal
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.hamulia.CherminalTests
+        GENERATE_INFOPLIST_FILE: YES
+        # The Debug app product is renamed to CherminalDev, so the default
+        # target-name-derived TEST_HOST path is wrong — point it at the real
+        # Debug executable.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/CherminalDev.app/Contents/MacOS/CherminalDev"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+
+schemes:
+  Cherminal:
+    build:
+      targets:
+        Cherminal: all
+        CherminalTests: [test]
+    test:
+      targets:
+        - CherminalTests

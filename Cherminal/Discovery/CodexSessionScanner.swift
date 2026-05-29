@@ -160,7 +160,10 @@ struct CodexSessionScanner {
         titles: [String: String],
         cache: SessionCache?
     ) -> Conversation? {
-        guard let meta = parseSessionMeta(from: candidate.file) else { return nil }
+        guard let meta = parseSessionMeta(from: candidate.file) else {
+            clog("scan", "codex: no session_meta in \(candidate.file.lastPathComponent) (size=\(candidate.size))")
+            return nil
+        }
         let id = meta.id
         let cwd = meta.cwd
         let firstTimestamp = meta.timestamp

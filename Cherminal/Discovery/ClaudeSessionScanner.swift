@@ -156,7 +156,12 @@ struct ClaudeSessionScanner {
 
     private static func parseOne(_ candidate: Candidate, cache: SessionCache?) -> Conversation? {
         let summary = (try? SessionParser.summarize(file: candidate.file)) ?? .init()
-        guard summary.totalLines > 0 else { return nil }
+        guard summary.totalLines > 0 else {
+            // Don't let it vanish without a trace — a non-empty file that yields
+            // no parseable lines is a format regression worth seeing in the log.
+            clog("scan", "claude: unreadable \(candidate.file.lastPathComponent) (size=\(candidate.size))")
+            return nil
+        }
 
         let lastActivity = summary.lastTimestamp ?? Date(timeIntervalSince1970: candidate.mtime)
         // Fall back to the first real user prompt so sessions without an

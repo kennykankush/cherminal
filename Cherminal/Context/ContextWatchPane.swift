@@ -376,7 +376,12 @@ struct ContextWatchPane: View {
                 Spacer(minLength: 0)
             }
             .padding(.bottom, CHM.Space.xs)
-            keyValue("Messages", "\(convo.messageCount)")
+            // Only show a message count we can stand behind: the exact count
+            // from the full usage parse (Claude). Hidden otherwise rather than
+            // surfacing the head/tail lower bound or Codex's placeholder 0.
+            if let count = usage?.messageCount {
+                keyValue("Messages", "\(count)")
+            }
             if let first = convo.firstMessageAt {
                 keyValue("Started", first.formatted(date: .abbreviated, time: .shortened))
             }

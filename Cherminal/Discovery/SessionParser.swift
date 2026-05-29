@@ -219,10 +219,13 @@ enum SessionParser {
 
     private static func summarize(data: Data, isCompleteFile: Bool) -> Summary {
         var summary = parseLines(in: data, scope: .head)
-        // For complete files we also want any trailing line that didn't end
-        // in a newline.
-        if isCompleteFile, let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) {
-            let trailing = data[data.index(after: lastNewline)..<data.endIndex]
+        // For complete files, also ingest the final line when it isn't
+        // newline-terminated — including the single-line, no-newline case
+        // (lastIndex would be nil, leaving the only record unparsed).
+        if isCompleteFile, !data.isEmpty {
+            let trailingStart = data.lastIndex(of: UInt8(ascii: "\n"))
+                .map { data.index(after: $0) } ?? data.startIndex
+            let trailing = data[trailingStart..<data.endIndex]
             if !trailing.isEmpty {
                 ingest(line: trailing, into: &summary, iso: iso, isoPlain: isoPlain)
             }

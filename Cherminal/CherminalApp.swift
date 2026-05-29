@@ -25,7 +25,13 @@ struct CherminalApp: App {
 /// stub so the vendored Ghostty code's `as? AppDelegate` casts still return
 /// nil and bail (Cherminal doesn't use those controller-coupled features).
 final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
+    /// True when the process is hosting a unit-test bundle. We skip all
+    /// real launch work (ghostty_init, env prewarm, registry bootstrap) so the
+    /// logic tests run against a quiet host instead of booting a terminal.
+    private var isRunningTests: Bool { NSClassFromString("XCTestCase") != nil }
+
     func applicationWillFinishLaunching(_ notification: Notification) {
+        guard !isRunningTests else { return }
         // First thing: stand up diagnostics + crash capture so we record
         // everything, including faults in libghostty's C layer (which often
         // produce no standard crash report).
@@ -43,6 +49,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isRunningTests else { return }
         let env = AppEnvironment.shared
         Task { @MainActor in
             await env.registry.bootstrap()
