@@ -90,8 +90,12 @@ enum Diagnostics {
         // os_log copy is synchronous + crash-durable (survives in the unified
         // log even if the async file write below is lost to a crash).
         osLogger.log("[\(category, privacy: .public)] \(message, privacy: .public)")
-        let line = "\(timestamp()) [\(category)] \(message)\n"
+        // Build the timestamped line ON the serial queue: clog() is called from
+        // concurrent background parse tasks AND the main actor, and DateFormatter
+        // isn't safe under concurrent use. Serializing the format keeps the fault
+        // logger from itself faulting.
         queue.async {
+            let line = "\(timestamp()) [\(category)] \(message)\n"
             if let data = line.data(using: .utf8) { try? fileHandle?.write(contentsOf: data) }
         }
     }
@@ -107,9 +111,13 @@ enum Diagnostics {
                 exception.callStackSymbols
             )
         }
-        // Fatal signals: async-signal-safe ONLY. Pre-opened fd, no allocation,
-        // no Foundation. `backtrace`/`backtrace_symbols_fd` are signal-safe and
-        // write the stack straight to the fd.
+        // Fatal signals: minimal, pre-opened fd, no Foundation. `backtrace()` is
+        // async-signal-safe. `backtrace_symbols_fd()` is NOT strictly safe — it
+        // mallocs to symbolicate — so it's best-effort: it works for ordinary
+        // faults but a malloc-corruption crash (e.g. inside libghostty) may lose
+        // the symbolized trace. The dup2'd stderr capture is the reliable signal
+        // in that case. (TODO: for full safety, write raw frame addresses with a
+        // hand-rolled hex writer and symbolicate offline against the dSYM.)
         for sig in [SIGSEGV, SIGABRT, SIGILL, SIGBUS, SIGTRAP, SIGFPE] {
             signal(sig) { received in
                 if faultFD >= 0 {

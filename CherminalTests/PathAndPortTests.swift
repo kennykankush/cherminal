@@ -16,6 +16,16 @@ struct PathEncoderTests {
         #expect(url?.path.hasPrefix("/nope/zzz/") == true)
     }
 
+    @Test func decodeIsStableAcrossCalls() {
+        // Memoized — repeated decodes of the same encoded name return the same
+        // result (and skip the per-segment fileExists probes on the 2nd call).
+        let enc = "-nope-zzz-\(UUID().uuidString)-leaf"
+        let first = PathEncoder.decode(enc)
+        let second = PathEncoder.decode(enc)
+        #expect(first != nil)
+        #expect(first == second)
+    }
+
     @Test func resolvesRealPathOnDisk() {
         // The home dir definitely exists; encode it and confirm the fast path
         // walks it back exactly.

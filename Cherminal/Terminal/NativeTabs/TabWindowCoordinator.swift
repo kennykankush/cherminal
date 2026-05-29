@@ -129,8 +129,13 @@ final class TabWindowCoordinator: ObservableObject {
     /// otherwise the group would store a bare shell and reopen as one.
     func snapshot() -> [PersistedTab] {
         let detected = detectLiveConversations()
-        return controllers.map { c in
+        // Dedup by conversation id: two shell tabs in the same room can both
+        // resolve to the same agent session, and a group must never store two
+        // PersistedTab with the same id (their Identifiable id == conversationID).
+        var seen = Set<String>()
+        return controllers.compactMap { c in
             let convo = detected[ObjectIdentifier(c)] ?? c.conversation
+            guard seen.insert(convo.id).inserted else { return nil }
             return PersistedTab(
                 conversationID: convo.id,
                 agentRaw: convo.agent.rawValue,
@@ -210,7 +215,10 @@ final class TabWindowCoordinator: ObservableObject {
             if !liveConversationIDs.isEmpty { liveConversationIDs = [] }
         } else if linkTimer == nil {
             Task { await reconcileLiveSessions() }
-            linkTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+            // 8s matches the Context/Port poll cadence — finer than the live
+            // badge needs, and lsof-per-tab is one of the heavier polls, so
+            // this is pure standing-cost reduction.
+            linkTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.reconcileLiveSessions() }
             }
         }
@@ -234,14 +242,22 @@ final class TabWindowCoordinator: ObservableObject {
             LiveSessionLinker.inspect(pids: pids)
         }.value
 
+        // Re-validate after the await: a tab may have closed or its foreground
+        // process changed during the lsof. Iterate the CURRENT foreground map
+        // (not the pre-await snapshot) so we never apply to a closed controller
+        // or a reused pid.
         var live: Set<String> = []
-        for (pid, controller) in pidToController {
+        var adopted: Set<String> = []   // conversations already claimed this pass
+        for (pid, controller) in foregroundPIDs() {
             if controller.base.agent == .shell {
                 // A bare shell tab: adopt the agent it hand-launched (or revert
-                // to shell when none is running).
-                let detected = detectConversation(for: info[pid])
+                // to shell when none is running). If another shell tab in the
+                // same room already claimed this conversation this pass, keep
+                // this one a shell — two tabs must not share one identity.
+                var detected = detectConversation(for: info[pid])
+                if let d = detected, adopted.contains(d.id) { detected = nil }
                 controller.applyDetectedSession(detected)
-                if let detected { live.insert(detected.id) }
+                if let detected { adopted.insert(detected.id); live.insert(detected.id) }
             } else {
                 // Opened as a concrete agent (resume): identity is FIXED — never
                 // let cwd+recency detection repoint it to a different session in

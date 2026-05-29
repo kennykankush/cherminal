@@ -73,7 +73,11 @@ final class BookmarksManager: ObservableObject {
             } else if let real = registry.conversation(id: persisted.conversationID) {
                 convo = real
             } else {
-                continue
+                // The agent session is gone (file deleted / reconciled away).
+                // Reopen as a shell in the same room rather than silently
+                // dropping the tab. Fresh id so a stale agent id can't collide
+                // with a future real conversation.
+                convo = Conversation.shellConversation(cwd: URL(fileURLWithPath: persisted.roomPath))
             }
             coordinator.openOrFocus(convo)
         }
