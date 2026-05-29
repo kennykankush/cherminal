@@ -114,6 +114,7 @@ struct SidebarView: View {
                                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
                                                         isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id))
                                             .tag(convo.id as Conversation.ID?)
+                                            .contextMenu { rowMenu(convo) }
                                     }
                                 }
                             } header: {
@@ -143,6 +144,7 @@ struct SidebarView: View {
                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
                                         isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id))
                             .tag(convo.id as Conversation.ID?)
+                            .contextMenu { rowMenu(convo) }
                     }
                 }
                 .listStyle(.sidebar)
@@ -184,6 +186,16 @@ struct SidebarView: View {
                     .textCase(.uppercase)
                     .tracking(0.6)
             }
+        }
+    }
+
+    /// Right-click menu for a conversation row: open it, and pin/unpin.
+    @ViewBuilder
+    private func rowMenu(_ convo: Conversation) -> some View {
+        Button("Open") { coordinator.openOrFocus(convo) }
+        Button(pins.isPinned(convo.id) ? "Unpin" : "Pin",
+               systemImage: pins.isPinned(convo.id) ? "pin.slash" : "pin") {
+            pins.toggle(convo.id)
         }
     }
 
@@ -235,6 +247,7 @@ struct SidebarView: View {
                         isPinned: pins.isPinned(convo.id)
                     )
                     .tag(convo.id as Conversation.ID?)
+                    .contextMenu { rowMenu(convo) }
                 }
             }
             .listStyle(.sidebar)
