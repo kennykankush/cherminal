@@ -14,16 +14,24 @@ import GhosttyKit
 /// `--enable hooks` to honor the vision's "observe externally, never
 /// inject" rule.
 enum TerminalCommand {
+    /// Appended to agent commands so that when the agent exits you drop to a
+    /// normal interactive shell in the same room (output still on screen),
+    /// instead of Ghostty's "Process exited. Press any key to close." Cherminal
+    /// runs the agent AS the surface command (no shell underneath), so without
+    /// this the surface has nothing left alive once the agent quits. `exec`
+    /// replaces the bash that Ghostty spawned the command through.
+    private static let dropToShell = "; exec ${SHELL:-/bin/zsh} -il"
+
     static func resume(for conversation: Conversation) -> String? {
         switch conversation.agent {
         case .claudeCode:
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "claude")
-            return "\(bin) --dangerously-skip-permissions --resume \(id)"
+            return "\(bin) --dangerously-skip-permissions --resume \(id)\(dropToShell)"
         case .codex:
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "codex")
-            return "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)"
+            return "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)\(dropToShell)"
         case .shell, .unknown:
             // No command override → Ghostty spawns the user's default shell
             // in `cfg.workingDirectory`.
