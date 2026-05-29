@@ -57,16 +57,20 @@ enum Diagnostics {
         let faultURL = dir.appendingPathComponent("cherminal-fault.log")
         rotate(faultURL, in: dir, suffix: "fault")
         FileManager.default.createFile(atPath: faultURL.path, contents: nil)
-        faultFD = open(faultURL.path, O_WRONLY | O_APPEND)
+        faultFD = open(faultURL.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
         if faultFD >= 0 {
             dup2(faultFD, STDERR_FILENO)   // route libghostty/Zig/Swift panics here
             _ = "=== fault log ready \(timestamp()) ===\n".withCString { write(faultFD, $0, strlen($0)) }
         } else {
             log("diag", "fault log open failed errno=\(errno)")
         }
-        // Force the handler's globals to initialize now, before any fault.
+        // Force the handler's globals to initialize NOW (before any fault), so
+        // the signal handler never triggers swift_once/allocation on first use.
+        // crashFooter was previously missed — without this its first touch would
+        // run swift_once inside the handler, defeating async-signal-safety.
         _ = backtraceBuffer
         _ = crashHeader.count
+        _ = crashFooter.count
 
         installCrashHandlers()
         let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"

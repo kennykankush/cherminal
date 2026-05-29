@@ -24,8 +24,14 @@ final class PortsManager: ObservableObject {
         self.coordinator = coordinator
     }
 
-    /// Begin polling. Idempotent; safe to call when the Port tab appears.
+    /// Number of inspector panes currently showing the Port tab. The poll runs
+    /// while this is > 0 — so one window leaving the Port tab can't kill the
+    /// shared poll another window is still showing.
+    private var viewers = 0
+
+    /// Register a Port-tab viewer and begin polling if not already.
     func start(interval: TimeInterval = 4) {
+        viewers += 1
         guard timer == nil else { return }
         Task { await self.scan() }
         let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
@@ -34,7 +40,10 @@ final class PortsManager: ObservableObject {
         timer = t
     }
 
+    /// Deregister a viewer; stop polling only when the last one leaves.
     func stop() {
+        viewers = max(0, viewers - 1)
+        guard viewers == 0 else { return }
         timer?.invalidate()
         timer = nil
     }

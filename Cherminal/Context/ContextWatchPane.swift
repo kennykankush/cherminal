@@ -22,6 +22,10 @@ struct ContextWatchPane: View {
     @State private var usage: ConversationUsage?
     @State private var renamingGroup: Bookmark?
     @State private var renameText: String = ""
+    /// This pane's own Port-tab viewing state, so start/stop on the shared
+    /// PortsManager are balanced (exactly one start per stop) and its viewer
+    /// refcount stays correct across tab switches and disappearance.
+    @State private var portViewing = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,11 +38,12 @@ struct ContextWatchPane: View {
             case .port: portTab
             }
         }
-        // Poll dev ports only while the Port tab is visible.
+        // Poll dev ports only while the Port tab is visible. Balanced via
+        // `portViewing` so the shared manager's viewer refcount can't drift.
         .onChange(of: tab) { _, newTab in
-            if newTab == .port { ports.start() } else { ports.stop() }
+            setPortViewing(newTab == .port)
         }
-        .onDisappear { ports.stop() }
+        .onDisappear { setPortViewing(false) }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
         // Load + live-refresh usage for the active conversation. Re-parses
         // every few seconds so the context gauge tracks the conversation as
@@ -232,6 +237,14 @@ struct ContextWatchPane: View {
             return convo.previewText ?? convo.roomName
         }
         return p.roomName
+    }
+
+    /// Toggle this pane's Port-tab viewing exactly once per transition, so the
+    /// shared PortsManager's viewer count stays balanced.
+    private func setPortViewing(_ on: Bool) {
+        guard on != portViewing else { return }
+        portViewing = on
+        if on { ports.start() } else { ports.stop() }
     }
 
     private func openInBrowser(_ port: Int) {

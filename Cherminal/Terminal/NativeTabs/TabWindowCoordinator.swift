@@ -33,6 +33,10 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
+    /// Reentrancy guard: an `lsof` poll can outlast the 3s interval, so the
+    /// next tick must not start a second overlapping reconcile (which would
+    /// double-write tab identities / the live set).
+    private var reconciling = false
 
     init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager) {
         self.registry = registry
@@ -218,6 +222,10 @@ final class TabWindowCoordinator: ObservableObject {
     /// live, and clicking that conversation focuses this tab instead of
     /// spawning a duplicate `--resume`.
     private func reconcileLiveSessions() async {
+        guard !reconciling else { return }
+        reconciling = true
+        defer { reconciling = false }
+
         // Foreground pid → controller for every tab whose surface is up.
         let pidToController = foregroundPIDs()
         let pids = Array(pidToController.keys)
