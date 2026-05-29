@@ -186,7 +186,9 @@ enum PortScanner {
         task.arguments = args
         let pipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = Pipe()
+        // Discard stderr: lsof/ps warn about fds they can't stat, and an
+        // undrained Pipe() could fill and wedge the child mid-write.
+        task.standardError = FileHandle.nullDevice
         do {
             try task.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()

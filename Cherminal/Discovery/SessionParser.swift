@@ -59,7 +59,6 @@ enum SessionParser {
         // firstTimestamp.
         if let last = tailSummary.lastPrompt { summary.lastPrompt = last }
         if let ts = tailSummary.lastTimestamp { summary.lastTimestamp = ts }
-        if summary.lastTimestamp == nil { summary.lastTimestamp = tailSummary.lastTimestamp }
         if summary.firstTimestamp == nil { summary.firstTimestamp = tailSummary.firstTimestamp }
         if tailSummary.aiTitle != nil, summary.aiTitle == nil { summary.aiTitle = tailSummary.aiTitle }
         if summary.cwd == nil { summary.cwd = tailSummary.cwd }
@@ -87,14 +86,23 @@ enum SessionParser {
 
     private enum Scope { case head, tail }
 
+    // Shared formatters — these used to be allocated per `parseLines` call
+    // (twice per file, ×hundreds of files on a cold scan). ISO8601DateFormatter
+    // is safe for concurrent `date(from:)` once configured.
+    private static let iso: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     private static func parseLines(in data: Data, scope: Scope) -> Summary {
         var summary = Summary()
         guard !data.isEmpty else { return summary }
-
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let isoPlain = ISO8601DateFormatter()
-        isoPlain.formatOptions = [.withInternetDateTime]
 
         var start = data.startIndex
         let newline = UInt8(ascii: "\n")
@@ -216,10 +224,6 @@ enum SessionParser {
         if isCompleteFile, let lastNewline = data.lastIndex(of: UInt8(ascii: "\n")) {
             let trailing = data[data.index(after: lastNewline)..<data.endIndex]
             if !trailing.isEmpty {
-                let iso = ISO8601DateFormatter()
-                iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-                let isoPlain = ISO8601DateFormatter()
-                isoPlain.formatOptions = [.withInternetDateTime]
                 ingest(line: trailing, into: &summary, iso: iso, isoPlain: isoPlain)
             }
         }

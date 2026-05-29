@@ -367,9 +367,15 @@ private struct ConversationRow: View {
 }
 
 private extension Date {
+    // One shared formatter — allocating a RelativeDateTimeFormatter per row per
+    // render (this is read from every ConversationRow body) is a known hotspot.
+    static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
     var relativeShort: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .short
-        return formatter.localizedString(for: self, relativeTo: .now)
+        Date.relativeFormatter.localizedString(for: self, relativeTo: .now)
     }
 }

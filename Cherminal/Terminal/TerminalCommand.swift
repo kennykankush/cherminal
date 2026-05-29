@@ -17,11 +17,13 @@ enum TerminalCommand {
     static func resume(for conversation: Conversation) -> String? {
         switch conversation.agent {
         case .claudeCode:
+            guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "claude")
-            return "\(bin) --dangerously-skip-permissions --resume \(conversation.id)"
+            return "\(bin) --dangerously-skip-permissions --resume \(id)"
         case .codex:
+            guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "codex")
-            return "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(conversation.id)"
+            return "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)"
         case .shell, .unknown:
             // No command override → Ghostty spawns the user's default shell
             // in `cfg.workingDirectory`.
@@ -29,9 +31,34 @@ enum TerminalCommand {
         }
     }
 
+    /// Session IDs are agent-issued UUIDs that we interpolate into a shell
+    /// command string. Reject anything outside the UUID alphabet so a malformed
+    /// id can never inject shell metacharacters; nil falls back to a bare shell.
+    private static let idAllowed = CharacterSet(charactersIn: "0123456789abcdefABCDEF-")
+    private static func safeSessionID(_ id: String) -> String? {
+        guard !id.isEmpty, id.unicodeScalars.allSatisfy(idAllowed.contains) else {
+            clog("tabs", "refusing to resume — unsafe session id \(id)")
+            return nil
+        }
+        return id
+    }
+
     static func surfaceConfig(for conversation: Conversation) -> Ghostty.SurfaceConfiguration {
         var cfg = Ghostty.SurfaceConfiguration()
-        cfg.workingDirectory = conversation.roomPath.path
+
+        // Guard against stale conversations whose room folder has since been
+        // deleted: spawning a Ghostty surface with a non-existent
+        // workingDirectory can fault in the C layer. Fall back to $HOME.
+        let roomPath = conversation.roomPath.path
+        var isDir: ObjCBool = false
+        let exists = FileManager.default.fileExists(atPath: roomPath, isDirectory: &isDir) && isDir.boolValue
+        if exists {
+            cfg.workingDirectory = roomPath
+        } else {
+            cfg.workingDirectory = NSHomeDirectory()
+            clog("tabs", "stale room — \(roomPath) missing; cwd → $HOME")
+        }
+
         cfg.command = resume(for: conversation)
         cfg.environmentVariables = BinaryResolver.shared.environment()
         return cfg

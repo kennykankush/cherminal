@@ -11,14 +11,6 @@ struct PersistedTab: Codable, Hashable, Sendable, Identifiable {
     let roomPath: String
 }
 
-/// The "continue where you left off" snapshot — overwritten on every tab
-/// change, restored on launch.
-struct LastSessionState: Codable, Sendable {
-    let tabs: [PersistedTab]
-    let activeConversationID: String?
-    let savedAt: Date
-}
-
 /// A user-named bundle of tabs the user explicitly bookmarked. Chrome's
 /// tab-group / saved-tabs pattern.
 struct Bookmark: Codable, Hashable, Sendable, Identifiable {

@@ -45,14 +45,23 @@ struct ContextWatchPane: View {
         // it grows. Fully local — reads the session JSONL only.
         .task(id: conversation?.id) {
             usage = nil
-            guard let convo = conversation, convo.agent == .claudeCode else { return }
+            guard let convo = conversation,
+                  convo.agent == .claudeCode || convo.agent == .codex else { return }
             let file = convo.sessionFile
+            let agent = convo.agent
+            // Claude usage streams append-only — fold in deltas across polls
+            // instead of re-reading the whole session each time. (Codex carries
+            // a full token_count record in its tail, so it re-reads the tail.)
+            let accumulator = ClaudeUsageAccumulator()
             while !Task.isCancelled {
                 let parsed = await Task.detached(priority: .utility) {
-                    ConversationUsageParser.parse(sessionFile: file)
+                    agent == .codex
+                        ? ConversationUsageParser.parseCodex(sessionFile: file)
+                        : accumulator.ingest(file: file)
                 }.value
                 if Task.isCancelled { break }
-                usage = parsed
+                // Keep the last good reading if a poll found nothing new.
+                if let parsed { usage = parsed }
                 try? await Task.sleep(for: .seconds(8))
             }
         }
@@ -78,6 +87,7 @@ struct ContextWatchPane: View {
                 VStack(alignment: .leading, spacing: CHM.Space.xl) {
                     if let usage {
                         contextSection(usage)
+                        if !usage.rateWindows.isEmpty { limitsSection(usage) }
                         tokensSection(usage)
                     }
                     sessionSection(convo)
@@ -257,6 +267,33 @@ struct ContextWatchPane: View {
                 .font(CHM.Font.caption)
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
+            }
+        }
+    }
+
+    private func limitsSection(_ u: ConversationUsage) -> some View {
+        section("Usage limits") {
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                ForEach(u.rateWindows) { w in
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack {
+                            Text(w.label)
+                                .font(CHM.Font.captionEmphasis)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(Int(w.usedPercent))%")
+                                .font(CHM.Font.captionEmphasis)
+                                .foregroundStyle(usageColor(w.usedPercent))
+                                .monospacedDigit()
+                        }
+                        usageBar(percent: w.usedPercent)
+                        if let resets = w.resetsAt {
+                            Text("resets \(resets.formatted(.relative(presentation: .named)))")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                }
             }
         }
     }

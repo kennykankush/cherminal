@@ -18,7 +18,12 @@ import os
 final class ConversationRegistry: ObservableObject {
     private static let logger = Logger(subsystem: "dev.hamulia.Cherminal", category: "registry")
 
-    @Published private(set) var conversations: [Conversation] = []
+    @Published private(set) var conversations: [Conversation] = [] {
+        didSet { rebuildRooms() }
+    }
+    /// Derived grouping, recomputed only when `conversations` changes — not on
+    /// every render or port-scan tick (both used to call the old computed var).
+    @Published private(set) var rooms: [Room] = []
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var lastError: String?
 
@@ -85,9 +90,9 @@ final class ConversationRegistry: ObservableObject {
         conversations.first { $0.id == id }
     }
 
-    var rooms: [Room] {
+    private func rebuildRooms() {
         let grouped = Dictionary(grouping: conversations, by: \.roomPath)
-        return grouped
+        rooms = grouped
             .map {
                 Room(id: $0.key.path,
                      path: $0.key,
@@ -99,8 +104,12 @@ final class ConversationRegistry: ObservableObject {
     // MARK: - Scanner
 
     private func runScan() async {
+        clog("scan", "start (had \(conversations.count) conversations)")
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            clog("scan", "finished — \(conversations.count) conversations")
+        }
 
         // Run Claude and Codex scanners concurrently. Each emits over its
         // own AsyncStream; we round-robin between the two iterators and

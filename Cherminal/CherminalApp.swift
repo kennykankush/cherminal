@@ -26,6 +26,11 @@ struct CherminalApp: App {
 /// nil and bail (Cherminal doesn't use those controller-coupled features).
 final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // First thing: stand up diagnostics + crash capture so we record
+        // everything, including faults in libghostty's C layer (which often
+        // produce no standard crash report).
+        Diagnostics.bootstrap()
+
         // libghostty has process-wide globals that must be initialized before
         // any other ghostty API call — segfaults otherwise. Must run before
         // AppEnvironment.shared (which constructs Ghostty.App) is first touched.

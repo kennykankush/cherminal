@@ -119,7 +119,10 @@ enum ConversationSearcher {
         task.arguments = args
         let pipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = Pipe()
+        // Discard stderr to the null device. grep across ~1.6 GB emits
+        // permission / "no such file" warnings; an undrained Pipe() could fill
+        // its 64 KB buffer and wedge grep while we wait on stdout.
+        task.standardError = FileHandle.nullDevice
         do {
             try task.run()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()

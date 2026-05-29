@@ -310,13 +310,22 @@ struct CodexSessionScanner {
         return nil
     }
 
+    // Shared formatters — `isoDate` is called per line while reverse-scanning
+    // the tail, so allocating two formatters per call added up on cold scans.
+    private static let isoFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     private static func isoDate(from string: String) -> Date? {
         if string.isEmpty { return nil }
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = withFraction.date(from: string) { return d }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: string)
+        if let d = isoFraction.date(from: string) { return d }
+        return isoPlain.date(from: string)
     }
 }

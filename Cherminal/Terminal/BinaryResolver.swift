@@ -21,13 +21,44 @@ final class BinaryResolver: @unchecked Sendable {
     private let logger = Logger(subsystem: "dev.hamulia.Cherminal", category: "binresolver")
     private let lock = NSLock()
     private var capturedPath: String?
+    private var capturedExtras: [String: String] = [:]
     private var binaryCache: [String: String] = [:]
+    /// Balanced enter()/leave() around the background capture so the first
+    /// surface spawn can wait for PATH without us blocking the launch thread.
+    private let readyGroup = DispatchGroup()
+    private var prewarmStarted = false
+
+    /// Kick off shell-env capture on a background thread. Non-blocking: returns
+    /// immediately so app launch is never gated on sourcing the user's
+    /// `~/.zshrc` (which can run fastfetch, nvm, pyenv, … — easily seconds).
+    /// `environment()` / `path(for:)` block briefly (bounded) the first time
+    /// they're called if capture hasn't finished yet.
+    func prewarm() {
+        lock.lock()
+        guard !prewarmStarted else { lock.unlock(); return }
+        prewarmStarted = true
+        readyGroup.enter()
+        lock.unlock()
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { self?.readyGroup.leave() }
+            self?.capture()
+        }
+    }
+
+    /// Block until the background capture finishes, capped so a pathologically
+    /// slow rc file can never hang a surface spawn. By the time the first
+    /// surface spawns (after registry bootstrap's awaits) capture is normally
+    /// already done, so this returns immediately in the common case.
+    private func waitUntilReady() {
+        lock.lock(); let started = prewarmStarted; lock.unlock()
+        guard started else { return }
+        _ = readyGroup.wait(timeout: .now() + 3)
+    }
 
     /// Pull `PATH` (and a curated set of other useful env vars) out of the
-    /// user's login + interactive zsh once. Call at app launch so subsequent
-    /// `environment()` lookups are instant.
-    func prewarm() {
-        guard capturedPath == nil else { return }
+    /// user's login + interactive zsh once.
+    private func capture() {
         let sentinel = "BELVEDERE_ENV_BEGIN"
         let end = "BELVEDERE_ENV_END"
         let script = """
@@ -67,12 +98,11 @@ final class BinaryResolver: @unchecked Sendable {
         capturedExtras = captured.filter { $0.key != "PATH" }
     }
 
-    private var capturedExtras: [String: String] = [:]
-
     /// Env vars Cherminal injects into every Ghostty surface. The PATH
     /// entry is the load-bearing one; the rest are nice-to-haves so locale
     /// / shell-aware tools behave identically to the user's terminal.
     func environment() -> [String: String] {
+        waitUntilReady()
         lock.lock(); defer { lock.unlock() }
         var env: [String: String] = capturedExtras
         if let path = capturedPath {
@@ -84,6 +114,7 @@ final class BinaryResolver: @unchecked Sendable {
     /// Resolve a single command name to an absolute path using `command -v`
     /// inside the prewarmed PATH. Cached after first lookup.
     func path(for name: String) -> String {
+        waitUntilReady()
         lock.lock()
         if let cached = binaryCache[name] {
             lock.unlock(); return cached
@@ -122,11 +153,17 @@ final class BinaryResolver: @unchecked Sendable {
         task.arguments = ["-ilc", script]
         let pipe = Pipe()
         task.standardOutput = pipe
-        task.standardError = Pipe() // discard
+        // Discard stderr to the null device. A live Pipe() here would never be
+        // drained, so a chatty rc file could fill its 64 KB buffer and wedge
+        // the shell mid-write.
+        task.standardError = FileHandle.nullDevice
         do {
             try task.run()
-            task.waitUntilExit()
+            // Read stdout to EOF *before* waiting. rc files routinely emit more
+            // than the 64 KB pipe buffer (fastfetch banners, motd); waiting
+            // first would deadlock — the shell blocks writing, we block waiting.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
             return String(data: data, encoding: .utf8)
         } catch {
             return nil

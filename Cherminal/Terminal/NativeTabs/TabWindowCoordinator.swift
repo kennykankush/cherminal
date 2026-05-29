@@ -36,12 +36,15 @@ final class TabWindowCoordinator: ObservableObject {
     /// Open `conversation` in a new native tab, or select its existing tab.
     @discardableResult
     func openOrFocus(_ conversation: Conversation) -> TerminalTabWindowController? {
+        clog("tabs", "openOrFocus id=\(conversation.id) agent=\(conversation.agent.rawValue) room=\(conversation.roomName) path=\(conversation.roomPath.path)")
         if let existing = controllers.first(where: { $0.conversation.id == conversation.id }) {
+            clog("tabs", "→ focus existing tab")
             select(existing)
             return existing
         }
 
         guard ghostty.app != nil else {
+            clog("tabs", "→ ABORT: ghostty app not ready")
             Self.logger.error("openOrFocus before ghostty ready")
             return nil
         }
@@ -74,7 +77,9 @@ final class TabWindowCoordinator: ObservableObject {
                   controller.holder.surfaceView == nil,
                   let app = self.ghostty.app else { return }
             let config = TerminalCommand.surfaceConfig(for: conversation)
+            clog("tabs", "spawn surface id=\(conversation.id) cwd=\(config.workingDirectory ?? "nil") cmd=\(config.command ?? "default-shell")")
             controller.holder.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+            clog("tabs", "spawn surface ok id=\(conversation.id)")
         }
         return controller
     }

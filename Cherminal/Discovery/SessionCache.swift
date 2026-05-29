@@ -84,16 +84,6 @@ final class SessionCache: @unchecked Sendable {
                 pinned_at REAL NOT NULL DEFAULT (strftime('%s', 'now'))
             );
             """)
-        // Singleton row (id always 1) holding the "continue where you left
-        // off" tab snapshot. Overwritten on every tab change.
-        try exec("""
-            CREATE TABLE IF NOT EXISTS last_session (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                tabs_json TEXT NOT NULL,
-                active_id TEXT,
-                saved_at REAL NOT NULL
-            );
-            """)
         try exec("""
             CREATE TABLE IF NOT EXISTS bookmarks (
                 id TEXT PRIMARY KEY,
@@ -257,62 +247,6 @@ final class SessionCache: @unchecked Sendable {
         sqlite3_bind_text(stmt, 1, sessionID, -1, Self.sqliteTransient)
         sqlite3_step(stmt)
     }
-
-    // MARK: - Last session (continue where you left off)
-
-    func loadLastSession() -> LastSessionState? {
-        lock.lock(); defer { lock.unlock() }
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        let sql = "SELECT tabs_json, active_id, saved_at FROM last_session WHERE id = 1;"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
-
-        guard let jsonPtr = sqlite3_column_text(stmt, 0) else { return nil }
-        let json = String(cString: jsonPtr)
-        guard let data = json.data(using: .utf8),
-              let tabs = try? jsonDecoder.decode([PersistedTab].self, from: data) else { return nil }
-
-        let activeID: String? = sqlite3_column_type(stmt, 1) == SQLITE_NULL
-            ? nil
-            : String(cString: sqlite3_column_text(stmt, 1))
-        let savedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2))
-
-        return LastSessionState(tabs: tabs, activeConversationID: activeID, savedAt: savedAt)
-    }
-
-    func saveLastSession(_ state: LastSessionState) {
-        guard let data = try? jsonEncoder.encode(state.tabs),
-              let json = String(data: data, encoding: .utf8) else { return }
-        lock.lock(); defer { lock.unlock() }
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        let sql = """
-            INSERT INTO last_session (id, tabs_json, active_id, saved_at)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                tabs_json = excluded.tabs_json,
-                active_id = excluded.active_id,
-                saved_at = excluded.saved_at;
-            """
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        sqlite3_bind_text(stmt, 1, json, -1, Self.sqliteTransient)
-        if let activeID = state.activeConversationID {
-            sqlite3_bind_text(stmt, 2, activeID, -1, Self.sqliteTransient)
-        } else {
-            sqlite3_bind_null(stmt, 2)
-        }
-        sqlite3_bind_double(stmt, 3, state.savedAt.timeIntervalSince1970)
-        sqlite3_step(stmt)
-    }
-
-    func clearLastSession() {
-        lock.lock(); defer { lock.unlock() }
-        sqlite3_exec(db, "DELETE FROM last_session WHERE id = 1;", nil, nil, nil)
-    }
-
-    // (Window-per-tab persistence methods removed — TabsManager handles
-    // session persistence via the original tabs_json schema.)
 
     // MARK: - Bookmarks
 
