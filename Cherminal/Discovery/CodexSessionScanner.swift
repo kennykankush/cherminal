@@ -13,63 +13,17 @@ import Foundation
 ///
 /// Cache-aware. Two-pass emission (hits first, misses parsed concurrently).
 struct CodexSessionScanner {
-    private static let concurrencyLimit: Int = 8
-
     let cache: SessionCache?
 
-    enum Update: Sendable {
-        case cacheHits([Conversation])
-        case parsed(Conversation)
-        case finished(livePaths: Set<String>)
-    }
-
-    func scan() -> AsyncStream<Update> {
-        AsyncStream(bufferingPolicy: .unbounded) { continuation in
-            Task.detached(priority: .utility) {
-                await self.run(into: continuation)
-                continuation.finish()
-            }
-        }
-    }
-
-    // MARK: - Run
-
-    private func run(into continuation: AsyncStream<Update>.Continuation) async {
-        let sessionsRoot = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".codex/sessions", isDirectory: true)
-        let indexFile = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent(".codex/session_index.jsonl")
-
-        let titles = readTitleIndex(at: indexFile)
-        let candidates = enumerateRolloutFiles(under: sessionsRoot)
-
-        var hits: [Conversation] = []
-        var misses: [Candidate] = []
-
-        for candidate in candidates {
-            if let cache,
-               let entry = cache.get(path: candidate.file.path,
-                                     mtime: candidate.mtime,
-                                     size: candidate.size),
-               let convo = Conversation(persisted: entry.summary, sessionFile: candidate.file) {
-                hits.append(convo)
-            } else {
-                misses.append(candidate)
-            }
-        }
-
-        if !hits.isEmpty {
-            continuation.yield(.cacheHits(hits.sorted { $0.lastActivityAt > $1.lastActivityAt }))
-        }
-
-        if !misses.isEmpty {
-            await parseConcurrently(misses, titles: titles, continuation: continuation)
-        }
-
-        // Reconcile is the registry's job (it owns the union of all
-        // scanners' live paths). Just report what we saw.
-        let live = Set(candidates.map { $0.file.path })
-        continuation.yield(.finished(livePaths: live))
+    func scan() -> AsyncStream<SessionScanEngine.Update> {
+        let cache = self.cache
+        return SessionScanEngine.stream(
+            cache: cache,
+            // Prep: read Codex's title index once, hand it to every parse.
+            prepare: { Self.readTitleIndex() },
+            enumerate: { _ in Self.enumerateRolloutFiles() },
+            parse: { candidate, titles in Self.parseOne(candidate, titles: titles, cache: cache) }
+        )
     }
 
     // MARK: - Title index
@@ -77,7 +31,9 @@ struct CodexSessionScanner {
     /// Build {session-id → thread_name} from `session_index.jsonl`. Duplicates
     /// in the file are normal (Codex appends a new line each time a session
     /// is finalized); we keep the most recent name.
-    private func readTitleIndex(at url: URL) -> [String: String] {
+    private static func readTitleIndex() -> [String: String] {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex/session_index.jsonl")
         guard let data = try? Data(contentsOf: url) else { return [:] }
         var out: [String: String] = [:]
         let newline = UInt8(ascii: "\n")
@@ -93,7 +49,7 @@ struct CodexSessionScanner {
         return out
     }
 
-    private func ingest(line: Data.SubSequence, into out: inout [String: String]) {
+    private static func ingest(line: Data.SubSequence, into out: inout [String: String]) {
         guard let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return }
         guard let id = obj["id"] as? String, let name = obj["thread_name"] as? String, !name.isEmpty else { return }
         out[id] = name
@@ -101,13 +57,9 @@ struct CodexSessionScanner {
 
     // MARK: - File enumeration
 
-    private struct Candidate: Sendable {
-        let file: URL
-        let mtime: Double
-        let size: Int64
-    }
-
-    private func enumerateRolloutFiles(under root: URL) -> [Candidate] {
+    private static func enumerateRolloutFiles() -> [ScanCandidate] {
+        let root = URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent(".codex/sessions", isDirectory: true)
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(
             at: root,
@@ -115,7 +67,7 @@ struct CodexSessionScanner {
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return [] }
 
-        var out: [Candidate] = []
+        var out: [ScanCandidate] = []
         for case let url as URL in enumerator {
             let name = url.lastPathComponent
             guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else { continue }
@@ -124,39 +76,16 @@ struct CodexSessionScanner {
             let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
             let size = Int64(values?.fileSize ?? 0)
             guard size > 0 else { continue }
-            out.append(Candidate(file: url, mtime: mtime, size: size))
+            // Codex carries its cwd in-file (session_meta), so no room hint.
+            out.append(ScanCandidate(file: url, mtime: mtime, size: size, roomHint: nil))
         }
         return out
     }
 
-    // MARK: - Parse pass
-
-    private func parseConcurrently(
-        _ candidates: [Candidate],
-        titles: [String: String],
-        continuation: AsyncStream<Update>.Continuation
-    ) async {
-        await withTaskGroup(of: Conversation?.self) { group in
-            var iterator = candidates.makeIterator()
-
-            for _ in 0..<Self.concurrencyLimit {
-                guard let next = iterator.next() else { break }
-                group.addTask { Self.parseOne(next, titles: titles, cache: self.cache) }
-            }
-
-            while let result = await group.next() {
-                if let convo = result {
-                    continuation.yield(.parsed(convo))
-                }
-                if let next = iterator.next() {
-                    group.addTask { Self.parseOne(next, titles: titles, cache: self.cache) }
-                }
-            }
-        }
-    }
+    // MARK: - Parse one
 
     private static func parseOne(
-        _ candidate: Candidate,
+        _ candidate: ScanCandidate,
         titles: [String: String],
         cache: SessionCache?
     ) -> Conversation? {

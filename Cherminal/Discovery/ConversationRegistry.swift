@@ -124,46 +124,35 @@ final class ConversationRegistry: ObservableObject {
             clog("scan", "finished — \(conversations.count) conversations")
         }
 
-        // Run Claude and Codex scanners concurrently. Each emits over its
-        // own AsyncStream; we round-robin between the two iterators and
-        // publish after every update so the sidebar fills in incrementally
-        // as either agent's parses complete.
+        // Run every agent source concurrently through the shared engine. Each
+        // emits over its own AsyncStream; we round-robin the iterators and
+        // publish after every update so the sidebar fills in incrementally as
+        // either source's parses complete.
         var staged: [String: Conversation] = Dictionary(
             uniqueKeysWithValues: conversations.map { ($0.id, $0) }
         )
-        var claudeLive: Set<String> = []
-        var codexLive: Set<String> = []
+        var live: Set<String> = []
 
-        let claudeScanner = ClaudeSessionScanner(cache: cache)
-        let codexScanner = CodexSessionScanner(cache: cache)
-        var claudeIter = claudeScanner.scan().makeAsyncIterator()
-        var codexIter = codexScanner.scan().makeAsyncIterator()
-        var claudeOpen = true
-        var codexOpen = true
+        var iterators = [
+            ClaudeSessionScanner(cache: cache).scan().makeAsyncIterator(),
+            CodexSessionScanner(cache: cache).scan().makeAsyncIterator(),
+        ]
+        var open = Array(repeating: true, count: iterators.count)
 
-        while claudeOpen || codexOpen {
-            if claudeOpen {
-                if let update = await claudeIter.next() {
-                    apply(claude: update, staged: &staged, claudeLive: &claudeLive)
+        while open.contains(true) {
+            for i in iterators.indices where open[i] {
+                if let update = await iterators[i].next() {
+                    apply(update, staged: &staged, live: &live)
                 } else {
-                    claudeOpen = false
-                }
-            }
-            if codexOpen {
-                if let update = await codexIter.next() {
-                    apply(codex: update, staged: &staged, codexLive: &codexLive)
-                } else {
-                    codexOpen = false
+                    open[i] = false
                 }
             }
         }
 
-        // Authoritative reconciliation: drop staged entries (and cache
-        // rows) that neither scanner saw on this pass. The cache reconcile
-        // has to live HERE, not inside individual scanners — each scanner
-        // only knows its own live set, so a per-scanner reconcile would
-        // clobber the other agent's rows.
-        let live = claudeLive.union(codexLive)
+        // Authoritative reconciliation: drop staged entries (and cache rows)
+        // that no source saw on this pass. This has to live HERE, not inside a
+        // source — each source only knows its own live set, so a per-source
+        // reconcile would clobber the others' rows.
         staged = staged.filter { _, convo in live.contains(convo.sessionFile.path) }
         cache?.reconcile(keepingPaths: live)
         publish(from: staged)
@@ -176,46 +165,25 @@ final class ConversationRegistry: ObservableObject {
     private var lastPublishAt: Date = .distantPast
 
     private func apply(
-        claude update: ClaudeSessionScanner.Update,
+        _ update: SessionScanEngine.Update,
         staged: inout [String: Conversation],
-        claudeLive: inout Set<String>
+        live: inout Set<String>
     ) {
         switch update {
         case .cacheHits(let hits):
             for hit in hits {
                 staged[hit.id] = hit
-                claudeLive.insert(hit.sessionFile.path)
+                live.insert(hit.sessionFile.path)
             }
             publish(from: staged)
         case .parsed(let convo):
             staged[convo.id] = convo
-            claudeLive.insert(convo.sessionFile.path)
+            live.insert(convo.sessionFile.path)
             throttledPublish(from: staged)
-        case .finished(let result):
-            for convo in result.conversations { staged[convo.id] = convo }
-            claudeLive.formUnion(result.livePaths)
+        case .finished(let conversations, let livePaths):
+            for convo in conversations { staged[convo.id] = convo }
+            live.formUnion(livePaths)
             publish(from: staged)
-        }
-    }
-
-    private func apply(
-        codex update: CodexSessionScanner.Update,
-        staged: inout [String: Conversation],
-        codexLive: inout Set<String>
-    ) {
-        switch update {
-        case .cacheHits(let hits):
-            for hit in hits {
-                staged[hit.id] = hit
-                codexLive.insert(hit.sessionFile.path)
-            }
-            publish(from: staged)
-        case .parsed(let convo):
-            staged[convo.id] = convo
-            codexLive.insert(convo.sessionFile.path)
-            throttledPublish(from: staged)
-        case .finished(let livePaths):
-            codexLive.formUnion(livePaths)
         }
     }
 
