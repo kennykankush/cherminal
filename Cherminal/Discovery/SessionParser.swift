@@ -13,6 +13,9 @@ enum SessionParser {
     static let tailBytes: Int = 16 * 1024
 
     struct Summary: Sendable {
+        /// User's manual `/rename` (a `custom-title` record). Highest-priority
+        /// title — an explicit name always beats the auto-derived one.
+        var customTitle: String?
         var aiTitle: String?
         var lastPrompt: String?
         var firstTimestamp: Date?
@@ -61,6 +64,8 @@ enum SessionParser {
         if let ts = tailSummary.lastTimestamp { summary.lastTimestamp = ts }
         if summary.firstTimestamp == nil { summary.firstTimestamp = tailSummary.firstTimestamp }
         if tailSummary.aiTitle != nil, summary.aiTitle == nil { summary.aiTitle = tailSummary.aiTitle }
+        // Latest rename wins — a `/rename` near the tail overrides an earlier one.
+        if let custom = tailSummary.customTitle { summary.customTitle = custom }
         if summary.cwd == nil { summary.cwd = tailSummary.cwd }
         if summary.firstUserMessage == nil { summary.firstUserMessage = tailSummary.firstUserMessage }
 
@@ -152,6 +157,11 @@ enum SessionParser {
         }
 
         switch obj["type"] as? String {
+        case "custom-title":
+            // The user's manual `/rename`.
+            if let title = obj["customTitle"] as? String, !title.isEmpty {
+                summary.customTitle = title
+            }
         case "ai-title":
             if let title = obj["aiTitle"] as? String, !title.isEmpty {
                 summary.aiTitle = title

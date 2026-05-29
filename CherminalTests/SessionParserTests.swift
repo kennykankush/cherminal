@@ -54,6 +54,19 @@ struct SessionParserTests {
         #expect(s.lastTimestamp != nil)
     }
 
+    @Test func customTitleFromRenameWins() throws {
+        // `/rename` writes a custom-title record; it must be captured and take
+        // precedence over the auto ai-title.
+        let url = Fixtures.writeJSONL([
+            #"{"type":"user","timestamp":"2026-05-01T10:00:00.000Z","message":{"role":"user","content":"first prompt"}}"#,
+            #"{"type":"ai-title","aiTitle":"Auto Title"}"#,
+            #"{"type":"custom-title","customTitle":"My Renamed Session","sessionId":"x"}"#,
+        ])
+        let s = try SessionParser.summarize(file: url)
+        #expect(s.customTitle == "My Renamed Session")
+        #expect(s.aiTitle == "Auto Title")
+    }
+
     @Test func emptyFileYieldsZeroLines() throws {
         let url = Fixtures.writeJSONL([])   // just a newline
         let s = try SessionParser.summarize(file: url)
