@@ -101,11 +101,16 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Persist the open tabs so the next launch reopens them. Fires on a clean
-    /// quit (⌘Q / app menu); a crash skips it, leaving the prior snapshot intact.
-    func applicationWillTerminate(_ notification: Notification) {
-        guard !isRunningTests else { return }
-        AppEnvironment.shared.coordinator.persistSession()
+    /// Persist the open tabs so the next launch reopens them. Done in
+    /// `shouldTerminate` (not `willTerminate`) because macOS closes every window
+    /// — each firing `windowWillClose`, which empties the controller list —
+    /// *before* `willTerminate`, so a snapshot taken there is always empty. Here
+    /// the tabs are still alive. A crash skips this, leaving the prior snapshot.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if !isRunningTests {
+            AppEnvironment.shared.coordinator.persistSession()
+        }
+        return .terminateNow
     }
 
     // MARK: - Groups menu
