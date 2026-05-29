@@ -108,6 +108,7 @@ struct SidebarView: View {
                                 ForEach(room.conversations) { convo in
                                     ConversationRow(conversation: convo,
                                                     isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                                    isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                                     isPinned: pins.isPinned(convo.id))
                                         .tag(convo.id as Conversation.ID?)
                                 }
@@ -134,6 +135,7 @@ struct SidebarView: View {
                     ForEach(filteredConversations) { convo in
                         ConversationRow(conversation: convo, showRoom: true,
                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                         isPinned: pins.isPinned(convo.id))
                             .tag(convo.id as Conversation.ID?)
                     }
@@ -161,6 +163,7 @@ struct SidebarView: View {
                 ForEach(pinnedConversations) { convo in
                     ConversationRow(conversation: convo, showRoom: true,
                                     isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                    isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                     isPinned: true)
                         .contentShape(Rectangle())
                         .onTapGesture { coordinator.openOrFocus(convo) }
@@ -223,6 +226,7 @@ struct SidebarView: View {
                         showRoom: true,
                         snippet: bodyHits[convo.sessionFile.path],
                         isLive: coordinator.liveConversationIDs.contains(convo.id),
+                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                         isPinned: pins.isPinned(convo.id)
                     )
                     .tag(convo.id as Conversation.ID?)
@@ -380,8 +384,33 @@ private struct ConversationRow: View {
     var snippet: String? = nil
     /// This conversation is running live in an open tab right now.
     var isLive: Bool = false
+    /// Its agent just finished a turn and is waiting on you ("your turn").
+    var isAwaiting: Bool = false
     /// Pinned — show a small marker so pin state is visible while browsing.
     var isPinned: Bool = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var breathing = false
+
+    /// Calm ambient status: blue "your turn" light (full + halo, slow breathe)
+    /// when awaiting; a dim blue dot when live-but-working; nothing when idle.
+    @ViewBuilder private var statusDot: some View {
+        if isAwaiting {
+            ZStack {
+                Circle().fill(CHM.Color.attentionHalo).frame(width: 13, height: 13).blur(radius: 2.5)
+                Circle().fill(CHM.Color.attention).frame(width: 7, height: 7)
+            }
+            .opacity(breathing ? 1.0 : 0.85)
+            .animation(reduceMotion ? nil : CHM.Motion.breathe, value: breathing)
+            .onAppear { breathing = true }
+            .help("Waiting for you")
+        } else if isLive {
+            Circle()
+                .fill(CHM.Color.attention.opacity(0.30))
+                .frame(width: 6, height: 6)
+                .help("Running in an open tab")
+        }
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: CHM.Space.sm) {
@@ -389,12 +418,7 @@ private struct ConversationRow: View {
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 5) {
-                    if isLive {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
-                            .help("Running in an open tab")
-                    }
+                    statusDot
                     Text(conversation.previewText ?? "Untitled conversation")
                         .font(.system(size: 13))
                         .foregroundStyle(conversation.previewText == nil ? .secondary : .primary)

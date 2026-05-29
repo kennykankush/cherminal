@@ -31,6 +31,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// or resumed sessions). The sidebar reads this to show a live indicator.
     @Published private(set) var liveConversationIDs: Set<String> = []
 
+    /// Conversations whose agent just finished a turn and is waiting on you —
+    /// driven by Ghostty's bell (a command-finished proxy). The sidebar shows a
+    /// calm blue "your turn" light for these; cleared when you focus the tab.
+    @Published private(set) var awaitingTurnIDs: Set<String> = []
+
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
     /// Reentrancy guard: an `lsof` poll can outlast the 3s interval, so the
@@ -42,6 +47,36 @@ final class TabWindowCoordinator: ObservableObject {
         self.registry = registry
         self.ghostty = ghostty
         self.bookmarks = bookmarks
+
+        // "Your turn" attention light: flag a tab when its agent rings the bell
+        // (turn finished), clear it the moment you focus that tab.
+        NotificationCenter.default.addObserver(
+            forName: .ghosttyBellDidRing, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated { self?.handleBell(note.object) }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated { self?.clearAwaiting(forWindow: note.object as? NSWindow) }
+        }
+    }
+
+    // MARK: - Attention light
+
+    private func handleBell(_ object: Any?) {
+        guard let surface = object as? Ghostty.SurfaceView,
+              let controller = controllers.first(where: { $0.holder.surfaceView === surface })
+        else { return }
+        // If you're already looking at this tab, there's nothing to flag.
+        if controller.window?.isKeyWindow == true { return }
+        awaitingTurnIDs.insert(controller.conversation.id)
+    }
+
+    private func clearAwaiting(forWindow window: NSWindow?) {
+        guard let window,
+              let controller = controllers.first(where: { $0.window === window }) else { return }
+        awaitingTurnIDs.remove(controller.conversation.id)
     }
 
     // MARK: - Open / focus
