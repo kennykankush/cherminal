@@ -51,11 +51,14 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !isRunningTests else { return }
         let env = AppEnvironment.shared
+        // Open the first window immediately — Ghostty is ready synchronously
+        // once AppEnvironment is built, so the terminal must not wait behind the
+        // session scan. The sidebar then fills in as bootstrap streams results.
+        if env.coordinator.isEmpty {
+            env.coordinator.openFreshShell()
+        }
         Task { @MainActor in
             await env.registry.bootstrap()
-            if env.coordinator.isEmpty {
-                env.coordinator.openFreshShell()
-            }
         }
     }
 
