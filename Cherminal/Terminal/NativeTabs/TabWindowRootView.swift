@@ -13,8 +13,11 @@ struct TabWindowRootView: View {
     /// title, and context pane follow when the tab adopts a live agent session.
     private var conversation: Conversation { holder.conversation }
 
-    @State private var sidebarMode: SidebarView.Mode = .byRoom
-    @State private var showContext = true
+    // App-wide, persisted — NOT per-window @State, so every tab shows the same
+    // sidebar mode / inspector visibility instead of each tab remembering its
+    // own (which made the mode look random when switching tabs).
+    @AppStorage("cherminal.sidebarMode") private var sidebarMode: SidebarView.Mode = .byRoom
+    @AppStorage("cherminal.showContext") private var showContext = true
 
     var body: some View {
         NavigationSplitView {
