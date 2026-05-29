@@ -7,6 +7,7 @@ import SwiftUI
 struct TabWindowRootView: View {
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
+    @EnvironmentObject private var caffeine: CaffeineManager
     @ObservedObject var holder: TabSurfaceHolder
 
     /// The tab's effective conversation, observed from the holder so the badge,
@@ -31,6 +32,17 @@ struct TabWindowRootView: View {
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 460)
                 }
                 .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            caffeine.toggle()
+                        } label: {
+                            Label("Keep awake",
+                                  systemImage: caffeine.active ? "cup.and.saucer.fill" : "cup.and.saucer")
+                        }
+                        .help(caffeine.active ? "Sleep allowed — click to keep this Mac awake"
+                                              : "Keep this Mac awake (caffeinate)")
+                        .foregroundStyle(caffeine.active ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.primary))
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         Button {
                             showContext.toggle()

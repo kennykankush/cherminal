@@ -13,6 +13,7 @@ final class AppEnvironment {
     let pins: PinsManager
     let coordinator: TabWindowCoordinator
     let ports: PortsManager
+    let caffeine = CaffeineManager()
 
     private init() {
         let cache = try? SessionCache()
