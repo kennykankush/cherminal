@@ -72,17 +72,40 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !isRunningTests else { return }
         let env = AppEnvironment.shared
-        // Open the first window immediately — Ghostty is ready synchronously
-        // once AppEnvironment is built, so the terminal must not wait behind the
-        // session scan. The sidebar then fills in as bootstrap streams results.
-        if env.coordinator.isEmpty {
-            env.coordinator.openFreshShell()
-        }
         installTabShortcutMonitor()
         installGroupsMenu()
+
+        // Restore last session's tabs. Shell tabs need no registry, so a saved
+        // session of only shells (or nothing saved) opens instantly — the
+        // terminal never waits behind the disk scan. Agent tabs need the cache
+        // snapshot first so they resume with the right sessionFile (the context
+        // gauge reads it), so those restore inside the Task after the (cheap)
+        // cache load. Ghostty is ready synchronously once AppEnvironment is built.
+        let saved = env.coordinator.savedSessionTabs()
+        let needsCache = saved.contains { $0.agentRaw != AgentKind.shell.rawValue }
+        if env.coordinator.isEmpty && !needsCache {
+            if !env.coordinator.restoreSession() {
+                env.coordinator.openFreshShell()
+            }
+        }
+
         Task { @MainActor in
+            if env.coordinator.isEmpty && needsCache {
+                await env.registry.loadCacheSnapshot()
+                if !env.coordinator.restoreSession() {
+                    env.coordinator.openFreshShell()
+                }
+            }
+            // Full reconcile + watcher (cache load above is idempotent-skipped).
             await env.registry.bootstrap()
         }
+    }
+
+    /// Persist the open tabs so the next launch reopens them. Fires on a clean
+    /// quit (⌘Q / app menu); a crash skips it, leaving the prior snapshot intact.
+    func applicationWillTerminate(_ notification: Notification) {
+        guard !isRunningTests else { return }
+        AppEnvironment.shared.coordinator.persistSession()
     }
 
     // MARK: - Groups menu

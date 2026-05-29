@@ -31,13 +31,25 @@ final class TabWindowCoordinator: ObservableObject {
     /// or resumed sessions). The sidebar reads this to show a live indicator.
     @Published private(set) var liveConversationIDs: Set<String> = []
 
-    /// Conversations whose agent just finished a turn and is waiting on you —
-    /// driven by Ghostty's bell (a command-finished proxy). The sidebar shows a
-    /// calm blue "your turn" light for these; cleared when you focus the tab.
+    /// Conversations whose agent finished its turn and is waiting on you —
+    /// detected by reading the session JSONL (no bell, no hooks; see TurnState).
+    /// The sidebar shows a calm blue "your turn" light for these; it clears the
+    /// moment you focus the tab.
     @Published private(set) var awaitingTurnIDs: Set<String> = []
+
+    /// Per-conversation byte offset of the turn you've already seen (the session
+    /// file's size when you last focused its tab). A completed turn only lights
+    /// up when the file has grown past this — so re-focusing a tab you've
+    /// already read doesn't re-trigger, and only a genuinely *new* turn does.
+    private var seenTurnSize: [String: UInt64] = [:]
 
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
+    /// Drives the "your turn" light off FSEvents — the OS tells us the instant
+    /// an agent writes its turn-ending line, so there's no polling: idle costs
+    /// nothing and the light follows turn completion in ~0.3s. (The 8s reconcile
+    /// still handles the agent-exited case, where no write occurs.)
+    private var awaitWatcher: FilesystemWatcher?
     /// Reentrancy guard: an `lsof` poll can outlast the 3s interval, so the
     /// next tick must not start a second overlapping reconcile (which would
     /// double-write tab identities / the live set).
@@ -52,13 +64,8 @@ final class TabWindowCoordinator: ObservableObject {
         self.ghostty = ghostty
         self.bookmarks = bookmarks
 
-        // "Your turn" attention light: flag a tab when its agent rings the bell
-        // (turn finished), clear it the moment you focus that tab.
-        observers.append(NotificationCenter.default.addObserver(
-            forName: .ghosttyBellDidRing, object: nil, queue: .main
-        ) { [weak self] note in
-            MainActor.assumeIsolated { self?.handleBell(note.object) }
-        })
+        // "Your turn" attention light clears the instant you focus a tab; it's
+        // *set* by the session-file poll in reconcileLiveSessions (no bell).
         observers.append(NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] note in
@@ -70,25 +77,47 @@ final class TabWindowCoordinator: ObservableObject {
         observers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
-    // MARK: - Attention light
+    // MARK: - Attention light ("your turn")
 
-    private func handleBell(_ object: Any?) {
-        guard let surface = object as? Ghostty.SurfaceView,
-              let controller = controllers.first(where: { $0.holder.surfaceView === surface })
-        else { return }
-        // Only agent tabs get the "your turn" light — the bell is a proxy for
-        // turn-finished, and a plain shell ringing it isn't "your turn". (An
-        // adopted shell reads as its agent here, so it still qualifies.)
-        guard controller.conversation.agent != .shell else { return }
-        // If you're already looking at this tab, there's nothing to flag.
-        if controller.window?.isKeyWindow == true { return }
-        awaitingTurnIDs.insert(controller.conversation.id)
-    }
-
+    /// You just focused a tab: drop its light and remember how far you've read,
+    /// so re-focusing won't relight until the agent completes a *new* turn.
     private func clearAwaiting(forWindow window: NSWindow?) {
         guard let window,
               let controller = controllers.first(where: { $0.window === window }) else { return }
-        awaitingTurnIDs.remove(controller.conversation.id)
+        let id = controller.conversation.id
+        awaitingTurnIDs.remove(id)
+        seenTurnSize[id] = Self.fileSize(controller.conversation.sessionFile)
+    }
+
+    /// Recompute which live agent tabs are awaiting you, from their session
+    /// files. Called at the tail of each live-session reconcile (same 8s
+    /// cadence), so the light follows turn completion without any bell.
+    private func updateAwaiting(live: Set<String>) {
+        var awaiting = awaitingTurnIDs
+        for controller in controllers {
+            let id = controller.conversation.id
+            let agent = controller.conversation.agent
+            guard live.contains(id), agent == .claudeCode || agent == .codex else { continue }
+            let reading = TurnState.read(sessionFile: controller.conversation.sessionFile, agent: agent)
+            if controller.window?.isKeyWindow == true {
+                // You're looking at it — never light, and keep the read marker
+                // current so leaving the tab can't false-trigger.
+                seenTurnSize[id] = reading.size
+                awaiting.remove(id)
+            } else if reading.awaitingUser && reading.size > (seenTurnSize[id] ?? 0) {
+                awaiting.insert(id)        // a new completed turn you haven't seen
+            } else if !reading.awaitingUser {
+                awaiting.remove(id)        // back to working
+            }
+        }
+        // A tab that closed or whose agent exited is no longer awaiting.
+        awaiting = awaiting.filter { live.contains($0) }
+        if awaitingTurnIDs != awaiting { awaitingTurnIDs = awaiting }
+    }
+
+    private static func fileSize(_ url: URL) -> UInt64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
     }
 
     // MARK: - Open / focus
@@ -199,6 +228,69 @@ final class TabWindowCoordinator: ObservableObject {
         }
     }
 
+    // MARK: - Persisted tabs (bookmarks + session restore)
+
+    private static let lastSessionKey = "cherminal.lastSession"
+
+    /// Open a saved list of tabs in order, resolving each to its live
+    /// conversation when the session still exists, else a shell in the same
+    /// room. Shared by session restore and bookmark groups so both honour the
+    /// same dedup + fallback rules. Resolves agents against the registry, so
+    /// the cache snapshot must be loaded first (else the agent's sessionFile is
+    /// unknown and the context gauge can't read it).
+    func openPersistedTabs(_ tabs: [PersistedTab]) {
+        for persisted in tabs {
+            let convo: Conversation
+            if persisted.agentRaw == AgentKind.shell.rawValue {
+                // Reuse the persisted id so reopening focuses the same tab
+                // instead of spawning a fresh duplicate.
+                convo = Conversation.shellConversation(
+                    cwd: URL(fileURLWithPath: persisted.roomPath),
+                    id: persisted.conversationID)
+            } else if let real = registry.conversation(id: persisted.conversationID) {
+                convo = real
+            } else {
+                // The agent session is gone (file deleted / reconciled away).
+                // Reopen as a shell in the same room rather than dropping the
+                // tab. Fresh id so a stale agent id can't collide with a future
+                // real conversation.
+                convo = Conversation.shellConversation(cwd: URL(fileURLWithPath: persisted.roomPath))
+            }
+            openOrFocus(convo)
+        }
+    }
+
+    /// Snapshot the open tabs to disk so the next launch can reopen them. Uses
+    /// the precise live detect (via `snapshot()`) so a hand-launched agent is
+    /// saved as that agent, not the bare shell it started as. Called on quit.
+    func persistSession() {
+        let tabs = snapshot()
+        guard let data = try? JSONEncoder().encode(tabs) else { return }
+        UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
+        clog("tabs", "persisted \(tabs.count) tab(s) for next launch")
+    }
+
+    /// The tabs persisted by the last run, decoded but not opened — lets the
+    /// launch path decide synchronously whether a restore is even needed.
+    func savedSessionTabs() -> [PersistedTab] {
+        guard let data = UserDefaults.standard.data(forKey: Self.lastSessionKey),
+              let tabs = try? JSONDecoder().decode([PersistedTab].self, from: data)
+        else { return [] }
+        return tabs
+    }
+
+    /// Reopen the tabs saved by the last run. Returns false (having opened
+    /// nothing) when there's no saved session, so the caller falls back to a
+    /// fresh shell.
+    @discardableResult
+    func restoreSession() -> Bool {
+        let tabs = savedSessionTabs()
+        guard !tabs.isEmpty else { return false }
+        clog("tabs", "restoring \(tabs.count) tab(s) from last session")
+        openPersistedTabs(tabs)
+        return !controllers.isEmpty
+    }
+
     // MARK: - Active
 
     var isEmpty: Bool { controllers.isEmpty }
@@ -273,7 +365,10 @@ final class TabWindowCoordinator: ObservableObject {
         if controllers.isEmpty {
             linkTimer?.invalidate()
             linkTimer = nil
+            awaitWatcher?.stop()
+            awaitWatcher = nil
             if !liveConversationIDs.isEmpty { liveConversationIDs = [] }
+            if !awaitingTurnIDs.isEmpty { awaitingTurnIDs = [] }
         } else if linkTimer == nil {
             Task { await reconcileLiveSessions() }
             // 8s matches the Context/Port poll cadence — finer than the live
@@ -282,7 +377,32 @@ final class TabWindowCoordinator: ObservableObject {
             linkTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
                 Task { @MainActor in await self?.reconcileLiveSessions() }
             }
+            startAwaitWatcher()
         }
+    }
+
+    /// Watch the agent session roots so a turn-ending write flips the "your
+    /// turn" light within the debounce window — no polling. FSEvents coalesces
+    /// a turn's burst of writes into one callback; we then re-read only the
+    /// live agent tabs' tails (cheap). Idle sessions trigger nothing.
+    private func startAwaitWatcher() {
+        guard awaitWatcher == nil else { return }
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        let paths = [
+            home.appendingPathComponent(".claude/projects", isDirectory: true).path,
+            home.appendingPathComponent(".codex/sessions", isDirectory: true).path,
+        ].filter { FileManager.default.fileExists(atPath: $0) }
+        guard !paths.isEmpty else { return }
+
+        let watcher = FilesystemWatcher(paths: paths) { [weak self] in
+            // FSEvents fires on a background queue; hop to main for @Published state.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.updateAwaiting(live: self.liveConversationIDs)
+            }
+        }
+        watcher.start()
+        awaitWatcher = watcher
     }
 
     /// Detect which agent session (if any) each tab is running and adopt it as
@@ -331,6 +451,10 @@ final class TabWindowCoordinator: ObservableObject {
             }
         }
         if liveConversationIDs != live { liveConversationIDs = live }
+
+        // With the live set settled, refresh the "your turn" lights from each
+        // live agent tab's session file.
+        updateAwaiting(live: live)
     }
 
     /// Whether a tab's foreground process looks like a running agent — used for

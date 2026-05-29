@@ -31,19 +31,20 @@ struct TabWindowRootView: View {
                     ContextWatchPane(conversation: conversation)
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 460)
                 }
+                // Global utility toggles grouped in the top-right cluster:
+                // coffee (keep-awake) then the Context inspector toggle.
                 .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
+                    ToolbarItemGroup(placement: .primaryAction) {
                         Button {
                             caffeine.toggle()
                         } label: {
                             Label("Keep awake",
                                   systemImage: caffeine.active ? "cup.and.saucer.fill" : "cup.and.saucer")
                         }
-                        .help(caffeine.active ? "Sleep allowed — click to keep this Mac awake"
+                        .help(caffeine.active ? "Keeping this Mac awake — click to allow sleep"
                                               : "Keep this Mac awake (caffeinate)")
                         .foregroundStyle(caffeine.active ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.primary))
-                    }
-                    ToolbarItem(placement: .primaryAction) {
+
                         Button {
                             showContext.toggle()
                         } label: {

@@ -57,33 +57,16 @@ final class BookmarksManager: ObservableObject {
         cache?.deleteBookmark(id: id)
     }
 
-    /// Open every tab in the bookmark via the coordinator's openOrFocus so
-    /// duplicates collapse and existing tabs just get focused. Shell entries
-    /// synthesize a shell Conversation at the persisted cwd.
+    /// Open every tab in the bookmark, collapsing duplicates and focusing
+    /// existing tabs. Resolution + shell fallback live in the coordinator so
+    /// bookmark groups and session restore behave identically. `registry` is
+    /// taken there from the coordinator; kept here for callsite stability.
     func open(
         _ bookmark: Bookmark,
         registry: ConversationRegistry,
         coordinator: TabWindowCoordinator
     ) {
-        for persisted in bookmark.tabs {
-            let convo: Conversation
-            if persisted.agentRaw == AgentKind.shell.rawValue {
-                // Reuse the persisted id so reopening the same group focuses the
-                // shell tab instead of spawning a fresh duplicate each time.
-                convo = Conversation.shellConversation(
-                    cwd: URL(fileURLWithPath: persisted.roomPath),
-                    id: persisted.conversationID)
-            } else if let real = registry.conversation(id: persisted.conversationID) {
-                convo = real
-            } else {
-                // The agent session is gone (file deleted / reconciled away).
-                // Reopen as a shell in the same room rather than silently
-                // dropping the tab. Fresh id so a stale agent id can't collide
-                // with a future real conversation.
-                convo = Conversation.shellConversation(cwd: URL(fileURLWithPath: persisted.roomPath))
-            }
-            coordinator.openOrFocus(convo)
-        }
+        coordinator.openPersistedTabs(bookmark.tabs)
     }
 
     private func defaultName() -> String {

@@ -63,7 +63,17 @@ every finding adversarially verified before fixing. Build green, 23 tests
   AppKit-windowed app).
 - **"Your turn" attention light** — a calm blue ambient signal (slow breathe,
   Reduce-Motion aware) when an agent finishes its turn; clears on focus; agent
-  tabs only.
+  tabs only. Driven by the conversation's own session JSONL (Claude
+  `stop_reason: end_turn`, Codex `task_complete`) via **FSEvents** — no terminal
+  bell, no injected hooks, no polling (observe-externally). Lights within ~0.3s.
+- **Session restore** — quitting persists the open tabs; the next launch reopens
+  them in order. Agents resume (`claude --resume` / `codex resume`) with the
+  right session file (restored after the cache snapshot so the context gauge
+  works); shells reopen in their room; a vanished session falls back to a shell.
+  Shell-only/empty sessions still open instantly.
+- **Coffee button** — a one-click "keep this Mac awake" toggle (`caffeinate -di`,
+  mirroring the `goodnight` alias) in the chat pane's top-right utility cluster,
+  beside the Context toggle. The child process ends when Cherminal quits.
 - **Right-click → Pin/Unpin** on any conversation row.
 - **Drop to a shell** when a resumed agent exits, instead of Ghostty's
   "Process exited. Press any key to close."

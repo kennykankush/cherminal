@@ -30,6 +30,7 @@ final class ConversationRegistry: ObservableObject {
     let cache: SessionCache?
     private var watcher: FilesystemWatcher?
     private var didBootstrap = false
+    private var didLoadCache = false
     private var refreshInFlight: Task<Void, Never>?
     /// Set when refresh() is called while a scan is already running, so the
     /// loop runs once more and never drops a change that arrived mid-scan.
@@ -50,25 +51,34 @@ final class ConversationRegistry: ObservableObject {
 
     // MARK: - Public API
 
+    /// Publish whatever the cache has so the sidebar — and session restore —
+    /// see real conversations (with correct `sessionFile`s) without waiting on
+    /// the disk scan. The load + JSON-decode of every row runs off the main
+    /// actor so it doesn't block first paint when there are hundreds of rows.
+    /// Idempotent; the slow reconcile lives in `bootstrap()`.
+    func loadCacheSnapshot() async {
+        guard !didLoadCache else { return }
+        didLoadCache = true
+        guard let cache else { return }
+        let snapshot = await Task.detached(priority: .userInitiated) {
+            cache.loadAll().compactMap { entry in
+                Conversation(persisted: entry.summary,
+                             sessionFile: URL(fileURLWithPath: entry.path))
+            }.sorted { $0.lastActivityAt > $1.lastActivityAt }
+        }.value
+        if !snapshot.isEmpty {
+            conversations = snapshot
+        }
+    }
+
     /// Called once per app launch from the root view's `.task`. Idempotent.
     func bootstrap() async {
         guard !didBootstrap else { return }
         didBootstrap = true
 
-        // 1. Publish whatever the cache has so the sidebar renders instantly.
-        //    The load + JSON-decode of every row runs off the main actor so it
-        //    doesn't block first paint when there are hundreds of rows.
-        if let cache {
-            let snapshot = await Task.detached(priority: .userInitiated) {
-                cache.loadAll().compactMap { entry in
-                    Conversation(persisted: entry.summary,
-                                 sessionFile: URL(fileURLWithPath: entry.path))
-                }.sorted { $0.lastActivityAt > $1.lastActivityAt }
-            }.value
-            if !snapshot.isEmpty {
-                conversations = snapshot
-            }
-        }
+        // 1. Cache snapshot for instant render (no-op if already loaded by the
+        //    launch path for session restore).
+        await loadCacheSnapshot()
 
         // 2. Run a fresh scan to reconcile against disk.
         await refresh()
