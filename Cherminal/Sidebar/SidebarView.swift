@@ -103,22 +103,26 @@ struct SidebarView: View {
                 List(selection: $selection) {
                     pinnedSection
                     ForEach(filteredRooms) { room in
-                        Section {
-                            if roomIsExpanded(room) {
-                                ForEach(room.conversations) { convo in
-                                    ConversationRow(conversation: convo,
-                                                    isLive: coordinator.liveConversationIDs.contains(convo.id),
-                                                    isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                                                    isPinned: pins.isPinned(convo.id))
-                                        .tag(convo.id as Conversation.ID?)
+                        // Pinned ones are lifted into the Pinned section, so a
+                        // room shows only its un-pinned conversations.
+                        let convos = room.conversations.filter { !pins.isPinned($0.id) }
+                        if !convos.isEmpty {
+                            Section {
+                                if roomIsExpanded(room) {
+                                    ForEach(convos) { convo in
+                                        ConversationRow(conversation: convo,
+                                                        isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id))
+                                            .tag(convo.id as Conversation.ID?)
+                                    }
                                 }
+                            } header: {
+                                RoomDisclosureHeader(
+                                    name: room.name,
+                                    count: convos.count,
+                                    isExpanded: roomIsExpanded(room)
+                                ) { toggleRoom(room) }
                             }
-                        } header: {
-                            RoomDisclosureHeader(
-                                name: room.name,
-                                count: room.conversations.count,
-                                isExpanded: roomIsExpanded(room)
-                            ) { toggleRoom(room) }
                         }
                     }
                 }
@@ -132,11 +136,12 @@ struct SidebarView: View {
             case .byRecent:
                 List(selection: $selection) {
                     pinnedSection
-                    ForEach(filteredConversations) { convo in
+                    // Pinned ones live in the Pinned section above — don't repeat
+                    // them here.
+                    ForEach(filteredConversations.filter { !pins.isPinned($0.id) }) { convo in
                         ConversationRow(conversation: convo, showRoom: true,
                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
-                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                                        isPinned: pins.isPinned(convo.id))
+                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id))
                             .tag(convo.id as Conversation.ID?)
                     }
                 }
