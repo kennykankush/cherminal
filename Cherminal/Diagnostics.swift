@@ -51,11 +51,19 @@ enum Diagnostics {
         fileHandle = try? FileHandle(forWritingTo: url)
 
         // Fault log: capture stderr (Zig/Swift/C panic text) + async-safe crash
-        // backtraces. Separate, unbuffered fd that survives a malloc-time crash.
+        // backtraces. Create it via FileManager (the same call the debug log
+        // uses, known to work here) so the file definitely exists, then open an
+        // append fd for stderr + signal-handler writes.
         let faultURL = dir.appendingPathComponent("cherminal-fault.log")
         rotate(faultURL, in: dir, suffix: "fault")
-        faultFD = open(faultURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
-        if faultFD >= 0 { dup2(faultFD, STDERR_FILENO) }
+        FileManager.default.createFile(atPath: faultURL.path, contents: nil)
+        faultFD = open(faultURL.path, O_WRONLY | O_APPEND)
+        if faultFD >= 0 {
+            dup2(faultFD, STDERR_FILENO)   // route libghostty/Zig/Swift panics here
+            _ = "=== fault log ready \(timestamp()) ===\n".withCString { write(faultFD, $0, strlen($0)) }
+        } else {
+            log("diag", "fault log open failed errno=\(errno)")
+        }
         // Force the handler's globals to initialize now, before any fault.
         _ = backtraceBuffer
         _ = crashHeader.count
