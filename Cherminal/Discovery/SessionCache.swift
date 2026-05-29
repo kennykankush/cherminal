@@ -37,8 +37,14 @@ final class SessionCache: @unchecked Sendable {
         var previewText: String?
     }
 
-    init() throws {
-        self.url = try Self.databaseURL()
+    convenience init() throws {
+        try self.init(url: Self.databaseURL())
+    }
+
+    /// Designated init — `url` is injectable so tests can point at a temp DB
+    /// instead of the app's shared registry.
+    init(url: URL) throws {
+        self.url = url
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -58,8 +64,13 @@ final class SessionCache: @unchecked Sendable {
     }
 
     deinit {
+        sqlite3_finalize(putStmt)
         sqlite3_close(db)
     }
+
+    /// Cached upsert statement — reused (reset+rebind) instead of recompiled on
+    /// every `put`, which on a cold scan meant ~one prepare per session file.
+    private var putStmt: OpaquePointer?
 
     // MARK: - Schema
 
@@ -159,27 +170,49 @@ final class SessionCache: @unchecked Sendable {
         guard let json = encode(summary: summary) else { return }
         lock.lock(); defer { lock.unlock() }
 
-        var stmt: OpaquePointer?
-        defer { sqlite3_finalize(stmt) }
-        let sql = """
-            INSERT INTO conversations (path, mtime, size, json, updated_at)
-            VALUES (?, ?, ?, ?, strftime('%s', 'now'))
-            ON CONFLICT(path) DO UPDATE SET
-                mtime = excluded.mtime,
-                size = excluded.size,
-                json = excluded.json,
-                updated_at = excluded.updated_at;
-            """
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-            Self.logger.error("put prepare failed: \(self.lastError(), privacy: .public)")
-            return
+        // Prepare once, then reuse with reset+clear_bindings on every call.
+        if putStmt == nil {
+            let sql = """
+                INSERT INTO conversations (path, mtime, size, json, updated_at)
+                VALUES (?, ?, ?, ?, strftime('%s', 'now'))
+                ON CONFLICT(path) DO UPDATE SET
+                    mtime = excluded.mtime,
+                    size = excluded.size,
+                    json = excluded.json,
+                    updated_at = excluded.updated_at;
+                """
+            guard sqlite3_prepare_v2(db, sql, -1, &putStmt, nil) == SQLITE_OK else {
+                Self.logger.error("put prepare failed: \(self.lastError(), privacy: .public)")
+                putStmt = nil
+                return
+            }
         }
+        let stmt = putStmt
+        sqlite3_reset(stmt)
+        sqlite3_clear_bindings(stmt)
         sqlite3_bind_text(stmt, 1, path, -1, Self.sqliteTransient)
         sqlite3_bind_double(stmt, 2, mtime)
         sqlite3_bind_int64(stmt, 3, size)
         sqlite3_bind_text(stmt, 4, json, -1, Self.sqliteTransient)
         if sqlite3_step(stmt) != SQLITE_DONE {
             Self.logger.error("put step failed: \(self.lastError(), privacy: .public)")
+        }
+    }
+
+    /// Wrap a burst of `put`s (a scan's parse phase) in one transaction so ~N
+    /// per-row WAL commits collapse into a single flush. Defensive against an
+    /// already-open transaction so a missed `endBatch` can't wedge the next one.
+    func beginBatch() {
+        lock.lock(); defer { lock.unlock() }
+        if sqlite3_get_autocommit(db) != 0 {
+            sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil)
+        }
+    }
+
+    func endBatch() {
+        lock.lock(); defer { lock.unlock() }
+        if sqlite3_get_autocommit(db) == 0 {
+            sqlite3_exec(db, "COMMIT;", nil, nil, nil)
         }
     }
 

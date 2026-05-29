@@ -57,8 +57,12 @@ enum SessionScanEngine {
                 }
 
                 // Pass 2 — parse misses concurrently, emitting each as it lands.
+                // Wrap the parse phase's cache writes in one transaction so the
+                // per-miss puts collapse into a single WAL flush instead of one
+                // commit per file.
                 var parsed: [Conversation] = []
                 if !misses.isEmpty {
+                    cache?.beginBatch()
                     parsed = await withTaskGroup(of: Conversation?.self) { group in
                         var collected: [Conversation] = []
                         var it = misses.makeIterator()
@@ -75,6 +79,7 @@ enum SessionScanEngine {
                         }
                         return collected
                     }
+                    cache?.endBatch()
                 }
 
                 // Reconcile (dropping rows neither source saw) is the registry's
