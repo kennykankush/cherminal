@@ -309,11 +309,16 @@ struct SidebarView: View {
     }
 
     private func toggleRoom(_ room: Room) {
-        withAnimation(.easeOut(duration: 0.2)) {
-            if expandedRooms.contains(room.id) {
-                expandedRooms.remove(room.id)
-            } else {
-                expandedRooms.insert(room.id)
+        // Defer: this mutates the List's own section set from a header button
+        // inside the List — doing it synchronously re-enters the NSTableView
+        // delegate (same crash class as row selection).
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.2)) {
+                if expandedRooms.contains(room.id) {
+                    expandedRooms.remove(room.id)
+                } else {
+                    expandedRooms.insert(room.id)
+                }
             }
         }
     }
@@ -324,7 +329,8 @@ struct SidebarView: View {
         guard expandedRooms.isEmpty,
               let selected = selection,
               let convo = registry.conversation(id: selected) else { return }
-        expandedRooms.insert(convo.roomPath.path)
+        // Defer off the List's appear pass to avoid re-entering the table.
+        DispatchQueue.main.async { expandedRooms.insert(convo.roomPath.path) }
     }
 }
 
