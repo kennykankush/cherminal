@@ -17,9 +17,6 @@ struct ContextWatchPane: View {
     @State private var usage: ConversationUsage?
     @State private var showTokenDetails = false
     @State private var portsExpanded = false
-    /// Balanced start/stop on the shared PortsManager (poll only while a pane
-    /// is on screen), so its viewer refcount can't drift.
-    @State private var portViewing = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,8 +38,6 @@ struct ContextWatchPane: View {
                 emptyState
             }
         }
-        .onAppear { setPortViewing(true) }
-        .onDisappear { setPortViewing(false) }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
         // Live-refresh usage for the active conversation. Claude folds in
         // append-only deltas via the accumulator (which now survives for the
@@ -305,12 +300,6 @@ struct ContextWatchPane: View {
             return convo.previewText ?? convo.roomName
         }
         return p.roomName
-    }
-
-    private func setPortViewing(_ on: Bool) {
-        guard on != portViewing else { return }
-        portViewing = on
-        if on { ports.start() } else { ports.stop() }
     }
 
     private func openInBrowser(_ port: Int) {

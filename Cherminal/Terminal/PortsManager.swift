@@ -19,19 +19,38 @@ final class PortsManager: ObservableObject {
         return [home + "/dev"]
     }()
 
+    private var cancellables = Set<AnyCancellable>()
+    private let interval: TimeInterval = 4
+
     init(registry: ConversationRegistry, coordinator: TabWindowCoordinator) {
         self.registry = registry
         self.coordinator = coordinator
+
+        // Poll while the inspector (which hosts the ports footer) is shown and
+        // at least one tab exists. Driven off coordinator.tabCount + the app-wide
+        // inspector flag — NOT a SwiftUI view's onAppear/onDisappear, which an
+        // AppKit window close can skip, leaking the poll forever.
+        coordinator.$tabCount
+            .sink { [weak self] _ in self?.refreshPolling() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
+            .sink { [weak self] _ in self?.refreshPolling() }
+            .store(in: &cancellables)
+        refreshPolling()
     }
 
-    /// Number of inspector panes currently showing the Port tab. The poll runs
-    /// while this is > 0 — so one window leaving the Port tab can't kill the
-    /// shared poll another window is still showing.
-    private var viewers = 0
+    private func shouldPoll() -> Bool {
+        let hasTabs = (coordinator?.tabCount ?? 0) > 0
+        // Mirrors @AppStorage("cherminal.showContext"), default true.
+        let inspectorShown = UserDefaults.standard.object(forKey: "cherminal.showContext") as? Bool ?? true
+        return hasTabs && inspectorShown
+    }
 
-    /// Register a Port-tab viewer and begin polling if not already.
-    func start(interval: TimeInterval = 4) {
-        viewers += 1
+    private func refreshPolling() {
+        shouldPoll() ? startPolling() : stopPolling()
+    }
+
+    private func startPolling() {
         guard timer == nil else { return }
         Task { await self.scan() }
         let t = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
@@ -40,12 +59,14 @@ final class PortsManager: ObservableObject {
         timer = t
     }
 
-    /// Deregister a viewer; stop polling only when the last one leaves.
-    func stop() {
-        viewers = max(0, viewers - 1)
-        guard viewers == 0 else { return }
+    private func stopPolling() {
+        guard timer != nil else { return }
         timer?.invalidate()
         timer = nil
+        // Don't let an in-flight scan straddling stop→start block the next
+        // session's first scan (it would no-op on the `scanning` guard).
+        scanning = false
+        if !ports.isEmpty { ports = [] }
     }
 
     func scanNow() {

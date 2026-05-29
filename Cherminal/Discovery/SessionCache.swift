@@ -199,19 +199,27 @@ final class SessionCache: @unchecked Sendable {
         }
     }
 
+    /// Nesting depth of active batches. The Claude and Codex scanners share one
+    /// connection and run concurrently, so their begin/endBatch calls interleave
+    /// — a depth counter (BEGIN on 0→1, COMMIT on 1→0) keeps the early
+    /// `endBatch` of one scanner from committing the other's in-flight rows.
+    private var batchDepth = 0
+
     /// Wrap a burst of `put`s (a scan's parse phase) in one transaction so ~N
-    /// per-row WAL commits collapse into a single flush. Defensive against an
-    /// already-open transaction so a missed `endBatch` can't wedge the next one.
+    /// per-row WAL commits collapse into a single flush.
     func beginBatch() {
         lock.lock(); defer { lock.unlock() }
-        if sqlite3_get_autocommit(db) != 0 {
+        batchDepth += 1
+        if batchDepth == 1 && sqlite3_get_autocommit(db) != 0 {
             sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil)
         }
     }
 
     func endBatch() {
         lock.lock(); defer { lock.unlock() }
-        if sqlite3_get_autocommit(db) == 0 {
+        guard batchDepth > 0 else { return }
+        batchDepth -= 1
+        if batchDepth == 0 && sqlite3_get_autocommit(db) == 0 {
             sqlite3_exec(db, "COMMIT;", nil, nil, nil)
         }
     }

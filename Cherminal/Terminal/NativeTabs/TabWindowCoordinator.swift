@@ -119,18 +119,23 @@ final class TabWindowCoordinator: ObservableObject {
         // banner, which can't reflow) then start at the correct width instead
         // of into the momentarily-squished pane.
         controller.window?.contentView?.layoutSubtreeIfNeeded()
-        DispatchQueue.main.async { [weak self, weak controller] in
-            guard let self,
-                  let controller,
-                  // The tab may have closed in this same runloop turn — never
-                  // spawn a libghostty surface into a window mid-teardown.
-                  self.controllers.contains(where: { $0 === controller }),
-                  controller.holder.surfaceView == nil,
-                  let app = self.ghostty.app else { return }
+        // Build the surface config OFF the main thread — TerminalCommand →
+        // BinaryResolver can block up to 3s on a cold launch (sourcing ~/.zshrc),
+        // which would freeze the UI. Hop back to the main actor only to
+        // construct the SurfaceView (libghostty requires main), re-checking the
+        // tab is still live (it may have closed during the off-main work).
+        Task.detached(priority: .userInitiated) {
             let config = TerminalCommand.surfaceConfig(for: conversation)
-            clog("tabs", "spawn surface id=\(conversation.id) cwd=\(config.workingDirectory ?? "nil") cmd=\(config.command ?? "default-shell")")
-            controller.holder.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
-            clog("tabs", "spawn surface ok id=\(conversation.id)")
+            await MainActor.run { [weak self, weak controller] in
+                guard let self,
+                      let controller,
+                      self.controllers.contains(where: { $0 === controller }),
+                      controller.holder.surfaceView == nil,
+                      let app = self.ghostty.app else { return }
+                clog("tabs", "spawn surface id=\(conversation.id) cwd=\(config.workingDirectory ?? "nil") cmd=\(config.command ?? "default-shell")")
+                controller.holder.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+                clog("tabs", "spawn surface ok id=\(conversation.id)")
+            }
         }
         return controller
     }
