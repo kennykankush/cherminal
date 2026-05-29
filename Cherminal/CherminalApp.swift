@@ -17,6 +17,26 @@ struct CherminalApp: App {
                     }
                     .keyboardShortcut("t", modifiers: .command)
                 }
+                // Tab navigation. These live in the app menu so AppKit routes
+                // the shortcuts app-wide (the key reaches the menu before the
+                // focused Ghostty surface, so the terminal never swallows them).
+                CommandMenu("Tabs") {
+                    Button("Show Next Tab") {
+                        AppEnvironment.shared.coordinator.selectNextTab()
+                    }
+                    .keyboardShortcut("]", modifiers: [.command, .shift])
+                    Button("Show Previous Tab") {
+                        AppEnvironment.shared.coordinator.selectPreviousTab()
+                    }
+                    .keyboardShortcut("[", modifiers: [.command, .shift])
+                    Divider()
+                    ForEach(1...9, id: \.self) { n in
+                        Button(n == 9 ? "Last Tab" : "Tab \(n)") {
+                            AppEnvironment.shared.coordinator.selectTab(number: n)
+                        }
+                        .keyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: .command)
+                    }
+                }
             }
     }
 }

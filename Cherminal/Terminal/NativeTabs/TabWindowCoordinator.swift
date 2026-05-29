@@ -161,6 +161,41 @@ final class TabWindowCoordinator: ObservableObject {
         window.tabGroup?.selectedWindow = window
     }
 
+    // MARK: - Tab navigation (menu shortcuts)
+
+    /// The shared tab group, taken from the frontmost Cherminal window. Using
+    /// the live group (not the `controllers` array) honours the user's visible
+    /// tab order even after they drag-reorder tabs.
+    private func activeTabGroup() -> NSWindowTabGroup? {
+        (NSApp.keyWindow ?? controllers.last?.window)?.tabGroup
+    }
+
+    /// Select the Nth tab in visible order. 1–8 are literal; 9 jumps to the
+    /// last tab (browser convention) so ⌘9 always lands on the rightmost.
+    func selectTab(number: Int) {
+        guard let group = activeTabGroup() else { return }
+        let windows = group.windows
+        guard !windows.isEmpty else { return }
+        let idx = number >= 9 ? windows.count - 1 : number - 1
+        guard idx >= 0, idx < windows.count else { return }
+        group.selectedWindow = windows[idx]
+        windows[idx].makeKeyAndOrderFront(nil)
+    }
+
+    func selectNextTab() { cycleTab(+1) }
+    func selectPreviousTab() { cycleTab(-1) }
+
+    /// Move selection by `delta` with wraparound.
+    private func cycleTab(_ delta: Int) {
+        guard let group = activeTabGroup(), !group.windows.isEmpty,
+              let current = group.selectedWindow,
+              let i = group.windows.firstIndex(of: current) else { return }
+        let n = group.windows.count
+        let j = ((i + delta) % n + n) % n
+        group.selectedWindow = group.windows[j]
+        group.windows[j].makeKeyAndOrderFront(nil)
+    }
+
     // MARK: - Live session linking
 
     /// Start polling once there's at least one tab; stop when the last closes.
