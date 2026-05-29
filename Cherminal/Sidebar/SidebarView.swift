@@ -131,7 +131,9 @@ struct SidebarView: View {
                 .scrollContentBackground(.hidden)
                 .onChange(of: selection) { _, newID in
                     guard let newID, let convo = registry.conversation(id: newID) else { return }
-                    expandedRooms.insert(convo.roomPath.path)
+                    // Defer the section-expansion mutation off the selection
+                    // commit to avoid re-entering the NSTableView delegate.
+                    DispatchQueue.main.async { expandedRooms.insert(convo.roomPath.path) }
                 }
                 .onAppear(perform: seedExpandedRoom)
             case .byRecent:
@@ -173,9 +175,9 @@ struct SidebarView: View {
                                     isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                     isPinned: true)
                         .contentShape(Rectangle())
-                        .onTapGesture { coordinator.openOrFocus(convo) }
+                        .onTapGesture { open(convo) }
                         .contextMenu {
-                            Button("Open") { coordinator.openOrFocus(convo) }
+                            Button("Open") { open(convo) }
                             Button("Unpin", role: .destructive) { pins.toggle(convo.id) }
                         }
                 }
@@ -192,11 +194,17 @@ struct SidebarView: View {
     /// Right-click menu for a conversation row: open it, and pin/unpin.
     @ViewBuilder
     private func rowMenu(_ convo: Conversation) -> some View {
-        Button("Open") { coordinator.openOrFocus(convo) }
+        Button("Open") { open(convo) }
         Button(pins.isPinned(convo.id) ? "Unpin" : "Pin",
                systemImage: pins.isPinned(convo.id) ? "pin.slash" : "pin") {
             pins.toggle(convo.id)
         }
+    }
+
+    /// Open a conversation on the next runloop turn — never synchronously from
+    /// a row tap/menu, which would re-enter the List's NSTableView delegate.
+    private func open(_ convo: Conversation) {
+        DispatchQueue.main.async { coordinator.openOrFocus(convo) }
     }
 
     private var emptyState: some View {

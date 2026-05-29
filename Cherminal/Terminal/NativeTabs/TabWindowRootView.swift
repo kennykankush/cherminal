@@ -62,7 +62,11 @@ struct TabWindowRootView: View {
             get: { conversation.id },
             set: { newID in
                 guard let newID, let convo = registry.conversation(id: newID) else { return }
-                coordinator.openOrFocus(convo)
+                // Defer to the next runloop: opening a tab mutates published
+                // state + AppKit windows, and doing that synchronously inside
+                // the List's selection commit re-enters the NSTableView delegate
+                // (the "reentrant operation" warning → eventual crash).
+                DispatchQueue.main.async { coordinator.openOrFocus(convo) }
             }
         )
     }
