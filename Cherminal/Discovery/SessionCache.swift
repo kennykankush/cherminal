@@ -13,7 +13,7 @@ import os
 /// safe to call from any thread — internal access is serialized by a lock.
 final class SessionCache: @unchecked Sendable {
     private static let logger = Logger(subsystem: "dev.hamulia.Cherminal", category: "cache")
-    private static let schemaVersion: Int = 3
+    private static let schemaVersion: Int = 5
 
     private var db: OpaquePointer?
     private let lock = NSLock()

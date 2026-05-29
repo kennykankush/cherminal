@@ -171,6 +171,11 @@ struct CodexSessionScanner {
         // recent `timestamp` field.
         let lastTimestamp = parseLastTimestamp(from: candidate.file) ?? firstTimestamp
 
+        // Codex's title index covers almost nothing, so fall back to the
+        // first real user prompt in the rollout (skipping injected wrapper
+        // blocks). Turns the sea of "Untitled" into something readable.
+        let preview = titles[id] ?? parseFirstUserMessage(from: candidate.file)
+
         let persisted = SessionCache.PersistedSummary(
             id: id,
             agentRaw: AgentKind.codex.rawValue,
@@ -178,7 +183,7 @@ struct CodexSessionScanner {
             firstTimestamp: firstTimestamp,
             lastTimestamp: lastTimestamp,
             messageCount: 0, // Codex's record types make this expensive; skip for v0.1.
-            previewText: titles[id]
+            previewText: preview
         )
         cache?.put(path: candidate.file.path,
                    mtime: candidate.mtime,
@@ -186,6 +191,53 @@ struct CodexSessionScanner {
                    summary: persisted)
 
         return Conversation(persisted: persisted, sessionFile: candidate.file)
+    }
+
+    // MARK: - First user message (title fallback)
+
+    /// Scan the start of the rollout for the first *real* user prompt — a
+    /// `response_item` message with `role: user` whose text isn't an injected
+    /// wrapper (`<environment_context>`, `<user_instructions>`, command tags).
+    private static func parseFirstUserMessage(from url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        // 512 KB covers the (large) session_meta line plus the first several
+        // records — the real prompt is always within them.
+        let window = (try? handle.read(upToCount: 512 * 1024)) ?? Data()
+        let newline = UInt8(ascii: "\n")
+        var lines = window.split(separator: newline, omittingEmptySubsequences: true)
+        guard lines.count > 1 else { return nil }
+        lines.removeFirst()  // skip session_meta
+
+        for line in lines {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  (obj["type"] as? String) == "response_item",
+                  let payload = obj["payload"] as? [String: Any],
+                  (payload["role"] as? String) == "user",
+                  let content = payload["content"] as? [[String: Any]] else { continue }
+            for block in content {
+                if let text = block["text"] as? String, let title = codexTitle(from: text) {
+                    return title
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Clean a Codex user text into a title, or nil if it's wrapper/system noise.
+    private static func codexTitle(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let lowered = trimmed.lowercased()
+        if lowered.hasPrefix("<environment_context") || lowered.hasPrefix("<user_instructions")
+            || lowered.hasPrefix("<command") || lowered.hasPrefix("<local-command")
+            || lowered.hasPrefix("caveat:") || trimmed.hasPrefix("[Request interrupted") {
+            return nil
+        }
+        let firstLine = trimmed.split(whereSeparator: \.isNewline).first.map(String.init) ?? trimmed
+        let cleaned = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "#>*- ").union(.whitespaces))
+        guard !cleaned.isEmpty else { return nil }
+        return String(cleaned.prefix(120))
     }
 
     // MARK: - Session_meta extraction

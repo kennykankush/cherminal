@@ -23,6 +23,10 @@ enum SessionParser {
         /// for the room — the encoded folder name can't be reversed when a
         /// room name contains a hyphen (e.g. `fantopy-hadi`).
         var cwd: String?
+        /// First real user prompt — the title fallback when a session has no
+        /// `ai-title`/`last-prompt` record (most of them don't), so the
+        /// sidebar shows something meaningful instead of "Untitled".
+        var firstUserMessage: String?
     }
 
     static func summarize(file: URL) throws -> Summary {
@@ -59,6 +63,7 @@ enum SessionParser {
         if summary.firstTimestamp == nil { summary.firstTimestamp = tailSummary.firstTimestamp }
         if tailSummary.aiTitle != nil, summary.aiTitle == nil { summary.aiTitle = tailSummary.aiTitle }
         if summary.cwd == nil { summary.cwd = tailSummary.cwd }
+        if summary.firstUserMessage == nil { summary.firstUserMessage = tailSummary.firstUserMessage }
 
         // Message count and line count from head+tail are a lower bound. For
         // an exact count we'd need the full file; rough is good enough for
@@ -151,10 +156,41 @@ enum SessionParser {
             if let msg = obj["message"] as? [String: Any],
                let content = msg["content"], !isToolResultEcho(content) {
                 summary.userMessageCount += 1
+                if summary.firstUserMessage == nil, let title = userTitle(from: content) {
+                    summary.firstUserMessage = title
+                }
             }
         default:
             break
         }
+    }
+
+    /// Derive a short, human title from a user message's content. Returns nil
+    /// for command/system noise so we fall through to the next real prompt.
+    private static func userTitle(from content: Any) -> String? {
+        var raw: String?
+        if let s = content as? String {
+            raw = s
+        } else if let arr = content as? [[String: Any]] {
+            for block in arr where (block["type"] as? String) == "text" {
+                if let t = block["text"] as? String { raw = t; break }
+            }
+        }
+        guard let text = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
+
+        // Skip injected command/system noise — not a real prompt.
+        let lowered = text.lowercased()
+        if lowered.hasPrefix("<command") || lowered.hasPrefix("<local-command")
+            || lowered.hasPrefix("caveat:") || text.hasPrefix("[Request interrupted")
+            || lowered.hasPrefix("<system-reminder") {
+            return nil
+        }
+
+        // First non-empty line, stripped of markdown header / quote markers.
+        let firstLine = text.split(whereSeparator: \.isNewline).first.map(String.init) ?? text
+        let cleaned = firstLine.trimmingCharacters(in: CharacterSet(charactersIn: "#>*- ").union(.whitespaces))
+        guard !cleaned.isEmpty else { return nil }
+        return String(cleaned.prefix(120))
     }
 
     private static func isToolResultEcho(_ content: Any) -> Bool {

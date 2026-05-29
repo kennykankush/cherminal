@@ -159,7 +159,9 @@ struct ClaudeSessionScanner {
         guard summary.totalLines > 0 else { return nil }
 
         let lastActivity = summary.lastTimestamp ?? Date(timeIntervalSince1970: candidate.mtime)
-        let preview = summary.aiTitle ?? summary.lastPrompt
+        // Fall back to the first real user prompt so sessions without an
+        // ai-title/last-prompt record (most of them) still read meaningfully.
+        let preview = summary.aiTitle ?? summary.lastPrompt ?? summary.firstUserMessage
         let id = candidate.file.deletingPathExtension().lastPathComponent
 
         // Prefer the real cwd recorded in the session over the lossy decode of
