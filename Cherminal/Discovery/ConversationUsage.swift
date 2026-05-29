@@ -205,18 +205,17 @@ enum ConversationUsageParser {
         ClaudeUsageAccumulator().ingest(file: sessionFile)
     }
 
+    /// Model substrings known to ship a 1M-token context window. This list
+    /// ages — keep it current — but it's not load-bearing: the
+    /// `observedUsed > base` guard below means an unknown 1M model still
+    /// self-corrects the moment its context grows past the 200K base.
+    private static let oneMillionContextMarkers = ["[1m]", "opus-4-7", "opus-4-8", "sonnet-4-6"]
+
     /// Mirror of burnrate's model→context-window inference, with a guard that
     /// bumps to 1M if we observe a turn larger than the inferred base.
     fileprivate static func inferContextWindow(model: String?, observedUsed: Int) -> Int {
         let lowered = (model ?? "").lowercased()
-        let base: Int
-        if lowered.contains("[1m]")
-            || lowered.contains("opus-4-7")
-            || lowered.contains("sonnet-4-6") {
-            base = 1_000_000
-        } else {
-            base = 200_000
-        }
+        let base = oneMillionContextMarkers.contains { lowered.contains($0) } ? 1_000_000 : 200_000
         return observedUsed > base ? 1_000_000 : base
     }
 

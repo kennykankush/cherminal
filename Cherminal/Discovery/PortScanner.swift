@@ -92,7 +92,7 @@ enum PortScanner {
                 port: l.port,
                 command: l.command,
                 pid: l.pid,
-                category: .of(l.port),
+                category: refinedCategory(port: l.port, command: l.command),
                 cwd: cwd,
                 roomName: room.map { URL(fileURLWithPath: $0).lastPathComponent },
                 conversationID: convo
@@ -101,13 +101,26 @@ enum PortScanner {
         return out
     }
 
+    /// Process name is ground truth for databases — the port can be remapped,
+    /// but `postgres`/`redis`/`mongod` are unambiguous. For frontend vs backend
+    /// the process is usually just `node`/`python`, so those stay port-based.
+    static func refinedCategory(port: Int, command: String) -> DevPort.Category {
+        let c = command.lowercased()
+        if c.hasPrefix("postgres") || c.hasPrefix("postmaster") || c.hasPrefix("mysqld")
+            || c.hasPrefix("mariadb") || c.hasPrefix("mongod") || c.hasPrefix("redis") {
+            return .database
+        }
+        return .of(port)
+    }
+
     // MARK: - lsof: listening ports
 
     private struct Listener { let pid: Int32; let command: String; let port: Int }
 
     private static func listeningPorts() -> [Listener] {
-        // -nP: no DNS/port-name lookups (fast). -Fpcn: machine-readable fields.
-        guard let raw = run("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]) else { return [] }
+        // -nP: no DNS/port-name lookups (fast). +c 0: don't truncate the command
+        // name (so we get `redis-server`, not `redis-ser`). -Fpcn: fields.
+        guard let raw = run("/usr/sbin/lsof", ["-nP", "+c", "0", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]) else { return [] }
         var out: [Listener] = []
         var pid: Int32 = 0
         var command = ""

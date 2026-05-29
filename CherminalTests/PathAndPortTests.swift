@@ -38,4 +38,12 @@ struct PortCategoryTests {
         #expect(DevPort.Category.of(3001) == .backend)    // api-next-to-3000
         #expect(DevPort.Category.of(54321) == .other)
     }
+
+    @Test func processNameOverridesPortForDatabases() {
+        // Postgres on a non-standard (frontend-band) port is still a database.
+        #expect(PortScanner.refinedCategory(port: 3000, command: "postgres") == .database)
+        #expect(PortScanner.refinedCategory(port: 5173, command: "redis-server") == .database)
+        // A plain node server falls back to the port band.
+        #expect(PortScanner.refinedCategory(port: 5173, command: "node") == .frontend)
+    }
 }

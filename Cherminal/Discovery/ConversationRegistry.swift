@@ -31,6 +31,9 @@ final class ConversationRegistry: ObservableObject {
     private var watcher: FilesystemWatcher?
     private var didBootstrap = false
     private var refreshInFlight: Task<Void, Never>?
+    /// Set when refresh() is called while a scan is already running, so the
+    /// loop runs once more and never drops a change that arrived mid-scan.
+    private var pendingRefresh = false
 
     init(cache: SessionCache? = nil) {
         if let cache {
@@ -53,11 +56,15 @@ final class ConversationRegistry: ObservableObject {
         didBootstrap = true
 
         // 1. Publish whatever the cache has so the sidebar renders instantly.
+        //    The load + JSON-decode of every row runs off the main actor so it
+        //    doesn't block first paint when there are hundreds of rows.
         if let cache {
-            let snapshot = cache.loadAll().compactMap { entry in
-                Conversation(persisted: entry.summary,
-                             sessionFile: URL(fileURLWithPath: entry.path))
-            }.sorted { $0.lastActivityAt > $1.lastActivityAt }
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                cache.loadAll().compactMap { entry in
+                    Conversation(persisted: entry.summary,
+                                 sessionFile: URL(fileURLWithPath: entry.path))
+                }.sorted { $0.lastActivityAt > $1.lastActivityAt }
+            }.value
             if !snapshot.isEmpty {
                 conversations = snapshot
             }
@@ -76,14 +83,20 @@ final class ConversationRegistry: ObservableObject {
     /// in-flight task is reused.
     func refresh() async {
         if let inflight = refreshInFlight {
+            // A change landed mid-scan — the in-flight pass may have already
+            // walked past it, so flag one more run after it completes.
+            pendingRefresh = true
             await inflight.value
             return
         }
 
-        let task = Task { await runScan() }
-        refreshInFlight = task
-        await task.value
-        refreshInFlight = nil
+        repeat {
+            pendingRefresh = false
+            let task = Task { await runScan() }
+            refreshInFlight = task
+            await task.value
+            refreshInFlight = nil
+        } while pendingRefresh
     }
 
     func conversation(id: Conversation.ID) -> Conversation? {

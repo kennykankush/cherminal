@@ -28,8 +28,12 @@ enum Diagnostics {
         let url = dir.appendingPathComponent("cherminal-debug.log")
         logURL = url
 
-        // Truncate on launch so each run starts clean (keeps the file small;
-        // the last run's crash breadcrumb has already served its purpose).
+        // Rotate, don't destroy: keep the previous run's log (which may hold a
+        // crash breadcrumb) as `.prev` before starting a fresh file. A crash
+        // that triggers an immediate relaunch then still leaves evidence.
+        let prev = dir.appendingPathComponent("cherminal-debug.prev.log")
+        try? FileManager.default.removeItem(at: prev)
+        try? FileManager.default.moveItem(at: url, to: prev)
         FileManager.default.createFile(atPath: url.path, contents: nil)
         fileHandle = try? FileHandle(forWritingTo: url)
 
