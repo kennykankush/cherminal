@@ -118,13 +118,19 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Bookmarks
 
-    /// Snapshot of every open tab, for saving as a bookmark group.
+    /// Snapshot of every open tab, for saving as a bookmark group. Resolves
+    /// each tab to what it's *actually running right now* (synchronous detect),
+    /// so a hand-launched `claude`/`codex` is saved as that conversation even
+    /// if the periodic adoption poll hasn't flipped the tab's identity yet —
+    /// otherwise the group would store a bare shell and reopen as one.
     func snapshot() -> [PersistedTab] {
-        controllers.map { c in
-            PersistedTab(
-                conversationID: c.conversation.id,
-                agentRaw: c.conversation.agent.rawValue,
-                roomPath: c.conversation.roomPath.path
+        let detected = detectLiveConversations()
+        return controllers.map { c in
+            let convo = detected[ObjectIdentifier(c)] ?? c.conversation
+            return PersistedTab(
+                conversationID: convo.id,
+                agentRaw: convo.agent.rawValue,
+                roomPath: convo.roomPath.path
             )
         }
     }
@@ -178,12 +184,7 @@ final class TabWindowCoordinator: ObservableObject {
     /// spawning a duplicate `--resume`.
     private func reconcileLiveSessions() async {
         // Foreground pid → controller for every tab whose surface is up.
-        var pidToController: [Int32: TerminalTabWindowController] = [:]
-        for c in controllers {
-            guard let surface = c.holder.surfaceView?.surface else { continue }
-            let pid = ghostty_surface_foreground_pid(surface)
-            if pid > 0 { pidToController[Int32(pid)] = c }
-        }
+        let pidToController = foregroundPIDs()
         let pids = Array(pidToController.keys)
 
         let info = await Task.detached(priority: .utility) {
@@ -197,6 +198,32 @@ final class TabWindowCoordinator: ObservableObject {
             if let detected { live.insert(detected.id) }
         }
         if liveConversationIDs != live { liveConversationIDs = live }
+    }
+
+    private func foregroundPIDs() -> [Int32: TerminalTabWindowController] {
+        var out: [Int32: TerminalTabWindowController] = [:]
+        for c in controllers {
+            guard let surface = c.holder.surfaceView?.surface else { continue }
+            let pid = ghostty_surface_foreground_pid(surface)
+            if pid > 0 { out[Int32(pid)] = c }
+        }
+        return out
+    }
+
+    /// Synchronous live detection (used by `snapshot()`): controller → the
+    /// agent conversation it's running, if any. Cheap `lsof` of a handful of
+    /// pids — fine on the save-group click.
+    private func detectLiveConversations() -> [ObjectIdentifier: Conversation] {
+        let pidToController = foregroundPIDs()
+        guard !pidToController.isEmpty else { return [:] }
+        let info = LiveSessionLinker.inspect(pids: Array(pidToController.keys))
+        var out: [ObjectIdentifier: Conversation] = [:]
+        for (pid, controller) in pidToController {
+            if let detected = detectConversation(for: info[pid]) {
+                out[ObjectIdentifier(controller)] = detected
+            }
+        }
+        return out
     }
 
     /// Resolve a tab's foreground process to a conversation: the open session
