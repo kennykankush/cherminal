@@ -16,7 +16,7 @@ struct TabWindowRootView: View {
     // App-wide, persisted — NOT per-window @State, so every tab shows the same
     // sidebar mode / inspector visibility instead of each tab remembering its
     // own (which made the mode look random when switching tabs).
-    @AppStorage("cherminal.sidebarMode") private var sidebarMode: SidebarView.Mode = .byRoom
+    @AppStorage("cherminal.sidebarMode") private var sidebarMode: SidebarView.Mode = .byRecent
     @AppStorage("cherminal.showContext") private var showContext = true
 
     var body: some View {

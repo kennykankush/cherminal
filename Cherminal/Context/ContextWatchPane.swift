@@ -1,65 +1,59 @@
 import SwiftUI
 import AppKit
 
+/// The right-hand inspector: a single calm, per-conversation readout. The
+/// context-window gauge is the centerpiece (visible the instant the inspector
+/// opens — no mode-switching). Pinning is a glyph in the header; the pinned
+/// *list* lives in the sidebar; saved groups live in the Window menu; dev-server
+/// ports collapse into an ambient footer that shows nothing when there are none.
 struct ContextWatchPane: View {
-    enum Tab: String, CaseIterable, Identifiable {
-        case context = "Context"
-        case pin = "Pin"
-        case group = "Group"
-        case port = "Port"
-        var id: String { rawValue }
-    }
-
     let conversation: Conversation?
 
     @EnvironmentObject private var registry: ConversationRegistry
-    @EnvironmentObject private var bookmarks: BookmarksManager
     @EnvironmentObject private var pins: PinsManager
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var ports: PortsManager
 
-    @State private var tab: Tab = .context
     @State private var usage: ConversationUsage?
-    @State private var renamingGroup: Bookmark?
-    @State private var renameText: String = ""
-    /// This pane's own Port-tab viewing state, so start/stop on the shared
-    /// PortsManager are balanced (exactly one start per stop) and its viewer
-    /// refcount stays correct across tab switches and disappearance.
+    @State private var showTokenDetails = false
+    @State private var portsExpanded = false
+    /// Balanced start/stop on the shared PortsManager (poll only while a pane
+    /// is on screen), so its viewer refcount can't drift.
     @State private var portViewing = false
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Divider().opacity(0.5)
-            switch tab {
-            case .context: contextTab
-            case .pin: pinTab
-            case .group: groupTab
-            case .port: portTab
+            if let convo = conversation {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: CHM.Space.lg) {
+                        headerRow(convo)
+                        if let usage {
+                            gaugeSection(usage)
+                            if !usage.rateWindows.isEmpty { limitsSection(usage) }
+                            tokensSection(usage)
+                        }
+                        sessionSection(convo)
+                    }
+                    .padding(CHM.Space.xl)
+                }
+                portsFooter
+            } else {
+                emptyState
             }
         }
-        // Poll dev ports only while the Port tab is visible. Balanced via
-        // `portViewing` so the shared manager's viewer refcount can't drift.
-        .onChange(of: tab) { _, newTab in
-            setPortViewing(newTab == .port)
-        }
+        .onAppear { setPortViewing(true) }
         .onDisappear { setPortViewing(false) }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
-        // Load + live-refresh usage for the active conversation. Re-parses
-        // every few seconds so the context gauge tracks the conversation as
-        // it grows. Fully local — reads the session JSONL only.
-        // Re-runs when the conversation OR the visible sub-tab changes, so the
-        // usage poll only runs while the Context tab is actually showing.
-        .task(id: "\(conversation?.id ?? "none")|\(tab == .context)") {
+        // Live-refresh usage for the active conversation. Claude folds in
+        // append-only deltas via the accumulator (which now survives for the
+        // conversation's lifetime — no tab toggle tears it down); Codex re-reads
+        // its tail. Fully local — reads the session JSONL only.
+        .task(id: conversation?.id) {
             usage = nil
-            guard tab == .context else { return }
             guard let convo = conversation,
                   convo.agent == .claudeCode || convo.agent == .codex else { return }
             let file = convo.sessionFile
             let agent = convo.agent
-            // Claude usage streams append-only — fold in deltas across polls
-            // instead of re-reading the whole session each time. (Codex carries
-            // a full token_count record in its tail, so it re-reads the tail.)
             let accumulator = ClaudeUsageAccumulator()
             while !Task.isCancelled {
                 let parsed = await Task.detached(priority: .utility) {
@@ -68,213 +62,62 @@ struct ContextWatchPane: View {
                         : accumulator.ingest(file: file)
                 }.value
                 if Task.isCancelled { break }
-                // Keep the last good reading if a poll found nothing new.
                 if let parsed { usage = parsed }
                 try? await Task.sleep(for: .seconds(8))
             }
         }
-        .alert("Rename group", isPresented: Binding(
-            get: { renamingGroup != nil },
-            set: { if !$0 { renamingGroup = nil } }
-        )) {
-            TextField("Name", text: $renameText)
-            Button("Cancel", role: .cancel) { renamingGroup = nil }
-            Button("Save") {
-                if let g = renamingGroup { bookmarks.rename(g.id, to: renameText) }
-                renamingGroup = nil
+    }
+
+    // MARK: - Header (identity + pin)
+
+    private func headerRow(_ convo: Conversation) -> some View {
+        HStack(alignment: .top, spacing: CHM.Space.sm) {
+            AgentBadge(agent: convo.agent, size: 22)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(convo.agent.displayName)
+                    .font(CHM.Font.bodyEmphasis)
+                Text(convo.previewText ?? "Untitled conversation")
+                    .font(CHM.Font.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
-        }
-    }
-
-    // MARK: - Context tab
-
-    @ViewBuilder
-    private var contextTab: some View {
-        if let convo = conversation {
-            ScrollView {
-                VStack(alignment: .leading, spacing: CHM.Space.xl) {
-                    if let usage {
-                        contextSection(usage)
-                        if !usage.rateWindows.isEmpty { limitsSection(usage) }
-                        tokensSection(usage)
-                    }
-                    sessionSection(convo)
-                    roomSection(convo)
-                }
-                .padding(CHM.Space.xl)
-            }
-        } else {
-            emptyState
-        }
-    }
-
-    // MARK: - Pin tab (single conversations)
-
-    @ViewBuilder
-    private var pinTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: CHM.Space.md) {
-                if let convo = conversation {
-                    Button {
-                        pins.toggle(convo.id)
-                    } label: {
-                        Label(
-                            pins.isPinned(convo.id) ? "Unpin this conversation" : "Pin this conversation",
-                            systemImage: pins.isPinned(convo.id) ? "pin.slash" : "pin"
-                        )
-                        .font(CHM.Font.captionEmphasis)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 6)
-                        .background(RoundedRectangle(cornerRadius: CHM.Radius.chip).fill(CHM.Color.hoverFill))
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                if pinnedConversations.isEmpty {
-                    placeholder("pin", "No pinned conversations",
-                                "Pin a conversation to keep it one click away, no matter which room it lives in.")
-                } else {
-                    ForEach(pinnedConversations) { convo in
-                        SavedRow(icon: "pin.fill", title: convo.previewText ?? "Untitled conversation",
-                                 subtitle: convo.roomName, count: nil)
-                            .onTapGesture { coordinator.openOrFocus(convo) }
-                            .contextMenu {
-                                Button("Open") { coordinator.openOrFocus(convo) }
-                                Button("Unpin", role: .destructive) { pins.toggle(convo.id) }
-                            }
-                    }
-                }
-            }
-            .padding(CHM.Space.lg)
-        }
-    }
-
-    private var pinnedConversations: [Conversation] {
-        pins.pinnedIDs.compactMap { registry.conversation(id: $0) }
-            .sorted { $0.lastActivityAt > $1.lastActivityAt }
-    }
-
-    // MARK: - Group tab (saved tab sets)
-
-    @ViewBuilder
-    private var groupTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: CHM.Space.md) {
-                Button {
-                    let tabs = coordinator.snapshot()
-                    if !tabs.isEmpty { bookmarks.create(name: "", tabs: tabs) }
-                } label: {
-                    Label(
-                        coordinator.tabCount > 0
-                            ? "Save \(coordinator.tabCount) open tab\(coordinator.tabCount == 1 ? "" : "s") as a group"
-                            : "No open tabs to save",
-                        systemImage: "square.stack.3d.up"
-                    )
+            Spacer(minLength: CHM.Space.xs)
+            Button {
+                pins.toggle(convo.id)
+            } label: {
+                Image(systemName: pins.isPinned(convo.id) ? "pin.fill" : "pin")
                     .font(CHM.Font.captionEmphasis)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-                    .background(RoundedRectangle(cornerRadius: CHM.Radius.chip).fill(CHM.Color.hoverFill))
-                }
-                .buttonStyle(.plain)
-                .disabled(coordinator.tabCount == 0)
-
-                if bookmarks.bookmarks.isEmpty {
-                    placeholder("square.stack.3d.up", "No saved groups",
-                                "Save the set of tabs you're working in as a group, then reopen them all at once.")
-                } else {
-                    ForEach(bookmarks.bookmarks) { group in
-                        SavedRow(icon: "square.stack.3d.up.fill", title: group.name,
-                                 subtitle: nil, count: group.tabs.count)
-                            .onTapGesture { bookmarks.open(group, registry: registry, coordinator: coordinator) }
-                            .contextMenu {
-                                Button("Open") { bookmarks.open(group, registry: registry, coordinator: coordinator) }
-                                Button("Rename…") { renameText = group.name; renamingGroup = group }
-                                Divider()
-                                Button("Delete", role: .destructive) { bookmarks.delete(group.id) }
-                            }
-                    }
-                }
+                    .foregroundStyle(pins.isPinned(convo.id) ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.tertiary))
+                    .rotationEffect(.degrees(pins.isPinned(convo.id) ? 0 : 0))
             }
-            .padding(CHM.Space.lg)
+            .buttonStyle(.plain)
+            .help(pins.isPinned(convo.id) ? "Unpin this conversation" : "Pin this conversation")
         }
+        .padding(.top, 24)   // clear the traffic-light overlay (hiddenTitleBar)
     }
 
-    // MARK: - Port tab (dev-server port watcher)
+    // MARK: - Gauge (the centerpiece)
 
-    @ViewBuilder
-    private var portTab: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: CHM.Space.lg) {
-                if ports.ports.isEmpty {
-                    placeholder("network", "No dev servers",
-                                "Listening ports for servers started in your rooms (frontend, backend, DB) show up here, grouped and tagged with the chat that spawned them.")
-                } else {
-                    ForEach(DevPort.Category.allCases, id: \.self) { category in
-                        let rows = ports.ports.filter { $0.category == category }
-                        if !rows.isEmpty {
-                            VStack(alignment: .leading, spacing: CHM.Space.xs) {
-                                Text(category.rawValue)
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                                    .textCase(.uppercase)
-                                    .tracking(0.7)
-                                ForEach(rows) { p in
-                                    PortRow(port: p, chatName: chatName(for: p))
-                                        .onTapGesture { openInBrowser(p.port) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(CHM.Space.lg)
-        }
-    }
-
-    /// Friendly name for the chat/room a port is attributed to.
-    private func chatName(for p: DevPort) -> String? {
-        if let cid = p.conversationID, let convo = registry.conversation(id: cid) {
-            return convo.previewText ?? convo.roomName
-        }
-        return p.roomName
-    }
-
-    /// Toggle this pane's Port-tab viewing exactly once per transition, so the
-    /// shared PortsManager's viewer count stays balanced.
-    private func setPortViewing(_ on: Bool) {
-        guard on != portViewing else { return }
-        portViewing = on
-        if on { ports.start() } else { ports.stop() }
-    }
-
-    private func openInBrowser(_ port: Int) {
-        guard let url = URL(string: "http://localhost:\(port)") else { return }
-        NSWorkspace.shared.open(url)
-    }
-
-    // MARK: - Usage sections
-
-    private func contextSection(_ u: ConversationUsage) -> some View {
+    private func gaugeSection(_ u: ConversationUsage) -> some View {
         section("Context window") {
             VStack(alignment: .leading, spacing: CHM.Space.sm) {
                 HStack(alignment: .firstTextBaseline, spacing: CHM.Space.xs) {
                     Text("\(Int(u.contextUsedPercent))%")
-                        .font(.system(size: 28, weight: .semibold, design: .rounded))
+                        .font(CHM.Font.metric)
                         .foregroundStyle(usageColor(u.contextUsedPercent))
                         .monospacedDigit()
+                        .animation(CHM.Motion.appear, value: u.contextUsedPercent)
                     Text("full")
                         .font(CHM.Font.caption)
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     if let model = u.modelDisplayName {
                         Text(model)
-                            .font(CHM.Font.captionEmphasis)
-                            .foregroundStyle(.secondary)
+                            .font(CHM.Font.caption)
+                            .foregroundStyle(.tertiary)
                     }
                 }
-
                 usageBar(percent: u.contextUsedPercent)
-
                 HStack {
                     Text("\(formatTokens(u.contextUsedTokens)) / \(formatTokens(u.contextWindowTokens))")
                     Spacer()
@@ -293,9 +136,7 @@ struct ContextWatchPane: View {
                 ForEach(u.rateWindows) { w in
                     VStack(alignment: .leading, spacing: 3) {
                         HStack {
-                            Text(w.label)
-                                .font(CHM.Font.captionEmphasis)
-                                .foregroundStyle(.secondary)
+                            Text(w.label).font(CHM.Font.caption).foregroundStyle(.secondary)
                             Spacer()
                             Text("\(Int(w.usedPercent))%")
                                 .font(CHM.Font.captionEmphasis)
@@ -305,7 +146,7 @@ struct ContextWatchPane: View {
                         usageBar(percent: w.usedPercent)
                         if let resets = w.resetsAt {
                             Text("resets \(resets.formatted(.relative(presentation: .named)))")
-                                .font(.system(size: 10))
+                                .font(CHM.Font.caption)
                                 .foregroundStyle(.tertiary)
                         }
                     }
@@ -314,23 +155,47 @@ struct ContextWatchPane: View {
         }
     }
 
+    /// Calm ramp: neutral until 75%, the app's clay accent 75–90%, a muted
+    /// (desaturated) red only at 90%+. One color on screen; soft fades.
+    private func usageColor(_ percent: Double) -> Color {
+        switch percent {
+        case ..<75: return .secondary
+        case ..<90: return CHM.Color.accent
+        default:    return CHM.Color.alert
+        }
+    }
+
+    private func usageBar(percent: Double) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(CHM.Color.hairline)
+                Capsule()
+                    .fill(usageColor(percent))
+                    .frame(width: max(3, geo.size.width * CGFloat(percent / 100)))
+                    .animation(CHM.Motion.appear, value: percent)
+            }
+        }
+        .frame(height: 6)
+    }
+
+    // MARK: - Tokens (one line + details)
+
     private func tokensSection(_ u: ConversationUsage) -> some View {
         section("Tokens this session") {
-            VStack(spacing: CHM.Space.xs) {
-                tokenRow("Input", u.totalInputTokens)
-                tokenRow("Output", u.totalOutputTokens)
-                tokenRow("Cache read", u.cacheReadTokens)
-                tokenRow("Cache write", u.cacheCreateTokens)
-                Divider().opacity(0.25).padding(.vertical, 2)
-                HStack {
-                    Text("Cache hit")
-                        .font(CHM.Font.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(Int(u.cacheHitPercent))%")
-                        .font(CHM.Font.captionEmphasis)
-                        .foregroundStyle(.primary)
-                        .monospacedDigit()
+            VStack(alignment: .leading, spacing: CHM.Space.xs) {
+                Text("In \(formatTokens(u.totalInputTokens)) · Out \(formatTokens(u.totalOutputTokens)) · \(Int(u.cacheHitPercent))% cached")
+                    .font(CHM.Font.monoSmall)
+                    .foregroundStyle(.tertiary)
+                DisclosureGroup(isExpanded: $showTokenDetails) {
+                    VStack(spacing: CHM.Space.xs) {
+                        tokenRow("Input", u.totalInputTokens)
+                        tokenRow("Output", u.totalOutputTokens)
+                        tokenRow("Cache read", u.cacheReadTokens)
+                        tokenRow("Cache write", u.cacheCreateTokens)
+                    }
+                    .padding(.top, CHM.Space.xs)
+                } label: {
+                    Text("Details").font(CHM.Font.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -338,115 +203,126 @@ struct ContextWatchPane: View {
 
     private func tokenRow(_ label: String, _ value: Int) -> some View {
         HStack {
-            Text(label)
-                .font(CHM.Font.caption)
-                .foregroundStyle(.secondary)
+            Text(label).font(CHM.Font.caption).foregroundStyle(.secondary)
             Spacer()
-            Text(formatTokens(value))
-                .font(CHM.Font.monoSmall)
-                .foregroundStyle(.primary)
+            Text(formatTokens(value)).font(CHM.Font.monoSmall).foregroundStyle(.primary)
         }
     }
 
-    private func usageBar(percent: Double) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.10))
-                Capsule()
-                    .fill(usageColor(percent))
-                    .frame(width: max(3, geo.size.width * CGFloat(percent / 100)))
-                    .animation(.easeOut(duration: 0.25), value: percent)
-            }
-        }
-        .frame(height: 6)
-    }
-
-    private func usageColor(_ percent: Double) -> Color {
-        switch percent {
-        case ..<70: return .green
-        case ..<90: return .orange
-        default: return .red
-        }
-    }
-
-    private func formatTokens(_ n: Int) -> String {
-        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
-        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
-        return "\(n)"
-    }
-
-    // MARK: - Metadata sections
+    // MARK: - Session (identity + room, merged)
 
     private func sessionSection(_ convo: Conversation) -> some View {
         section("Session") {
-            HStack(spacing: CHM.Space.sm) {
-                AgentBadge(agent: convo.agent, size: 22)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(convo.agent.displayName)
-                        .font(CHM.Font.bodyEmphasis)
-                    Text(convo.previewText ?? "Untitled conversation")
-                        .font(CHM.Font.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                // Only an exact, trustworthy count (Claude); hidden otherwise.
+                if let count = usage?.messageCount {
+                    metaRow("Messages", "\(count)")
                 }
-                Spacer(minLength: 0)
+                if let first = convo.firstMessageAt {
+                    metaRow("Started", first.formatted(date: .abbreviated, time: .shortened))
+                }
+                metaRow("Last activity", convo.lastActivityAt.formatted(date: .abbreviated, time: .shortened))
+                metaRow("Folder", convo.roomName)
+                metaRow("Path", convo.roomPath.path, mono: true)
             }
-            .padding(.bottom, CHM.Space.xs)
-            // Only show a message count we can stand behind: the exact count
-            // from the full usage parse (Claude). Hidden otherwise rather than
-            // surfacing the head/tail lower bound or Codex's placeholder 0.
-            if let count = usage?.messageCount {
-                keyValue("Messages", "\(count)")
-            }
-            if let first = convo.firstMessageAt {
-                keyValue("Started", first.formatted(date: .abbreviated, time: .shortened))
-            }
-            keyValue("Last activity", convo.lastActivityAt.formatted(date: .abbreviated, time: .shortened))
         }
     }
 
-    private func roomSection(_ convo: Conversation) -> some View {
-        section("Room") {
-            keyValue("Folder", convo.roomName)
-            keyValue("Path", convo.roomPath.path, mono: true)
+    private func metaRow(_ key: String, _ value: String, mono: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: CHM.Space.sm) {
+            Text(key)
+                .font(CHM.Font.caption)
+                .foregroundStyle(.secondary)
+                .frame(width: 82, alignment: .leading)
+            Text(value)
+                .font(mono ? CHM.Font.monoSmall : CHM.Font.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .lineLimit(mono ? 2 : 1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
         }
+    }
+
+    // MARK: - Ports footer (ambient)
+
+    @ViewBuilder
+    private var portsFooter: some View {
+        if !ports.ports.isEmpty {
+            VStack(spacing: 0) {
+                Divider().opacity(0.5)
+                Button {
+                    withAnimation(CHM.Motion.appear) { portsExpanded.toggle() }
+                } label: {
+                    HStack(spacing: CHM.Space.xs) {
+                        Image(systemName: "network").font(CHM.Font.caption).foregroundStyle(.tertiary)
+                        Text("\(ports.ports.count) dev server\(ports.ports.count == 1 ? "" : "s")")
+                            .font(CHM.Font.captionEmphasis)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Image(systemName: portsExpanded ? "chevron.down" : "chevron.up")
+                            .font(CHM.Font.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, CHM.Space.lg)
+                    .padding(.vertical, CHM.Space.sm)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if portsExpanded {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                            ForEach(DevPort.Category.allCases, id: \.self) { category in
+                                let rows = ports.ports.filter { $0.category == category }
+                                if !rows.isEmpty {
+                                    VStack(alignment: .leading, spacing: CHM.Space.xs) {
+                                        Text(category.rawValue)
+                                            .font(CHM.Font.eyebrow)
+                                            .foregroundStyle(.secondary)
+                                            .textCase(.uppercase)
+                                            .tracking(0.6)
+                                        ForEach(rows) { p in
+                                            PortRow(port: p, chatName: chatName(for: p))
+                                                .onTapGesture { openInBrowser(p.port) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, CHM.Space.lg)
+                        .padding(.bottom, CHM.Space.md)
+                    }
+                    .frame(maxHeight: 220)
+                }
+            }
+        }
+    }
+
+    private func chatName(for p: DevPort) -> String? {
+        if let cid = p.conversationID, let convo = registry.conversation(id: cid) {
+            return convo.previewText ?? convo.roomName
+        }
+        return p.roomName
+    }
+
+    private func setPortViewing(_ on: Bool) {
+        guard on != portViewing else { return }
+        portViewing = on
+        if on { ports.start() } else { ports.stop() }
+    }
+
+    private func openInBrowser(_ port: Int) {
+        guard let url = URL(string: "http://localhost:\(port)") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - Chrome
 
-    private var header: some View {
-        Picker("", selection: $tab) {
-            ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
-        }
-        .pickerStyle(.segmented)
-        .labelsHidden()
-        .controlSize(.small)
-        .padding(.top, 28)
-        .padding(.horizontal, CHM.Space.md)
-        .padding(.bottom, CHM.Space.sm)
-    }
-
-    private func placeholder(_ icon: String, _ title: String, _ detail: String) -> some View {
-        VStack(spacing: CHM.Space.sm) {
-            Image(systemName: icon)
-                .font(.system(size: 30, weight: .light))
-                .foregroundStyle(.tertiary)
-            Text(title)
-                .font(CHM.Font.bodyEmphasis)
-            Text(detail)
-                .font(CHM.Font.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, CHM.Space.xxl)
-        .padding(.horizontal, CHM.Space.sm)
-    }
-
     private var emptyState: some View {
         VStack(spacing: CHM.Space.sm) {
             Image(systemName: "sparkles.rectangle.stack")
-                .font(.system(size: 36, weight: .light))
+                .font(.system(size: CHM.Icon.emptyState, weight: .light))
                 .foregroundStyle(.tertiary)
             Text("Nothing selected")
                 .font(CHM.Font.bodyEmphasis)
@@ -471,19 +347,10 @@ struct ContextWatchPane: View {
         }
     }
 
-    private func keyValue(_ key: String, _ value: String, mono: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(key.uppercased())
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .tracking(0.5)
-            Text(value)
-                .font(mono ? CHM.Font.monoSmall : CHM.Font.body)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-                .lineLimit(mono ? 3 : 2)
-                .truncationMode(.middle)
-        }
+    private func formatTokens(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
+        return "\(n)"
     }
 }
 
@@ -502,68 +369,27 @@ private struct PortRow: View {
                 .foregroundStyle(.primary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(port.command)
-                    .font(.system(size: 12))
+                    .font(CHM.Font.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 if let chatName {
                     Text(chatName)
-                        .font(.system(size: 11))
+                        .font(CHM.Font.caption)
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
             }
             Spacer(minLength: CHM.Space.xs)
             Image(systemName: hovering ? "arrow.up.forward.app.fill" : "arrow.up.forward.app")
-                .font(.system(size: 12))
+                .font(CHM.Font.caption)
                 .foregroundStyle(hovering ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.tertiary))
         }
         .padding(.vertical, 5)
         .padding(.horizontal, CHM.Space.sm)
         .contentShape(Rectangle())
         .background(RoundedRectangle(cornerRadius: CHM.Radius.chip)
-            .fill(Color.primary.opacity(hovering ? 0.07 : 0.04)))
+            .fill(hovering ? CHM.Color.hoverFill : CHM.Color.fillSubtle))
         .onHover { hovering = $0 }
         .help("Open http://localhost:\(port.port)")
-    }
-}
-
-/// A tappable row for a saved pin or group in the context pane.
-private struct SavedRow: View {
-    let icon: String
-    let title: String
-    var subtitle: String?
-    var count: Int?
-
-    var body: some View {
-        HStack(spacing: CHM.Space.sm) {
-            Image(systemName: icon)
-                .font(.system(size: 11))
-                .foregroundStyle(CHM.Color.accent)
-                .frame(width: 16)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title.isEmpty ? "Untitled" : title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: CHM.Space.xs)
-            if let count {
-                Text("\(count)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
-            }
-        }
-        .padding(.vertical, 5)
-        .padding(.horizontal, CHM.Space.sm)
-        .contentShape(Rectangle())
-        .background(RoundedRectangle(cornerRadius: CHM.Radius.chip).fill(Color.primary.opacity(0.04)))
     }
 }

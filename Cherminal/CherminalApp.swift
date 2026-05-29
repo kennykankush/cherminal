@@ -79,8 +79,89 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
             env.coordinator.openFreshShell()
         }
         installTabShortcutMonitor()
+        installGroupsMenu()
         Task { @MainActor in
             await env.registry.bootstrap()
+        }
+    }
+
+    // MARK: - Groups menu
+    //
+    // Saved tab-groups live in the menu bar (per the inspector restructure).
+    // Built in AppKit with explicit targets/actions because SwiftUI `.commands`
+    // don't reliably route to this app's AppKit windows. Rebuilt on open so it
+    // reflects the current bookmark set.
+
+    private var groupsMenu: NSMenu?
+
+    private func installGroupsMenu() {
+        guard let mainMenu = NSApp.mainMenu else { return }
+        let menu = NSMenu(title: "Groups")
+        menu.delegate = self
+        let item = NSMenuItem()
+        item.title = "Groups"
+        item.submenu = menu
+        // Sit just left of the Window menu (fall back to appending).
+        let idx = mainMenu.indexOfItem(withTitle: "Window")
+        if idx >= 0 { mainMenu.insertItem(item, at: idx) } else { mainMenu.addItem(item) }
+        groupsMenu = menu
+        MainActor.assumeIsolated { rebuildGroupsMenu() }
+    }
+
+    @MainActor
+    private func rebuildGroupsMenu() {
+        guard let menu = groupsMenu else { return }
+        menu.removeAllItems()
+        let save = NSMenuItem(title: "Save Open Tabs as Group",
+                              action: #selector(saveGroupAction), keyEquivalent: "")
+        save.target = self
+        save.isEnabled = AppEnvironment.shared.coordinator.tabCount > 0
+        menu.addItem(save)
+        menu.addItem(.separator())
+
+        let bookmarks = AppEnvironment.shared.bookmarks.bookmarks
+        if bookmarks.isEmpty {
+            let none = NSMenuItem(title: "No Saved Groups", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        } else {
+            for g in bookmarks {
+                let sub = NSMenu()
+                let open = NSMenuItem(title: "Open", action: #selector(openGroupAction(_:)), keyEquivalent: "")
+                open.target = self; open.representedObject = g.id
+                sub.addItem(open)
+                let del = NSMenuItem(title: "Delete", action: #selector(deleteGroupAction(_:)), keyEquivalent: "")
+                del.target = self; del.representedObject = g.id
+                sub.addItem(del)
+                let name = g.name.isEmpty ? "Untitled" : g.name
+                let item = NSMenuItem(title: "\(name) (\(g.tabs.count))", action: nil, keyEquivalent: "")
+                item.submenu = sub
+                menu.addItem(item)
+            }
+        }
+    }
+
+    @objc private func saveGroupAction() {
+        MainActor.assumeIsolated {
+            let env = AppEnvironment.shared
+            let tabs = env.coordinator.snapshot()
+            if !tabs.isEmpty { env.bookmarks.create(name: "", tabs: tabs) }
+        }
+    }
+
+    @objc private func openGroupAction(_ sender: NSMenuItem) {
+        MainActor.assumeIsolated {
+            guard let id = sender.representedObject as? UUID else { return }
+            let env = AppEnvironment.shared
+            guard let g = env.bookmarks.bookmarks.first(where: { $0.id == id }) else { return }
+            env.bookmarks.open(g, registry: env.registry, coordinator: env.coordinator)
+        }
+    }
+
+    @objc private func deleteGroupAction(_ sender: NSMenuItem) {
+        MainActor.assumeIsolated {
+            guard let id = sender.representedObject as? UUID else { return }
+            AppEnvironment.shared.bookmarks.delete(id)
         }
     }
 
@@ -127,5 +208,12 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
+    }
+}
+
+extension CherminalAppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === groupsMenu else { return }
+        MainActor.assumeIsolated { rebuildGroupsMenu() }
     }
 }

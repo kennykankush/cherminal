@@ -9,6 +9,7 @@ struct SidebarView: View {
 
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
+    @EnvironmentObject private var pins: PinsManager
     @Binding var mode: Mode
     @Binding var selection: Conversation.ID?
 
@@ -70,12 +71,12 @@ struct SidebarView: View {
             .frame(height: 30)
             .padding(.horizontal, 9)
             .background(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
+                RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                    .fill(CHM.Color.hoverFill)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.07), lineWidth: 1)
+                RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                    .strokeBorder(CHM.Color.hairline, lineWidth: 1)
             )
 
             ModeToggle(mode: $mode)
@@ -100,12 +101,14 @@ struct SidebarView: View {
             switch mode {
             case .byRoom:
                 List(selection: $selection) {
+                    pinnedSection
                     ForEach(filteredRooms) { room in
                         Section {
                             if roomIsExpanded(room) {
                                 ForEach(room.conversations) { convo in
                                     ConversationRow(conversation: convo,
-                                                    isLive: coordinator.liveConversationIDs.contains(convo.id))
+                                                    isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                                    isPinned: pins.isPinned(convo.id))
                                         .tag(convo.id as Conversation.ID?)
                                 }
                             }
@@ -127,14 +130,51 @@ struct SidebarView: View {
                 .onAppear(perform: seedExpandedRoom)
             case .byRecent:
                 List(selection: $selection) {
+                    pinnedSection
                     ForEach(filteredConversations) { convo in
                         ConversationRow(conversation: convo, showRoom: true,
-                                        isLive: coordinator.liveConversationIDs.contains(convo.id))
+                                        isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                        isPinned: pins.isPinned(convo.id))
                             .tag(convo.id as Conversation.ID?)
                     }
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+            }
+        }
+    }
+
+    // MARK: - Pinned (cross-room shortcuts)
+
+    private var pinnedConversations: [Conversation] {
+        pins.pinnedIDs.compactMap { registry.conversation(id: $0) }
+            .sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    /// Pinned conversations live above the room/recent list as one-click
+    /// cross-room shortcuts. They open on tap (not via List selection) so they
+    /// don't clash with the same conversation appearing below in its room.
+    @ViewBuilder
+    private var pinnedSection: some View {
+        if !pinnedConversations.isEmpty {
+            Section {
+                ForEach(pinnedConversations) { convo in
+                    ConversationRow(conversation: convo, showRoom: true,
+                                    isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                    isPinned: true)
+                        .contentShape(Rectangle())
+                        .onTapGesture { coordinator.openOrFocus(convo) }
+                        .contextMenu {
+                            Button("Open") { coordinator.openOrFocus(convo) }
+                            Button("Unpin", role: .destructive) { pins.toggle(convo.id) }
+                        }
+                }
+            } header: {
+                Text("Pinned")
+                    .font(CHM.Font.eyebrow)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
             }
         }
     }
@@ -182,7 +222,8 @@ struct SidebarView: View {
                         conversation: convo,
                         showRoom: true,
                         snippet: bodyHits[convo.sessionFile.path],
-                        isLive: coordinator.liveConversationIDs.contains(convo.id)
+                        isLive: coordinator.liveConversationIDs.contains(convo.id),
+                        isPinned: pins.isPinned(convo.id)
                     )
                     .tag(convo.id as Conversation.ID?)
                 }
@@ -339,6 +380,8 @@ private struct ConversationRow: View {
     var snippet: String? = nil
     /// This conversation is running live in an open tab right now.
     var isLive: Bool = false
+    /// Pinned — show a small marker so pin state is visible while browsing.
+    var isPinned: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: CHM.Space.sm) {
@@ -377,7 +420,13 @@ private struct ConversationRow: View {
                         .padding(.top, 1)
                 }
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: CHM.Space.xs)
+            if isPinned {
+                Image(systemName: "pin.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(CHM.Color.accent)
+                    .padding(.top, 3)
+            }
         }
         .padding(.vertical, 6)
         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
