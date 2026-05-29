@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import GhosttyKit
 
 @main
@@ -77,9 +78,51 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         if env.coordinator.isEmpty {
             env.coordinator.openFreshShell()
         }
+        installTabShortcutMonitor()
         Task { @MainActor in
             await env.registry.bootstrap()
         }
+    }
+
+    // MARK: - Tab keyboard shortcuts
+    //
+    // Cherminal's windows are AppKit NSWindows, not SwiftUI scene windows, and
+    // the only Scene is `Settings`. SwiftUI `.commands` shortcuts don't route to
+    // a key AppKit window (even ⌘T was dead), so we intercept the keys with a
+    // local monitor and drive the coordinator directly. Guarded to our own
+    // windows so the Settings window / other apps' shortcuts are untouched.
+
+    private var shortcutMonitor: Any?
+
+    private func installTabShortcutMonitor() {
+        guard shortcutMonitor == nil else { return }
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            // Local monitors fire on the main thread before menu/responder
+            // dispatch; consuming (returning nil) keeps the key from reaching
+            // the focused terminal surface.
+            let handled = MainActor.assumeIsolated { CherminalAppDelegate.handleTabShortcut(event) }
+            return handled ? nil : event
+        }
+    }
+
+    @MainActor
+    private static func handleTabShortcut(_ event: NSEvent) -> Bool {
+        // Only when one of our terminal tab windows is key.
+        guard let key = NSApp.keyWindow,
+              key.tabbingIdentifier == "belvedere-native",
+              let chars = event.charactersIgnoringModifiers, !chars.isEmpty else { return false }
+
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let coordinator = AppEnvironment.shared.coordinator
+
+        if mods == .command {
+            if chars == "t" { coordinator.openFreshShell(); return true }
+            if let n = Int(chars), (1...9).contains(n) { coordinator.selectTab(number: n); return true }
+        } else if mods == [.command, .shift] {
+            if chars == "]" || chars == "}" { coordinator.selectNextTab(); return true }
+            if chars == "[" || chars == "{" { coordinator.selectPreviousTab(); return true }
+        }
+        return false
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
