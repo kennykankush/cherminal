@@ -174,6 +174,9 @@ struct SidebarView: View {
                                     isLive: coordinator.liveConversationIDs.contains(convo.id),
                                     isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                     isPinned: true)
+                        // Pinned rows aren't List-selectable (they open on tap),
+                        // so highlight the active one manually for "you are here".
+                        .listRowBackground(convo.id == selection ? CHM.Color.activeFill : Color.clear)
                         .contentShape(Rectangle())
                         .onTapGesture { open(convo) }
                         .contextMenu {

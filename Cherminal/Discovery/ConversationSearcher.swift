@@ -30,7 +30,13 @@ enum ConversationSearcher {
         ].filter { FileManager.default.fileExists(atPath: $0) }
         guard !roots.isEmpty else { return [] }
 
+        // grep returns files in filesystem-walk order; sort by recency so the
+        // `limit` keeps the most recently-active matches, not whatever the walk
+        // happened to list first.
         let candidates = candidateFiles(query: query, roots: roots)
+            .map { (path: $0, mtime: (try? FileManager.default.attributesOfItem(atPath: $0)[.modificationDate] as? Date) ?? nil) }
+            .sorted { ($0.mtime ?? .distantPast) > ($1.mtime ?? .distantPast) }
+            .map { $0.path }
         let needle = query.lowercased()
 
         var hits: [Hit] = []

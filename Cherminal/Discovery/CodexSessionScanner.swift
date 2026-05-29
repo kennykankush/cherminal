@@ -211,13 +211,16 @@ struct CodexSessionScanner {
         return CodexMeta(id: id, cwd: cwd, timestamp: ts)
     }
 
-    /// Read the last 8KB of the file, scan from the end backward through the
-    /// JSON-Lines records, return the most recent `timestamp` field we find.
+    /// Read the file tail, scan from the end backward through the JSON-Lines
+    /// records, return the most recent `timestamp` field we find. 64 KB (not
+    /// 8 KB) so a single large trailing `response_item` can't push the last
+    /// timestamped line out of the window — which would make a recently-active
+    /// session fall back to its start time and sink to the bottom of Recent.
     private static func parseLastTimestamp(from url: URL) -> Date? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
-        let chunk: UInt64 = 8 * 1024
+        let chunk: UInt64 = 64 * 1024
         let from: UInt64 = size > chunk ? size - chunk : 0
         try? handle.seek(toOffset: from)
         let data = (try? handle.readToEnd()) ?? Data()

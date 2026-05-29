@@ -43,6 +43,10 @@ final class TabWindowCoordinator: ObservableObject {
     /// double-write tab identities / the live set).
     private var reconciling = false
 
+    /// Notification observer tokens, removed in deinit (harmless today as a
+    /// singleton, but correct if this ever stops being one).
+    private var observers: [any NSObjectProtocol] = []
+
     init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager) {
         self.registry = registry
         self.ghostty = ghostty
@@ -50,16 +54,20 @@ final class TabWindowCoordinator: ObservableObject {
 
         // "Your turn" attention light: flag a tab when its agent rings the bell
         // (turn finished), clear it the moment you focus that tab.
-        NotificationCenter.default.addObserver(
+        observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyBellDidRing, object: nil, queue: .main
         ) { [weak self] note in
             MainActor.assumeIsolated { self?.handleBell(note.object) }
-        }
-        NotificationCenter.default.addObserver(
+        })
+        observers.append(NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] note in
             MainActor.assumeIsolated { self?.clearAwaiting(forWindow: note.object as? NSWindow) }
-        }
+        })
+    }
+
+    deinit {
+        observers.forEach { NotificationCenter.default.removeObserver($0) }
     }
 
     // MARK: - Attention light
@@ -68,6 +76,10 @@ final class TabWindowCoordinator: ObservableObject {
         guard let surface = object as? Ghostty.SurfaceView,
               let controller = controllers.first(where: { $0.holder.surfaceView === surface })
         else { return }
+        // Only agent tabs get the "your turn" light — the bell is a proxy for
+        // turn-finished, and a plain shell ringing it isn't "your turn". (An
+        // adopted shell reads as its agent here, so it still qualifies.)
+        guard controller.conversation.agent != .shell else { return }
         // If you're already looking at this tab, there's nothing to flag.
         if controller.window?.isKeyWindow == true { return }
         awaitingTurnIDs.insert(controller.conversation.id)
@@ -298,6 +310,10 @@ final class TabWindowCoordinator: ObservableObject {
         var live: Set<String> = []
         var adopted: Set<String> = []   // conversations already claimed this pass
         for (pid, controller) in foregroundPIDs() {
+            // `info` was captured before the await; only trust it for a pid that
+            // still maps to the SAME controller, so a pid reused by the OS in
+            // the window can't mis-attribute the inspected data.
+            guard pidToController[pid] === controller else { continue }
             if controller.base.agent == .shell {
                 // A bare shell tab: adopt the agent it hand-launched (or revert
                 // to shell when none is running). If another shell tab in the

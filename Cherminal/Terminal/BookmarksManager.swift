@@ -33,6 +33,9 @@ final class BookmarksManager: ObservableObject {
         let finalName = trimmed.isEmpty ? defaultName() : trimmed
         let bookmark = Bookmark(name: finalName, tabs: tabs)
         bookmarks.insert(bookmark, at: 0)
+        // Keep the in-memory order matching loadBookmarks (updated_at DESC), so
+        // it can't diverge from a reload on exact-timestamp ties.
+        bookmarks.sort { $0.updatedAt > $1.updatedAt }
         cache?.saveBookmark(bookmark)
     }
 
