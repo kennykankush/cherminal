@@ -29,11 +29,15 @@ struct SidebarView: View {
         // (in-memory); this adds matches found inside conversation bodies.
         .task(id: search) {
             let query = search
+            guard query.trimmingCharacters(in: .whitespaces).count >= 2 else {
+                bodyHits = [:]; searchingBodies = false; return
+            }
+            // Flag "searching" *before* the debounce so a body-only query shows
+            // a spinner rather than a false "No matches" during the wait.
+            searchingBodies = true
             bodyHits = [:]
-            guard query.trimmingCharacters(in: .whitespaces).count >= 2 else { return }
             try? await Task.sleep(for: .milliseconds(180))   // debounce
             guard !Task.isCancelled else { return }
-            searchingBodies = true
             let hits = await Task.detached(priority: .userInitiated) {
                 ConversationSearcher.search(query: query)
             }.value

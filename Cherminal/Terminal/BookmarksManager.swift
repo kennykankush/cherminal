@@ -65,7 +65,11 @@ final class BookmarksManager: ObservableObject {
         for persisted in bookmark.tabs {
             let convo: Conversation
             if persisted.agentRaw == AgentKind.shell.rawValue {
-                convo = Conversation.shellConversation(cwd: URL(fileURLWithPath: persisted.roomPath))
+                // Reuse the persisted id so reopening the same group focuses the
+                // shell tab instead of spawning a fresh duplicate each time.
+                convo = Conversation.shellConversation(
+                    cwd: URL(fileURLWithPath: persisted.roomPath),
+                    id: persisted.conversationID)
             } else if let real = registry.conversation(id: persisted.conversationID) {
                 convo = real
             } else {

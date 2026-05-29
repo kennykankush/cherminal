@@ -43,8 +43,11 @@ struct ContextWatchPane: View {
         // Load + live-refresh usage for the active conversation. Re-parses
         // every few seconds so the context gauge tracks the conversation as
         // it grows. Fully local — reads the session JSONL only.
-        .task(id: conversation?.id) {
+        // Re-runs when the conversation OR the visible sub-tab changes, so the
+        // usage poll only runs while the Context tab is actually showing.
+        .task(id: "\(conversation?.id ?? "none")|\(tab == .context)") {
             usage = nil
+            guard tab == .context else { return }
             guard let convo = conversation,
                   convo.agent == .claudeCode || convo.agent == .codex else { return }
             let file = convo.sessionFile

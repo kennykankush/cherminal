@@ -193,11 +193,30 @@ final class TabWindowCoordinator: ObservableObject {
 
         var live: Set<String> = []
         for (pid, controller) in pidToController {
-            let detected = detectConversation(for: info[pid])
-            controller.applyDetectedSession(detected)
-            if let detected { live.insert(detected.id) }
+            if controller.base.agent == .shell {
+                // A bare shell tab: adopt the agent it hand-launched (or revert
+                // to shell when none is running).
+                let detected = detectConversation(for: info[pid])
+                controller.applyDetectedSession(detected)
+                if let detected { live.insert(detected.id) }
+            } else {
+                // Opened as a concrete agent (resume): identity is FIXED — never
+                // let cwd+recency detection repoint it to a different session in
+                // the same room. It's live while an agent process runs in it.
+                if agentRunning(info[pid]) { live.insert(controller.base.id) }
+            }
         }
         if liveConversationIDs != live { liveConversationIDs = live }
+    }
+
+    /// Whether a tab's foreground process looks like a running agent — used for
+    /// the live indicator on fixed-identity (resumed) tabs without resolving
+    /// *which* conversation (that's already pinned to the tab's base).
+    private func agentRunning(_ info: LiveSessionLinker.ProcessInfo?) -> Bool {
+        guard let info else { return false }
+        if info.openSessionFile != nil { return true }
+        let c = info.command.lowercased()
+        return c.hasPrefix("claude") || c.hasPrefix("codex")
     }
 
     private func foregroundPIDs() -> [Int32: TerminalTabWindowController] {
@@ -219,6 +238,8 @@ final class TabWindowCoordinator: ObservableObject {
         let info = LiveSessionLinker.inspect(pids: Array(pidToController.keys))
         var out: [ObjectIdentifier: Conversation] = [:]
         for (pid, controller) in pidToController {
+            // Only shell tabs adopt; a resumed agent tab keeps its base identity.
+            guard controller.base.agent == .shell else { continue }
             if let detected = detectConversation(for: info[pid]) {
                 out[ObjectIdentifier(controller)] = detected
             }
@@ -232,7 +253,7 @@ final class TabWindowCoordinator: ObservableObject {
     /// file open, so cwd + recency is the best precise-enough signal).
     private func detectConversation(for info: LiveSessionLinker.ProcessInfo?) -> Conversation? {
         guard let info else { return nil }
-        if let path = info.openSessionFile,
+        if let path = info.openSessionFile, info.command.lowercased().hasPrefix("codex"),
            let match = registry.conversations.first(where: { $0.sessionFile.path == path }) {
             return match
         }
