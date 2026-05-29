@@ -9,7 +9,9 @@ struct TabWindowRootView: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @ObservedObject var holder: TabSurfaceHolder
 
-    let conversation: Conversation
+    /// The tab's effective conversation, observed from the holder so the badge,
+    /// title, and context pane follow when the tab adopts a live agent session.
+    private var conversation: Conversation { holder.conversation }
 
     @State private var sidebarMode: SidebarView.Mode = .byRoom
     @State private var showContext = true

@@ -23,7 +23,16 @@ final class TabWindowCoordinator: ObservableObject {
     }
 
     /// Published so bookmark UI can reflect how many tabs would be saved.
-    @Published private(set) var tabCount: Int = 0
+    @Published private(set) var tabCount: Int = 0 {
+        didSet { updateLinkPolling() }
+    }
+
+    /// Conversation ids currently running live in a tab (hand-launched agents
+    /// or resumed sessions). The sidebar reads this to show a live indicator.
+    @Published private(set) var liveConversationIDs: Set<String> = []
+
+    /// Polls the live-session linker while any tab is open.
+    private var linkTimer: Timer?
 
     init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager) {
         self.registry = registry
@@ -144,5 +153,65 @@ final class TabWindowCoordinator: ObservableObject {
         guard let window = controller.window else { return }
         window.makeKeyAndOrderFront(nil)
         window.tabGroup?.selectedWindow = window
+    }
+
+    // MARK: - Live session linking
+
+    /// Start polling once there's at least one tab; stop when the last closes.
+    private func updateLinkPolling() {
+        if controllers.isEmpty {
+            linkTimer?.invalidate()
+            linkTimer = nil
+            if !liveConversationIDs.isEmpty { liveConversationIDs = [] }
+        } else if linkTimer == nil {
+            Task { await reconcileLiveSessions() }
+            linkTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+                Task { @MainActor in await self?.reconcileLiveSessions() }
+            }
+        }
+    }
+
+    /// Detect which agent session (if any) each tab is running and adopt it as
+    /// the tab's identity, so a hand-launched `claude`/`codex` stops being an
+    /// orphan: the tab's badge/title flip to the agent, the sidebar marks it
+    /// live, and clicking that conversation focuses this tab instead of
+    /// spawning a duplicate `--resume`.
+    private func reconcileLiveSessions() async {
+        // Foreground pid → controller for every tab whose surface is up.
+        var pidToController: [Int32: TerminalTabWindowController] = [:]
+        for c in controllers {
+            guard let surface = c.holder.surfaceView?.surface else { continue }
+            let pid = ghostty_surface_foreground_pid(surface)
+            if pid > 0 { pidToController[Int32(pid)] = c }
+        }
+        let pids = Array(pidToController.keys)
+
+        let info = await Task.detached(priority: .utility) {
+            LiveSessionLinker.inspect(pids: pids)
+        }.value
+
+        var live: Set<String> = []
+        for (pid, controller) in pidToController {
+            let detected = detectConversation(for: info[pid])
+            controller.applyDetectedSession(detected)
+            if let detected { live.insert(detected.id) }
+        }
+        if liveConversationIDs != live { liveConversationIDs = live }
+    }
+
+    /// Resolve a tab's foreground process to a conversation: the open session
+    /// file (Codex) wins; otherwise, a running `claude` is linked to the
+    /// most-recently-active conversation in its cwd (Claude doesn't hold the
+    /// file open, so cwd + recency is the best precise-enough signal).
+    private func detectConversation(for info: LiveSessionLinker.ProcessInfo?) -> Conversation? {
+        guard let info else { return nil }
+        if let path = info.openSessionFile,
+           let match = registry.conversations.first(where: { $0.sessionFile.path == path }) {
+            return match
+        }
+        guard info.command.lowercased().hasPrefix("claude"), let cwd = info.cwd else { return nil }
+        return registry.conversations
+            .filter { $0.agent == .claudeCode && $0.roomPath.path == cwd }
+            .max { $0.lastActivityAt < $1.lastActivityAt }
     }
 }

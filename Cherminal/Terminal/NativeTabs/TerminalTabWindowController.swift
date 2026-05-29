@@ -9,6 +9,16 @@ import GhosttyKit
 @MainActor
 final class TabSurfaceHolder: ObservableObject {
     @Published var surfaceView: Ghostty.SurfaceView?
+    /// The tab's *effective* conversation. Starts as the base identity the tab
+    /// was opened with (a shell, or a resumed agent session) and flips when the
+    /// live-session linker detects the tab is actually running an agent — so a
+    /// `claude` launched by hand inside a shell tab makes the tab become that
+    /// conversation. Views observe this, so badge/title/context follow.
+    @Published var conversation: Conversation
+
+    init(conversation: Conversation) {
+        self.conversation = conversation
+    }
 }
 
 /// One native tab = one `NSWindow` hosting the full 3-pane SwiftUI for a
@@ -16,9 +26,14 @@ final class TabSurfaceHolder: ObservableObject {
 /// holder) for the window's lifetime.
 @MainActor
 final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
-    let conversation: Conversation
-    let holder = TabSurfaceHolder()
+    /// The identity the tab was opened with. The *effective* conversation
+    /// (`holder.conversation`) can differ once the linker detects a live agent.
+    let base: Conversation
+    let holder: TabSurfaceHolder
     private weak var coordinator: TabWindowCoordinator?
+
+    /// The tab's effective conversation — base, unless adopted to a live one.
+    var conversation: Conversation { holder.conversation }
 
     init(
         conversation: Conversation,
@@ -27,7 +42,8 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
         bookmarks: BookmarksManager,
         coordinator: TabWindowCoordinator
     ) {
-        self.conversation = conversation
+        self.base = conversation
+        self.holder = TabSurfaceHolder(conversation: conversation)
         self.coordinator = coordinator
 
         let window = NSWindow(
@@ -64,7 +80,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
         }
         window.center()
 
-        let root = TabWindowRootView(holder: holder, conversation: conversation)
+        let root = TabWindowRootView(holder: holder)
             .environmentObject(registry)
             .environmentObject(ghostty)
             .environmentObject(bookmarks)
@@ -86,5 +102,16 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         coordinator?.windowClosed(self)
+    }
+
+    /// Apply the linker's verdict: adopt `detected` as the effective identity
+    /// (a hand-launched agent), or fall back to `base` when nothing live is
+    /// running (the agent exited and we're back at a shell). Idempotent.
+    func applyDetectedSession(_ detected: Conversation?) {
+        let target = detected ?? base
+        guard holder.conversation.id != target.id else { return }
+        clog("tabs", "adopt id=\(target.id) agent=\(target.agent.rawValue) (was \(holder.conversation.id))")
+        holder.conversation = target
+        window?.title = target.roomName
     }
 }

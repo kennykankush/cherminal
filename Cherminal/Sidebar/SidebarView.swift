@@ -8,6 +8,7 @@ struct SidebarView: View {
     }
 
     @EnvironmentObject private var registry: ConversationRegistry
+    @EnvironmentObject private var coordinator: TabWindowCoordinator
     @Binding var mode: Mode
     @Binding var selection: Conversation.ID?
 
@@ -99,7 +100,8 @@ struct SidebarView: View {
                         Section {
                             if roomIsExpanded(room) {
                                 ForEach(room.conversations) { convo in
-                                    ConversationRow(conversation: convo)
+                                    ConversationRow(conversation: convo,
+                                                    isLive: coordinator.liveConversationIDs.contains(convo.id))
                                         .tag(convo.id as Conversation.ID?)
                                 }
                             }
@@ -122,7 +124,8 @@ struct SidebarView: View {
             case .byRecent:
                 List(selection: $selection) {
                     ForEach(filteredConversations) { convo in
-                        ConversationRow(conversation: convo, showRoom: true)
+                        ConversationRow(conversation: convo, showRoom: true,
+                                        isLive: coordinator.liveConversationIDs.contains(convo.id))
                             .tag(convo.id as Conversation.ID?)
                     }
                 }
@@ -174,7 +177,8 @@ struct SidebarView: View {
                     ConversationRow(
                         conversation: convo,
                         showRoom: true,
-                        snippet: bodyHits[convo.sessionFile.path]
+                        snippet: bodyHits[convo.sessionFile.path],
+                        isLive: coordinator.liveConversationIDs.contains(convo.id)
                     )
                     .tag(convo.id as Conversation.ID?)
                 }
@@ -329,17 +333,27 @@ private struct ConversationRow: View {
     var showRoom: Bool = false
     /// Matched body excerpt when this row came from a full-text search.
     var snippet: String? = nil
+    /// This conversation is running live in an open tab right now.
+    var isLive: Bool = false
 
     var body: some View {
         HStack(alignment: .top, spacing: CHM.Space.sm) {
             AgentBadge(agent: conversation.agent, size: 17)
                 .padding(.top, 2)
             VStack(alignment: .leading, spacing: 3) {
-                Text(conversation.previewText ?? "Untitled conversation")
-                    .font(.system(size: 13))
-                    .foregroundStyle(conversation.previewText == nil ? .secondary : .primary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                HStack(spacing: 5) {
+                    if isLive {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                            .help("Running in an open tab")
+                    }
+                    Text(conversation.previewText ?? "Untitled conversation")
+                        .font(.system(size: 13))
+                        .foregroundStyle(conversation.previewText == nil ? .secondary : .primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 HStack(spacing: 4) {
                     if showRoom {
                         Text(conversation.roomName)
