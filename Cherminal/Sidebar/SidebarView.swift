@@ -10,6 +10,7 @@ struct SidebarView: View {
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var pins: PinsManager
+    @EnvironmentObject private var bookmarks: BookmarksManager
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var mode: Mode
     @Binding var selection: Conversation.ID?
@@ -107,6 +108,7 @@ struct SidebarView: View {
             switch mode {
             case .byRoom:
                 List(selection: $selection) {
+                    groupsSection
                     pinnedSection
                     ForEach(filteredRooms) { room in
                         // Pinned ones are lifted into the Pinned section, so a
@@ -145,6 +147,7 @@ struct SidebarView: View {
                 .transition(pushTransition(towards: .leading))
             case .byRecent:
                 List(selection: $selection) {
+                    groupsSection
                     pinnedSection
                     // Pinned ones live in the Pinned section above — don't repeat
                     // them here.
@@ -171,6 +174,109 @@ struct SidebarView: View {
         reduceMotion
             ? .opacity
             : .move(edge: edge).combined(with: .opacity)
+    }
+
+    // MARK: - Groups (saved tab sets, surfaced in-sidebar)
+
+    /// Saved tab-groups, pinned at the very top of the sidebar. When there are
+    /// none, the section still shows a calm prompt — "Bookmark your N tabs" —
+    /// so the feature is discoverable without hunting through the menu bar.
+    /// Hidden only when there's genuinely nothing to show or save.
+    @ViewBuilder
+    private var groupsSection: some View {
+        if !bookmarks.bookmarks.isEmpty || coordinator.tabCount > 0 {
+            Section {
+                ForEach(bookmarks.bookmarks) { group in
+                    groupRow(group)
+                }
+                if coordinator.tabCount > 0 { saveTabsRow }
+            } header: {
+                Text("Groups")
+                    .font(CHM.Font.eyebrow)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+            }
+        }
+    }
+
+    private func groupRow(_ group: Bookmark) -> some View {
+        HStack(spacing: CHM.Space.sm) {
+            Image(systemName: "rectangle.stack.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 17)
+            Text(group.name.isEmpty ? "Untitled" : group.name)
+                .font(.system(size: 13))
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Text("\(group.tabs.count)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { openGroup(group) }
+        .contextMenu {
+            Button("Open") { openGroup(group) }
+            Button("Delete", role: .destructive) { bookmarks.delete(group.id) }
+        }
+    }
+
+    /// The discovery affordance. Empty → an inviting two-line pitch that says
+    /// what a group is *for*; once groups exist → a quiet single line to add
+    /// another. Both save the open tabs.
+    @ViewBuilder
+    private var saveTabsRow: some View {
+        let n = coordinator.tabCount
+        let tabWord = n == 1 ? "tab" : "tabs"
+        Group {
+            if bookmarks.bookmarks.isEmpty {
+                HStack(spacing: CHM.Space.sm) {
+                    Image(systemName: "rectangle.stack.badge.plus")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 17)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Save this workspace")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.primary)
+                        Text("Reopen these \(n) \(tabWord) anytime")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 2)
+            } else {
+                HStack(spacing: CHM.Space.sm) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 17)
+                    Text("Save these \(n) \(tabWord)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { saveCurrentTabs() }
+        .help("Save the open tabs as a group you can reopen later")
+    }
+
+    /// Open every tab in a group. Deferred to the next runloop like the other
+    /// row actions, so the mutation doesn't re-enter the List's table delegate.
+    private func openGroup(_ group: Bookmark) {
+        DispatchQueue.main.async {
+            bookmarks.open(group, registry: registry, coordinator: coordinator)
+        }
+    }
+
+    private func saveCurrentTabs() {
+        let tabs = coordinator.snapshot()
+        guard !tabs.isEmpty else { return }
+        DispatchQueue.main.async { bookmarks.create(name: "", tabs: tabs) }
     }
 
     // MARK: - Pinned (cross-room shortcuts)
