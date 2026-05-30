@@ -10,6 +10,7 @@ struct SidebarView: View {
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var pins: PinsManager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var mode: Mode
     @Binding var selection: Conversation.ID?
 
@@ -24,6 +25,11 @@ struct SidebarView: View {
             topControls
             Divider().opacity(0.5)
             list
+                // Animate only mode-driven swaps (value-scoped, so search/load
+                // transitions are untouched). Pairs with the per-list
+                // pushTransition; .animation(value:) supplies the transaction
+                // the @AppStorage write otherwise loses.
+                .animation(CHM.Motion.modeSwitch, value: mode)
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
         // Debounced full-text body search. Title/room filtering stays instant
@@ -136,6 +142,7 @@ struct SidebarView: View {
                     DispatchQueue.main.async { expandedRooms.insert(convo.roomPath.path) }
                 }
                 .onAppear(perform: seedExpandedRoom)
+                .transition(pushTransition(towards: .leading))
             case .byRecent:
                 List(selection: $selection) {
                     pinnedSection
@@ -151,8 +158,19 @@ struct SidebarView: View {
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
+                .transition(pushTransition(towards: .trailing))
             }
         }
+    }
+
+    /// Direction-aware transition for the mode swap: content enters/leaves on
+    /// the side its toggle lives (By room = leading, Recent = trailing), so the
+    /// list pushes in the same direction the selector moves. Plus a fade so the
+    /// heavy List swap reads smoothly. Reduce Motion → a plain crossfade.
+    private func pushTransition(towards edge: Edge) -> AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .move(edge: edge).combined(with: .opacity)
     }
 
     // MARK: - Pinned (cross-room shortcuts)
@@ -362,9 +380,7 @@ private struct ModeToggle: View {
                         }
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture {
-                        withAnimation(.easeOut(duration: 0.18)) { mode = option }
-                    }
+                    .onTapGesture { mode = option }
             }
         }
         .padding(3)
@@ -372,6 +388,11 @@ private struct ModeToggle: View {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(Color.primary.opacity(0.05))
         )
+        // Drive the thumb off the value change, NOT a withAnimation around the
+        // mutation: `mode` is @AppStorage-backed and the UserDefaults round-trip
+        // drops the change out of the animation transaction (it just snapped).
+        // .animation(value:) animates whenever the value lands, regardless.
+        .animation(CHM.Motion.pillSlide, value: mode)
     }
 }
 

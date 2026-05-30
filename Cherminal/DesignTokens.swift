@@ -87,6 +87,15 @@ enum CHM {
         static let hover: Animation = .easeOut(duration: 0.12)
         static let tabSwitch: Animation = .spring(response: 0.28, dampingFraction: 0.85)
         static let appear: Animation = .easeOut(duration: 0.18)
+        /// Sidebar mode-swap CONTENT push (By room ⇄ Recent). ease-out-quart:
+        /// snappy start, calm landing — no overshoot, so the heavy List slide
+        /// doesn't wobble.
+        static let modeSwitch: Animation = .timingCurve(0.165, 0.84, 0.44, 1, duration: 0.2)
+        /// The toggle THUMB slide. A spring with a touch of overshoot — the
+        /// SwiftUI equivalent of the EPL⟷CUP pill's cubic-bezier(.34,1.2,.64,1):
+        /// it pops just past the destination edge before settling. The "pop" is
+        /// what makes the toggle feel alive rather than mechanical.
+        static let pillSlide: Animation = .spring(response: 0.3, dampingFraction: 0.64)
         /// Slow, autoreversing "alive" pulse for the attention light — sub-blink,
         /// never an alert. Honor Reduce Motion at call sites.
         static let breathe: Animation = .easeInOut(duration: 2.4).repeatForever(autoreverses: true)
