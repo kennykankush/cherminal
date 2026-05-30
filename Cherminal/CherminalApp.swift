@@ -73,7 +73,10 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         guard !isRunningTests else { return }
         let env = AppEnvironment.shared
         installTabShortcutMonitor()
-        installGroupsMenu()
+        // Defer the Groups menu: SwiftUI installs its own main menu *after*
+        // this callback, so an insert here gets wiped. The next runloop tick
+        // (and every activation, see applicationDidBecomeActive) re-asserts it.
+        DispatchQueue.main.async { [weak self] in self?.installGroupsMenu() }
 
         // Restore last session's tabs. Shell tabs need no registry, so a saved
         // session of only shells (or nothing saved) opens instantly — the
@@ -121,9 +124,16 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     // reflects the current bookmark set.
 
     private var groupsMenu: NSMenu?
+    private var groupsMenuItem: NSMenuItem?
 
+    /// Insert the Groups menu just left of Window. Idempotent and re-callable:
+    /// if SwiftUI has rebuilt/replaced the main menu and dropped our item, this
+    /// re-adds it; if it's already attached, this is a no-op. Safe to call on
+    /// every activation.
     private func installGroupsMenu() {
         guard let mainMenu = NSApp.mainMenu else { return }
+        if let groupsMenuItem, mainMenu.items.contains(groupsMenuItem) { return }
+
         let menu = NSMenu(title: "Groups")
         menu.delegate = self
         let item = NSMenuItem()
@@ -134,7 +144,14 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         let idx = mainMenu.items.firstIndex { $0.submenu === NSApp.windowsMenu }
         if let idx { mainMenu.insertItem(item, at: idx) } else { mainMenu.addItem(item) }
         groupsMenu = menu
+        groupsMenuItem = item
         MainActor.assumeIsolated { rebuildGroupsMenu() }
+    }
+
+    /// Re-assert the Groups menu after a SwiftUI menu rebuild can have removed it.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard !isRunningTests else { return }
+        installGroupsMenu()
     }
 
     @MainActor
