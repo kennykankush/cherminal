@@ -67,7 +67,17 @@ enum TerminalCommand {
             clog("tabs", "stale room — \(roomPath) missing; cwd → $HOME")
         }
 
-        cfg.command = resume(for: conversation)
+        // Agent tabs optionally run inside a dtach session so they survive a
+        // tab/app close and reattach live on reopen (see PersistentSession).
+        // Shells (resume == nil) always spawn directly. When persistence is off
+        // or dtach is missing, this is exactly today's behavior.
+        let inner = resume(for: conversation)
+        if let inner, PersistentSession.available,
+           let wrapped = PersistentSession.wrap(inner, id: conversation.id) {
+            cfg.command = wrapped
+        } else {
+            cfg.command = inner
+        }
         cfg.environmentVariables = BinaryResolver.shared.environment()
         return cfg
     }

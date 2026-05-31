@@ -111,6 +111,13 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     /// the tabs are still alive. A crash skips this, leaving the prior snapshot.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !isRunningTests {
+            // Durable (os_log) breadcrumb so a *clean* quit is never again
+            // mistaken for a crash: if this line is in the log the app exited
+            // normally; if the log just stops with no such line, it was killed
+            // (SIGKILL/OOM) or crashed. Closing the last tab routes here via
+            // applicationShouldTerminateAfterLastWindowClosed.
+            let tabs = AppEnvironment.shared.coordinator.tabCount
+            clog("app", "clean termination (open tabs at quit=\(tabs)) — persisting session")
             AppEnvironment.shared.coordinator.persistSession()
         }
         return .terminateNow
@@ -252,8 +259,11 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// Don't quit when the last window closes — closing the last conversation
+    /// tab shows the "no tabs open" placeholder window instead (see
+    /// TabWindowCoordinator). The app quits only via ⌘Q.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
     }
 }
 

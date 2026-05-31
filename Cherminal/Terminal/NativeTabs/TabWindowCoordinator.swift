@@ -59,6 +59,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// singleton, but correct if this ever stops being one).
     private var observers: [any NSObjectProtocol] = []
 
+    /// The "no tabs open" home window, shown when the last conversation tab
+    /// closes (instead of quitting) and hidden again the moment a tab opens.
+    /// Created lazily and reused.
+    private var placeholder: PlaceholderWindowController?
+
     init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager) {
         self.registry = registry
         self.ghostty = ghostty
@@ -153,6 +158,7 @@ final class TabWindowCoordinator: ObservableObject {
         }
         controllers.append(controller)
         select(controller)
+        hidePlaceholder()   // a tab is open now; the home window steps aside
 
         // Lay out the panes now, then spawn the surface on the next runloop —
         // once the sidebar + inspector have claimed their widths and the
@@ -315,6 +321,35 @@ final class TabWindowCoordinator: ObservableObject {
         // base identity so a shell↔agent flip can't strand it either.
         awaitingTurnIDs.remove(controller.conversation.id)
         awaitingTurnIDs.remove(controller.base.id)
+
+        // Last tab gone → show the "no tabs open" home window instead of letting
+        // the app quit. Inherit the closing window's frame for continuity.
+        // Deferred + re-checked: a new tab may open in the same beat (e.g. ⌘T).
+        if controllers.isEmpty {
+            let frame = controller.window?.frame
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.controllers.isEmpty else { return }
+                self.showPlaceholder(near: frame)
+            }
+        }
+    }
+
+    // MARK: - Placeholder (no tabs open)
+
+    private func showPlaceholder(near frame: NSRect?) {
+        let pc = placeholder ?? PlaceholderWindowController(
+            registry: registry, ghostty: ghostty, bookmarks: bookmarks, coordinator: self)
+        placeholder = pc
+        if let frame, let window = pc.window {
+            window.setFrame(frame, display: false)
+        } else {
+            pc.window?.center()
+        }
+        pc.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func hidePlaceholder() {
+        placeholder?.window?.orderOut(nil)
     }
 
     private func select(_ controller: TerminalTabWindowController) {
@@ -450,6 +485,18 @@ final class TabWindowCoordinator: ObservableObject {
                 if agentRunning(info[pid]) { live.insert(controller.base.id) }
             }
         }
+        // Persistent (dtach-backed) agent tabs: their foreground process is the
+        // dtach client, so lsof above can't see the agent. Treat the session as
+        // live whenever its dtach socket is alive — simpler and more reliable
+        // than process inspection, since we own the socket name.
+        if PersistentSession.enabled {
+            for c in controllers where c.conversation.agent != .shell {
+                if PersistentSession.isAlive(c.conversation.id) {
+                    live.insert(c.conversation.id)
+                }
+            }
+        }
+
         if liveConversationIDs != live { liveConversationIDs = live }
 
         // With the live set settled, refresh the "your turn" lights from each
