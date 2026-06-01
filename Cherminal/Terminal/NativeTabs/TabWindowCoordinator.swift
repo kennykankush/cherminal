@@ -691,3 +691,71 @@ final class TabWindowCoordinator: ObservableObject {
             .max { $0.lastActivityAt < $1.lastActivityAt }
     }
 }
+
+// MARK: - PaneSpawning (the seam for swarm / workspace restore)
+
+extension TabWindowCoordinator: PaneSpawning {
+    /// Materialize a saved workspace into a fresh window: the first pane opens
+    /// the window, the rest are added as grid panes.
+    func loadWorkspace(_ workspace: PersistedWorkspace) {
+        for (i, p) in workspace.panes.enumerated() {
+            let convo = conversation(forPane: p)
+            if i == 0 {
+                openOrFocus(convo)
+            } else {
+                spawnPane(convo, role: p.role, at: p.gridPosition)
+            }
+        }
+    }
+
+    @discardableResult
+    func spawnPane(_ conversation: Conversation, role: PaneRole?, at position: GridPosition) -> UUID {
+        guard let controller = activeController else {
+            openOrFocus(conversation)
+            return controllers.last?.workspace.panes.last?.id ?? UUID()
+        }
+        let pane = Pane(conversation: conversation, role: role, gridPosition: position)
+        controller.workspace.addPane(pane)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        spawnSurface(for: pane, in: controller)
+        schedulePersist()
+        return pane.id
+    }
+
+    /// Inject text into a pane's surface (swarm initial prompts). Best-effort:
+    /// no-op if the pane has no live surface yet.
+    func sendText(_ text: String, toPaneID id: UUID) {
+        guard let pane = allPanes().first(where: { $0.id == id }),
+              let surface = pane.surfaceView?.surface else { return }
+        let bytes = text.utf8CString
+        bytes.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            ghostty_surface_text(surface, base, UInt(buf.count - 1))
+        }
+    }
+
+    func currentPanes() -> [PersistedPane] {
+        guard let ws = activeController?.workspace else { return [] }
+        return ws.panes.map {
+            PersistedPane(conversationID: $0.conversation.id,
+                          agentRaw: $0.conversation.agent.rawValue,
+                          roomPath: $0.conversation.roomPath.path,
+                          role: $0.role,
+                          gridPosition: $0.gridPosition)
+        }
+    }
+
+    var currentLayout: GridLayout { activeController?.workspace.layout ?? .single }
+
+    /// Resolve a persisted pane to a live conversation (agent resume if the
+    /// session still exists, else a shell in the same room) — mirrors
+    /// openPersistedTabs' rules.
+    private func conversation(forPane p: PersistedPane) -> Conversation {
+        if p.agentRaw == AgentKind.shell.rawValue {
+            return Conversation.shellConversation(cwd: URL(fileURLWithPath: p.roomPath), id: p.conversationID)
+        } else if let real = registry.conversation(id: p.conversationID) {
+            return real
+        }
+        return Conversation.shellConversation(cwd: URL(fileURLWithPath: p.roomPath))
+    }
+}

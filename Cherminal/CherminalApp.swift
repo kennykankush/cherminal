@@ -38,6 +38,15 @@ struct CherminalApp: App {
                         .keyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: .command)
                     }
                 }
+                CommandMenu("Swarm") {
+                    Button("New Swarm — Builder · Reviewer · Scout") {
+                        let env = AppEnvironment.shared
+                        env.swarms.launch(SwarmManager.starter(),
+                                          into: env.coordinator,
+                                          baseCWD: env.coordinator.activeConversation?.roomPath)
+                    }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                }
             }
     }
 }
