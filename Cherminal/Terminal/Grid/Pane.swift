@@ -72,4 +72,35 @@ final class Workspace: ObservableObject {
     var activePane: Pane? { panes.first { $0.id == activePaneID } ?? panes.first }
 
     func pane(id: Pane.ID) -> Pane? { panes.first { $0.id == id } }
+
+    /// Append a pane, re-fit the grid to the new count, and focus it.
+    func addPane(_ pane: Pane) {
+        panes.append(pane)
+        layout = GridLayout.fit(panes.count)
+        reindex()
+        activePaneID = pane.id
+    }
+
+    /// Remove a pane, re-fit, and move focus to the last remaining pane.
+    func removePane(id: Pane.ID) {
+        panes.removeAll { $0.id == id }
+        layout = GridLayout.fit(max(1, panes.count))
+        reindex()
+        if activePaneID == id { activePaneID = panes.last?.id }
+    }
+
+    /// Cycle the active pane by `delta` (wraps).
+    func focusNext(_ delta: Int = 1) {
+        guard !panes.isEmpty else { return }
+        guard let cur = activePaneID, let i = panes.firstIndex(where: { $0.id == cur }) else {
+            activePaneID = panes.first?.id
+            return
+        }
+        let n = panes.count
+        activePaneID = panes[((i + delta) % n + n) % n].id
+    }
+
+    private func reindex() {
+        for (i, pane) in panes.enumerated() { pane.gridPosition = layout.position(for: i) }
+    }
 }

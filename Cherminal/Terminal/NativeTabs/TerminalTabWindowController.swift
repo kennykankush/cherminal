@@ -33,7 +33,8 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
     ) {
         self.base = conversation
         let pane = Pane(conversation: conversation)
-        self.workspace = Workspace(panes: [pane])
+        let workspace = Workspace(panes: [pane])
+        self.workspace = workspace
         self.coordinator = coordinator
 
         let window = NSWindow(
@@ -70,7 +71,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
         }
         window.center()
 
-        let root = TabWindowRootView(holder: pane)
+        let root = TabWindowRootView(workspace: workspace)
             .environmentObject(registry)
             .environmentObject(ghostty)
             .environmentObject(bookmarks)

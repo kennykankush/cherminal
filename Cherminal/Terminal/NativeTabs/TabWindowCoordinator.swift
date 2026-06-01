@@ -103,22 +103,24 @@ final class TabWindowCoordinator: ObservableObject {
     private func updateAwaiting(live: Set<String>) {
         var awaiting = awaitingTurnIDs
         for controller in controllers {
-            let id = controller.conversation.id
-            let agent = controller.conversation.agent
-            guard live.contains(id), agent == .claudeCode || agent == .codex else { continue }
-            let reading = TurnState.read(sessionFile: controller.conversation.sessionFile, agent: agent)
-            if controller.window?.isKeyWindow == true {
-                // You're looking at it — never light, and keep the read marker
-                // current so leaving the tab can't false-trigger.
-                seenTurnSize[id] = reading.size
-                awaiting.remove(id)
-            } else if reading.awaitingUser && reading.size > (seenTurnSize[id] ?? 0) {
-                awaiting.insert(id)        // a new completed turn you haven't seen
-            } else if !reading.awaitingUser {
-                awaiting.remove(id)        // back to working
+            let isKey = controller.window?.isKeyWindow == true
+            for pane in controller.workspace.panes {
+                let convo = pane.conversation
+                let id = convo.id
+                guard live.contains(id), convo.agent == .claudeCode || convo.agent == .codex else { continue }
+                let reading = TurnState.read(sessionFile: convo.sessionFile, agent: convo.agent)
+                // "Viewed" = its window is key AND it's the active pane.
+                if isKey && controller.workspace.activePaneID == pane.id {
+                    seenTurnSize[id] = reading.size
+                    awaiting.remove(id)
+                } else if reading.awaitingUser && reading.size > (seenTurnSize[id] ?? 0) {
+                    awaiting.insert(id)        // a new completed turn you haven't seen
+                } else if !reading.awaitingUser {
+                    awaiting.remove(id)        // back to working
+                }
             }
         }
-        // A tab that closed or whose agent exited is no longer awaiting.
+        // A pane that closed or whose agent exited is no longer awaiting.
         awaiting = awaiting.filter { live.contains($0) }
         if awaitingTurnIDs != awaiting { awaitingTurnIDs = awaiting }
     }
@@ -169,26 +171,68 @@ final class TabWindowCoordinator: ObservableObject {
         // banner, which can't reflow) then start at the correct width instead
         // of into the momentarily-squished pane.
         controller.window?.contentView?.layoutSubtreeIfNeeded()
-        // Build the surface config OFF the main thread — TerminalCommand →
-        // BinaryResolver can block up to 3s on a cold launch (sourcing ~/.zshrc),
-        // which would freeze the UI. Hop back to the main actor only to
-        // construct the SurfaceView (libghostty requires main), re-checking the
-        // tab is still live (it may have closed during the off-main work).
-        Task.detached(priority: .userInitiated) {
-            let config = TerminalCommand.surfaceConfig(for: conversation)
-            await MainActor.run { [weak self, weak controller] in
-                guard let self,
-                      let controller,
-                      self.controllers.contains(where: { $0 === controller }),
-                      controller.holder.surfaceView == nil,
-                      let app = self.ghostty.app else { return }
-                clog("tabs", "spawn surface id=\(conversation.id) cwd=\(config.workingDirectory ?? "nil") cmd=\(config.command ?? "default-shell")")
-                controller.holder.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
-                clog("tabs", "spawn surface ok id=\(conversation.id)")
-            }
-        }
+        spawnSurface(for: controller.workspace.panes[0], in: controller)
         return controller
     }
+
+    /// Spawn a pane's Ghostty surface. Config is built OFF the main thread
+    /// (BinaryResolver can block ~3s on a cold launch); the SurfaceView itself
+    /// is created on main (libghostty requires it), re-checking the pane is
+    /// still live. Shared by openOrFocus and addPane.
+    private func spawnSurface(for pane: Pane, in controller: TerminalTabWindowController) {
+        guard pane.surfaceView == nil else { return }
+        pane.lifecycleState = .spawning
+        let conversation = pane.conversation
+        Task.detached(priority: .userInitiated) {
+            let config = TerminalCommand.surfaceConfig(for: conversation)
+            await MainActor.run { [weak self, weak controller, weak pane] in
+                guard let self, let controller, let pane,
+                      self.controllers.contains(where: { $0 === controller }),
+                      controller.workspace.panes.contains(where: { $0 === pane }),
+                      pane.surfaceView == nil,
+                      let app = self.ghostty.app else { return }
+                clog("tabs", "spawn surface id=\(conversation.id) cwd=\(config.workingDirectory ?? "nil") cmd=\(config.command ?? "default-shell")")
+                pane.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+                pane.lifecycleState = .live
+                clog("tabs", "spawn surface ok id=\(conversation.id) pane=\(pane.id)")
+            }
+        }
+    }
+
+    // MARK: - Pane management (the grid)
+
+    /// The window receiving pane commands — the key window, else the last.
+    private var activeController: TerminalTabWindowController? {
+        if let key = NSApp.keyWindow, let m = controllers.first(where: { $0.window === key }) { return m }
+        return controllers.last
+    }
+
+    /// Split the active window: add a shell pane in the active pane's room.
+    func addPaneToActiveWindow() {
+        guard let controller = activeController else { openFreshShell(); return }
+        guard controller.workspace.panes.count < controller.workspace.layout.capacity || controller.workspace.panes.count < 16 else { return }
+        let cwd = controller.holder.conversation.roomPath
+        let pane = Pane(conversation: Conversation.shellConversation(cwd: cwd))
+        controller.workspace.addPane(pane)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        spawnSurface(for: pane, in: controller)
+        schedulePersist()
+    }
+
+    /// Close the active pane; if it's the last one, close the window.
+    func closeActivePane() {
+        guard let controller = activeController else { return }
+        let ws = controller.workspace
+        guard ws.panes.count > 1, let active = ws.activePane else {
+            controller.window?.performClose(nil)
+            return
+        }
+        ws.removePane(id: active.id)   // pane deinit drops its surface (SIGHUP)
+        controller.window?.contentView?.layoutSubtreeIfNeeded()
+        schedulePersist()
+    }
+
+    func focusNextPane() { activeController?.workspace.focusNext() }
 
     /// Open a bare shell tab. cwd defaults to the active tab's room, else $HOME.
     func openFreshShell(cwd explicitCWD: URL? = nil) {
@@ -206,9 +250,11 @@ final class TabWindowCoordinator: ObservableObject {
     func tabForegroundPIDs() -> [Int32: String] {
         var out: [Int32: String] = [:]
         for c in controllers {
-            guard let surface = c.holder.surfaceView?.surface else { continue }
-            let pid = ghostty_surface_foreground_pid(surface)
-            if pid > 0 { out[Int32(pid)] = c.conversation.id }
+            for pane in c.workspace.panes {
+                guard let surface = pane.surfaceView?.surface else { continue }
+                let pid = ghostty_surface_foreground_pid(surface)
+                if pid > 0 { out[Int32(pid)] = pane.conversation.id }
+            }
         }
         return out
     }
@@ -492,42 +538,41 @@ final class TabWindowCoordinator: ObservableObject {
         reconciling = true
         defer { reconciling = false }
 
-        // Foreground pid → controller for every tab whose surface is up.
-        let pidToController = foregroundPIDs()
-        let pids = Array(pidToController.keys)
+        // Foreground pid → pane for every pane whose surface is up.
+        let pidToPane = foregroundPIDs()
+        let pids = Array(pidToPane.keys)
 
         let info = await Task.detached(priority: .utility) {
             LiveSessionLinker.inspect(pids: pids)
         }.value
 
-        // Re-validate after the await: a tab may have closed or its foreground
+        // Re-validate after the await: a pane may have closed or its foreground
         // process changed during the lsof. Iterate the CURRENT foreground map
-        // (not the pre-await snapshot) so we never apply to a closed controller
-        // or a reused pid.
+        // (not the pre-await snapshot) so we never apply to a closed pane or a
+        // reused pid.
         var live: Set<String> = []
         var adopted: Set<String> = []   // conversations already claimed this pass
-        for (pid, controller) in foregroundPIDs() {
-            // `info` was captured before the await; only trust it for a pid that
-            // still maps to the SAME controller, so a pid reused by the OS in
-            // the window can't mis-attribute the inspected data.
-            guard pidToController[pid] === controller else { continue }
-            if controller.base.agent == .shell {
-                // A bare shell tab: adopt the agent it hand-launched (or revert
-                // to shell when none is running). If another shell tab in the
-                // same room already claimed this conversation this pass, keep
-                // this one a shell — two tabs must not share one identity.
+        for (pid, pane) in foregroundPIDs() {
+            // Only trust `info` for a pid that still maps to the SAME pane.
+            guard pidToPane[pid] === pane else { continue }
+            if pane.base.agent == .shell {
+                // A bare shell pane: adopt the agent it hand-launched (or revert
+                // to shell when none runs). If another pane in the same room
+                // already claimed this conversation this pass, keep this one a
+                // shell — two panes must not share one identity.
                 var detected = detectConversation(for: info[pid])
                 if let d = detected, adopted.contains(d.id) { detected = nil }
-                controller.applyDetectedSession(detected)
+                pane.applyDetectedSession(detected)
                 if let detected { adopted.insert(detected.id); live.insert(detected.id) }
             } else {
-                // Opened as a concrete agent (resume): identity is FIXED — never
-                // let cwd+recency detection repoint it to a different session in
-                // the same room. It's live while an agent process runs in it.
-                if agentRunning(info[pid]) { live.insert(controller.base.id) }
+                // Opened as a concrete agent (resume): identity is FIXED. Live
+                // while an agent process runs in it.
+                if agentRunning(info[pid]) { live.insert(pane.base.id) }
             }
         }
         if liveConversationIDs != live { liveConversationIDs = live }
+        // Keep each window's title on its active pane (adoption may have flipped it).
+        for c in controllers { c.window?.title = c.holder.conversation.roomName }
 
         // With the live set settled, refresh the "your turn" lights from each
         // live agent tab's session file.
@@ -549,26 +594,39 @@ final class TabWindowCoordinator: ObservableObject {
         return c.hasPrefix("claude") || c.hasPrefix("codex")
     }
 
-    private func foregroundPIDs() -> [Int32: TerminalTabWindowController] {
-        var out: [Int32: TerminalTabWindowController] = [:]
+    /// Every live pane across every window, keyed by foreground pid.
+    private func foregroundPIDs() -> [Int32: Pane] {
+        var out: [Int32: Pane] = [:]
         for c in controllers {
-            guard let surface = c.holder.surfaceView?.surface else { continue }
-            let pid = ghostty_surface_foreground_pid(surface)
-            if pid > 0 { out[Int32(pid)] = c }
+            for pane in c.workspace.panes {
+                guard let surface = pane.surfaceView?.surface else { continue }
+                let pid = ghostty_surface_foreground_pid(surface)
+                if pid > 0 { out[Int32(pid)] = pane }
+            }
         }
         return out
     }
+
+    /// All panes across all windows (liveness, attention, persistence).
+    private func allPanes() -> [Pane] { controllers.flatMap { $0.workspace.panes } }
 
     /// Synchronous live detection (used by `snapshot()`): controller → the
     /// agent conversation it's running, if any. Cheap `lsof` of a handful of
     /// pids — fine on the save-group click.
     private func detectLiveConversations() -> [ObjectIdentifier: Conversation] {
-        let pidToController = foregroundPIDs()
+        // Snapshot is per-window (active pane) for now; full multi-pane capture
+        // lands with PersistedWorkspace (Phase 7). Build a controller→pid map
+        // from each window's active pane.
+        var pidToController: [Int32: TerminalTabWindowController] = [:]
+        for c in controllers {
+            guard let surface = c.holder.surfaceView?.surface else { continue }
+            let pid = ghostty_surface_foreground_pid(surface)
+            if pid > 0 { pidToController[Int32(pid)] = c }
+        }
         guard !pidToController.isEmpty else { return [:] }
         let info = LiveSessionLinker.inspect(pids: Array(pidToController.keys))
         var out: [ObjectIdentifier: Conversation] = [:]
         for (pid, controller) in pidToController {
-            // Only shell tabs adopt; a resumed agent tab keeps its base identity.
             guard controller.base.agent == .shell else { continue }
             if let detected = detectConversation(for: info[pid]) {
                 out[ObjectIdentifier(controller)] = detected
