@@ -94,10 +94,9 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // snapshot first so they resume with the right sessionFile (the context
         // gauge reads it), so those restore inside the Task after the (cheap)
         // cache load. Ghostty is ready synchronously once AppEnvironment is built.
-        let saved = env.coordinator.savedSessionTabs()
-        let needsCache = saved.contains { $0.agentRaw != AgentKind.shell.rawValue }
+        let needsCache = env.coordinator.launchNeedsCache()
         if env.coordinator.isEmpty && !needsCache {
-            if !env.coordinator.restoreSession() {
+            if !env.coordinator.restoreOnLaunch() {
                 env.coordinator.openFreshShell()
             }
         }
@@ -105,7 +104,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             if env.coordinator.isEmpty && needsCache {
                 await env.registry.loadCacheSnapshot()
-                if !env.coordinator.restoreSession() {
+                if !env.coordinator.restoreOnLaunch() {
                     env.coordinator.openFreshShell()
                 }
             }

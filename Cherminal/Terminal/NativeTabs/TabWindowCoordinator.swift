@@ -402,6 +402,61 @@ final class TabWindowCoordinator: ObservableObject {
         }
         guard let data = try? JSONEncoder().encode(tabs) else { return }
         UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
+        persistWorkspaces()   // full grids (all panes) for the ADE restore
+    }
+
+    // MARK: - Workspace restore (full grids)
+
+    private static let workspacesKey = "cherminal.workspaces"
+
+    /// Snapshot every window's full grid (all panes + layout). Written on the
+    /// same debounce as persistSessionLight, so any exit restores the grids.
+    private func persistWorkspaces() {
+        let wss: [PersistedWorkspace] = controllers.map { c in
+            PersistedWorkspace(name: "", layout: c.workspace.layout, panes: c.workspace.panes.map { p in
+                PersistedPane(conversationID: p.conversation.id,
+                              agentRaw: p.conversation.agent.rawValue,
+                              roomPath: p.conversation.roomPath.path,
+                              role: p.role,
+                              gridPosition: p.gridPosition)
+            })
+        }
+        guard let data = try? JSONEncoder().encode(wss) else { return }
+        UserDefaults.standard.set(data, forKey: Self.workspacesKey)
+    }
+
+    func savedWorkspaces() -> [PersistedWorkspace] {
+        guard let data = UserDefaults.standard.data(forKey: Self.workspacesKey),
+              let wss = try? JSONDecoder().decode([PersistedWorkspace].self, from: data)
+        else { return [] }
+        return wss
+    }
+
+    /// Reopen each saved window-grid. Returns false if nothing was saved.
+    @discardableResult
+    func restoreWorkspaces() -> Bool {
+        let wss = savedWorkspaces().filter { !$0.panes.isEmpty }
+        guard !wss.isEmpty else { return false }
+        clog("tabs", "restoring \(wss.count) workspace(s)")
+        for ws in wss { loadWorkspace(ws) }
+        return !controllers.isEmpty
+    }
+
+    /// Does the launch restore need the cache snapshot first (any agent pane)?
+    func launchNeedsCache() -> Bool {
+        let ws = savedWorkspaces()
+        if !ws.isEmpty {
+            return ws.flatMap { $0.panes }.contains { $0.agentRaw != AgentKind.shell.rawValue }
+        }
+        return savedSessionTabs().contains { $0.agentRaw != AgentKind.shell.rawValue }
+    }
+
+    /// Restore on launch: full grids first, else legacy [PersistedTab], else
+    /// false (caller opens a fresh shell).
+    @discardableResult
+    func restoreOnLaunch() -> Bool {
+        if restoreWorkspaces() { return true }
+        return restoreSession()
     }
 
     /// The tabs persisted by the last run, decoded but not opened — lets the
