@@ -13,7 +13,7 @@ import os
 /// safe to call from any thread — internal access is serialized by a lock.
 final class SessionCache: @unchecked Sendable {
     private static let logger = Logger(subsystem: "dev.hamulia.Cherminal", category: "cache")
-    private static let schemaVersion: Int = 5
+    private static let schemaVersion: Int = 6
 
     private var db: OpaquePointer?
     private let lock = NSLock()
@@ -104,6 +104,14 @@ final class SessionCache: @unchecked Sendable {
                 updated_at REAL NOT NULL
             );
             """)
+        // ADE (v6) user-data tables. Each stores the full Codable entity as a
+        // JSON blob (load-all + decode + sort in the manager); a single small
+        // upsert per change is plenty cheap. CREATE IF NOT EXISTS is idempotent
+        // and these are user data — never added to the conversations DELETE.
+        try exec("CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, json TEXT NOT NULL);")
+        try exec("CREATE TABLE IF NOT EXISTS swarm_templates (id TEXT PRIMARY KEY, json TEXT NOT NULL);")
+        try exec("CREATE TABLE IF NOT EXISTS kanban_columns (id TEXT PRIMARY KEY, json TEXT NOT NULL);")
+        try exec("CREATE TABLE IF NOT EXISTS kanban_tasks (id TEXT PRIMARY KEY, json TEXT NOT NULL);")
 
         let currentVersion = try scalarInt("SELECT COALESCE(MAX(version), 0) FROM schema_version") ?? 0
         if currentVersion < Self.schemaVersion {
@@ -343,6 +351,73 @@ final class SessionCache: @unchecked Sendable {
         guard sqlite3_prepare_v2(db, "DELETE FROM bookmarks WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK else { return }
         sqlite3_bind_text(stmt, 1, id.uuidString, -1, Self.sqliteTransient)
         sqlite3_step(stmt)
+    }
+
+    // MARK: - ADE entities (workspaces / swarm templates / kanban)
+
+    func loadWorkspaces() -> [Workspace] {
+        loadJSONRows(table: "workspaces").compactMap(decodeEntity).sorted { $0.updatedAt > $1.updatedAt }
+    }
+    func saveWorkspace(_ w: Workspace) { upsertEntity(table: "workspaces", id: w.id.uuidString, w) }
+    func deleteWorkspace(id: UUID) { deleteRow(table: "workspaces", id: id.uuidString) }
+
+    func loadSwarmTemplates() -> [SwarmTemplate] {
+        loadJSONRows(table: "swarm_templates").compactMap(decodeEntity).sorted { $0.updatedAt > $1.updatedAt }
+    }
+    func saveSwarmTemplate(_ t: SwarmTemplate) { upsertEntity(table: "swarm_templates", id: t.id.uuidString, t) }
+    func deleteSwarmTemplate(id: UUID) { deleteRow(table: "swarm_templates", id: id.uuidString) }
+
+    func loadKanbanColumns() -> [KanbanColumn] {
+        loadJSONRows(table: "kanban_columns").compactMap(decodeEntity).sorted { $0.order < $1.order }
+    }
+    func saveKanbanColumn(_ c: KanbanColumn) { upsertEntity(table: "kanban_columns", id: c.id.uuidString, c) }
+    func deleteKanbanColumn(id: UUID) { deleteRow(table: "kanban_columns", id: id.uuidString) }
+
+    func loadKanbanTasks() -> [KanbanTask] {
+        loadJSONRows(table: "kanban_tasks").compactMap(decodeEntity).sorted { $0.order < $1.order }
+    }
+    func saveKanbanTask(_ t: KanbanTask) { upsertEntity(table: "kanban_tasks", id: t.id.uuidString, t) }
+    func deleteKanbanTask(id: UUID) { deleteRow(table: "kanban_tasks", id: id.uuidString) }
+
+    // MARK: - JSON-blob row helpers (table names are constants — safe to interpolate)
+
+    private func loadJSONRows(table: String) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "SELECT json FROM \(table);", -1, &stmt, nil) == SQLITE_OK else { return [] }
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let ptr = sqlite3_column_text(stmt, 0) { out.append(String(cString: ptr)) }
+        }
+        return out
+    }
+
+    private func upsertEntity<T: Encodable>(table: String, id: String, _ value: T) {
+        guard let data = try? jsonEncoder.encode(value),
+              let json = String(data: data, encoding: .utf8) else { return }
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = "INSERT INTO \(table) (id, json) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET json = excluded.json;"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.sqliteTransient)
+        sqlite3_bind_text(stmt, 2, json, -1, Self.sqliteTransient)
+        sqlite3_step(stmt)
+    }
+
+    private func deleteRow(table: String, id: String) {
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_prepare_v2(db, "DELETE FROM \(table) WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        sqlite3_bind_text(stmt, 1, id, -1, Self.sqliteTransient)
+        sqlite3_step(stmt)
+    }
+
+    private func decodeEntity<T: Decodable>(_ json: String) -> T? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? jsonDecoder.decode(T.self, from: data)
     }
 
     // MARK: - Helpers
