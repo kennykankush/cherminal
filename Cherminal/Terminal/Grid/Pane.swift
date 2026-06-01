@@ -23,6 +23,8 @@ final class Pane: ObservableObject, Identifiable {
     @Published var role: PaneRole?
     @Published var lifecycleState: PaneLifecycle = .empty
     var gridPosition: GridPosition
+    /// Last time this pane was focused/spawned — drives LRU suspension.
+    var lastActiveAt = Date()
 
     init(conversation: Conversation,
          role: PaneRole? = nil,

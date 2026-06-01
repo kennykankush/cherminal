@@ -31,6 +31,7 @@ struct TerminalGridView: View {
 /// with an active-pane border. Tapping activates the pane without stealing the
 /// click from the terminal (simultaneousGesture).
 struct PaneCellView: View {
+    @EnvironmentObject private var coordinator: TabWindowCoordinator
     @ObservedObject var pane: Pane
     @ObservedObject var workspace: Workspace
 
@@ -56,7 +57,7 @@ struct PaneCellView: View {
             }
         }
         .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture().onEnded { workspace.activePaneID = pane.id })
+        .simultaneousGesture(TapGesture().onEnded { coordinator.focusPane(pane, in: workspace) })
     }
 
     @ViewBuilder private var roleBadge: some View {

@@ -194,7 +194,9 @@ final class TabWindowCoordinator: ObservableObject {
                 clog("tabs", "spawn surface id=\(conversation.id) cwd=\(config.workingDirectory ?? "nil") cmd=\(config.command ?? "default-shell")")
                 pane.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
                 pane.lifecycleState = .live
+                pane.lastActiveAt = Date()
                 clog("tabs", "spawn surface ok id=\(conversation.id) pane=\(pane.id)")
+                self.enforceSurfaceCap()
             }
         }
     }
@@ -233,6 +235,44 @@ final class TabWindowCoordinator: ObservableObject {
     }
 
     func focusNextPane() { activeController?.workspace.focusNext() }
+
+    // MARK: - Lazy surface lifecycle (memory cap)
+
+    /// Each live libghostty surface costs ~180 MB. Cap concurrent live surfaces
+    /// and suspend the least-recently-active *idle shell* panes when over —
+    /// never a running agent (pinned via liveConversationIDs) or the active pane.
+    private let maxLiveSurfaces = 6
+
+    /// Activate (and resume if suspended) a pane — called on click.
+    func focusPane(_ pane: Pane, in workspace: Workspace) {
+        workspace.activePaneID = pane.id
+        pane.lastActiveAt = Date()
+        if pane.surfaceView == nil, pane.lifecycleState == .suspended,
+           let controller = controllers.first(where: { $0.workspace === workspace }) {
+            spawnSurface(for: pane, in: controller)
+        }
+    }
+
+    /// Suspend idle shell panes (LRU) until live surfaces are within the cap.
+    private func enforceSurfaceCap() {
+        let activeIDs = Set(controllers.compactMap { $0.workspace.activePaneID })
+        var liveSurfacePanes = allPanes().filter { $0.surfaceView != nil }
+        guard liveSurfacePanes.count > maxLiveSurfaces else { return }
+
+        let suspendable = liveSurfacePanes
+            .filter { $0.conversation.agent == .shell }      // never suspend a running agent
+            .filter { !activeIDs.contains($0.id) }           // never the active pane
+            .filter { !liveConversationIDs.contains($0.conversation.id) }
+            .sorted { $0.lastActiveAt < $1.lastActiveAt }     // least-recently-active first
+
+        var overBy = liveSurfacePanes.count - maxLiveSurfaces
+        for pane in suspendable where overBy > 0 {
+            pane.surfaceView = nil                // SurfaceView deinit → ghostty_surface_free + PTY SIGHUP
+            pane.lifecycleState = .suspended
+            overBy -= 1
+            clog("tabs", "suspended idle pane=\(pane.id) (surface cap)")
+        }
+    }
 
     /// Open a bare shell tab. cwd defaults to the active tab's room, else $HOME.
     func openFreshShell(cwd explicitCWD: URL? = nil) {
