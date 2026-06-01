@@ -18,7 +18,10 @@ final class TabSurfaceHolder: ObservableObject {
 
     init(conversation: Conversation) {
         self.conversation = conversation
+        LiveCount.inc("holder")   // ← leak tripwire: should hit 0 when all tabs close
     }
+
+    deinit { LiveCount.dec("holder") }
 }
 
 /// One native tab = one `NSWindow` hosting the full 3-pane SwiftUI for a
@@ -92,9 +95,12 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
         window.delegate = self
+        LiveCount.inc("window")
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit { LiveCount.dec("window") }
 
     /// The native "+" in the tab bar walks the responder chain to this.
     @objc override func newWindowForTab(_ sender: Any?) {

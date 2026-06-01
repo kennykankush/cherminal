@@ -14,6 +14,7 @@ final class AppEnvironment {
     let coordinator: TabWindowCoordinator
     let ports: PortsManager
     let caffeine = CaffeineManager()
+    let metrics: MetricsRecorder
 
     private init() {
         let cache = try? SessionCache()
@@ -29,5 +30,6 @@ final class AppEnvironment {
         self.pins = pins
         self.coordinator = coordinator
         self.ports = PortsManager(registry: registry, coordinator: coordinator)
+        self.metrics = MetricsRecorder(coordinator: coordinator)
     }
 }

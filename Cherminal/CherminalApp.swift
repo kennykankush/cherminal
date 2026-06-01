@@ -72,6 +72,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !isRunningTests else { return }
         let env = AppEnvironment.shared
+        env.metrics.startIfEnabled()   // headless perf CSV (off unless cherminal.metrics)
         installTabShortcutMonitor()
         // Defer the Groups menu: SwiftUI installs its own main menu *after*
         // this callback, so an insert here gets wiped. The next runloop tick
