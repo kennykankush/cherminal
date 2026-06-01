@@ -355,10 +355,10 @@ final class SessionCache: @unchecked Sendable {
 
     // MARK: - ADE entities (workspaces / swarm templates / kanban)
 
-    func loadWorkspaces() -> [Workspace] {
+    func loadWorkspaces() -> [PersistedWorkspace] {
         loadJSONRows(table: "workspaces").compactMap(decodeEntity).sorted { $0.updatedAt > $1.updatedAt }
     }
-    func saveWorkspace(_ w: Workspace) { upsertEntity(table: "workspaces", id: w.id.uuidString, w) }
+    func saveWorkspace(_ w: PersistedWorkspace) { upsertEntity(table: "workspaces", id: w.id.uuidString, w) }
     func deleteWorkspace(id: UUID) { deleteRow(table: "workspaces", id: id.uuidString) }
 
     func loadSwarmTemplates() -> [SwarmTemplate] {

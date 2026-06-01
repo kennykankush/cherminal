@@ -8,7 +8,7 @@ struct TabWindowRootView: View {
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var caffeine: CaffeineManager
-    @ObservedObject var holder: TabSurfaceHolder
+    @ObservedObject var holder: Pane
 
     /// The tab's effective conversation, observed from the holder so the badge,
     /// title, and context pane follow when the tab adopts a live agent session.

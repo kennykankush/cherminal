@@ -91,7 +91,9 @@ struct PersistedPane: Codable, Hashable, Sendable, Identifiable {
 /// A saved grid: ordered panes + their layout. Supersedes the loose
 /// `[PersistedTab]` lastSession blob for the ADE model (the *active* workspace
 /// is persisted to UserDefaults; the saved library lives in SessionCache).
-struct Workspace: Codable, Hashable, Sendable, Identifiable {
+/// `Persisted*` = on-disk snapshot; the live runtime grid is the `Workspace`
+/// ObservableObject in Terminal/Grid/.
+struct PersistedWorkspace: Codable, Hashable, Sendable, Identifiable {
     let id: UUID
     var name: String
     var layout: GridLayout

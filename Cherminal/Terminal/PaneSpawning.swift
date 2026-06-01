@@ -10,7 +10,7 @@ import Foundation
 protocol PaneSpawning: AnyObject {
     /// Replace the active grid with `workspace`: clear current panes, then spawn
     /// a surface for each persisted pane at its position.
-    func loadWorkspace(_ workspace: Workspace)
+    func loadWorkspace(_ workspace: PersistedWorkspace)
 
     /// Spawn one surface for `conversation` at `position`, tagged with `role`.
     /// Returns the new pane's id. Mirrors the existing deferred-spawn path.

@@ -6,36 +6,22 @@ import GhosttyKit
 /// spawned *after* the window's panes have laid out — otherwise the shell (and
 /// its startup banner) spawn into a momentarily-squished pane and render at the
 /// wrong width.
-@MainActor
-final class TabSurfaceHolder: ObservableObject {
-    @Published var surfaceView: Ghostty.SurfaceView?
-    /// The tab's *effective* conversation. Starts as the base identity the tab
-    /// was opened with (a shell, or a resumed agent session) and flips when the
-    /// live-session linker detects the tab is actually running an agent — so a
-    /// `claude` launched by hand inside a shell tab makes the tab become that
-    /// conversation. Views observe this, so badge/title/context follow.
-    @Published var conversation: Conversation
-
-    init(conversation: Conversation) {
-        self.conversation = conversation
-        LiveCount.inc("holder")   // ← leak tripwire: should hit 0 when all tabs close
-    }
-
-    deinit { LiveCount.dec("holder") }
-}
-
-/// One native tab = one `NSWindow` hosting the full 3-pane SwiftUI for a
-/// single conversation. Owns that conversation's Ghostty surface (via the
-/// holder) for the window's lifetime.
+/// One native tab = one `NSWindow` hosting the full SwiftUI for a workspace.
+/// Owns a `Workspace` (a grid of panes — one pane today, N after the grid
+/// lands). `holder` is a compatibility shim returning the active pane so the
+/// pre-grid coordinator code keeps working unchanged.
 @MainActor
 final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
-    /// The identity the tab was opened with. The *effective* conversation
+    /// The identity the window was opened with. The *effective* conversation
     /// (`holder.conversation`) can differ once the linker detects a live agent.
     let base: Conversation
-    let holder: TabSurfaceHolder
+    let workspace: Workspace
     private weak var coordinator: TabWindowCoordinator?
 
-    /// The tab's effective conversation — base, unless adopted to a live one.
+    /// The active pane. Shim for the pre-grid call sites (`controller.holder`).
+    var holder: Pane { workspace.activePane ?? workspace.panes[0] }
+
+    /// The window's effective conversation — base, unless adopted to a live one.
     var conversation: Conversation { holder.conversation }
 
     init(
@@ -46,7 +32,8 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
         coordinator: TabWindowCoordinator
     ) {
         self.base = conversation
-        self.holder = TabSurfaceHolder(conversation: conversation)
+        let pane = Pane(conversation: conversation)
+        self.workspace = Workspace(panes: [pane])
         self.coordinator = coordinator
 
         let window = NSWindow(
@@ -83,7 +70,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
         }
         window.center()
 
-        let root = TabWindowRootView(holder: holder)
+        let root = TabWindowRootView(holder: pane)
             .environmentObject(registry)
             .environmentObject(ghostty)
             .environmentObject(bookmarks)
@@ -116,10 +103,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
     /// (a hand-launched agent), or fall back to `base` when nothing live is
     /// running (the agent exited and we're back at a shell). Idempotent.
     func applyDetectedSession(_ detected: Conversation?) {
-        let target = detected ?? base
-        guard holder.conversation.id != target.id else { return }
-        clog("tabs", "adopt id=\(target.id) agent=\(target.agent.rawValue) (was \(holder.conversation.id))")
-        holder.conversation = target
-        window?.title = target.roomName
+        holder.applyDetectedSession(detected)
+        window?.title = holder.conversation.roomName
     }
 }
