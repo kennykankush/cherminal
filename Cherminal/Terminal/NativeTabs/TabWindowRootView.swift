@@ -19,22 +19,32 @@ struct TabWindowRootView: View {
     // own (which made the mode look random when switching tabs).
     @AppStorage("cherminal.sidebarMode") private var sidebarMode: SidebarView.Mode = .byRecent
     @AppStorage("cherminal.showContext") private var showContext = true
+    /// Detail area shows the terminal (false) or the kanban board (true).
+    @AppStorage("cherminal.boardMode") private var boardMode = false
 
     var body: some View {
         NavigationSplitView {
             SidebarView(mode: $sidebarMode, selection: sidebarSelection)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 420)
         } detail: {
-            terminal
+            detailContent
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .inspector(isPresented: $showContext) {
                     ContextWatchPane(conversation: conversation)
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 460)
                 }
                 // Global utility toggles grouped in the top-right cluster:
-                // coffee (keep-awake) then the Context inspector toggle.
+                // board ⇄ terminal, coffee (keep-awake), then Context.
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
+                        Button {
+                            boardMode.toggle()
+                        } label: {
+                            Label("Board", systemImage: boardMode ? "terminal" : "square.grid.2x2")
+                        }
+                        .help(boardMode ? "Show terminal" : "Show board")
+                        .foregroundStyle(boardMode ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.primary))
+
                         Button {
                             caffeine.toggle()
                         } label: {
@@ -53,6 +63,16 @@ struct TabWindowRootView: View {
                         .help(showContext ? "Hide context" : "Show context")
                     }
                 }
+        }
+    }
+
+    /// Detail area: the kanban board, or the terminal surface.
+    @ViewBuilder
+    private var detailContent: some View {
+        if boardMode {
+            KanbanBoardView()
+        } else {
+            terminal
         }
     }
 

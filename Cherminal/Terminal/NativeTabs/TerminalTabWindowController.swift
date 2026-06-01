@@ -90,6 +90,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
             .environmentObject(AppEnvironment.shared.pins)
             .environmentObject(AppEnvironment.shared.ports)
             .environmentObject(AppEnvironment.shared.caffeine)
+            .environmentObject(AppEnvironment.shared.kanban)
             .environmentObject(coordinator)
         window.contentViewController = NSHostingController(rootView: AnyView(root))
 

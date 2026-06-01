@@ -15,6 +15,7 @@ final class AppEnvironment {
     let ports: PortsManager
     let caffeine = CaffeineManager()
     let metrics: MetricsRecorder
+    let kanban: KanbanManager
 
     private init() {
         let cache = try? SessionCache()
@@ -31,5 +32,6 @@ final class AppEnvironment {
         self.coordinator = coordinator
         self.ports = PortsManager(registry: registry, coordinator: coordinator)
         self.metrics = MetricsRecorder(coordinator: coordinator)
+        self.kanban = KanbanManager(cache: cache)
     }
 }
