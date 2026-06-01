@@ -19,7 +19,10 @@ final class TabWindowCoordinator: ObservableObject {
     /// controller is dropped here on close, which deallocates the window and
     /// SIGHUPs its PTY.
     private var controllers: [TerminalTabWindowController] = [] {
-        didSet { tabCount = controllers.count }
+        didSet {
+            tabCount = controllers.count
+            schedulePersist()   // keep the restore snapshot current on every open/close
+        }
     }
 
     /// Published so bookmark UI can reflect how many tabs would be saved.
@@ -271,9 +274,48 @@ final class TabWindowCoordinator: ObservableObject {
     /// saved as that agent, not the bare shell it started as. Called on quit.
     func persistSession() {
         let tabs = snapshot()
+        // Never clobber the continuous save with an empty set. An empty result
+        // at terminate is almost always teardown — macOS sends SIGTERM on
+        // restart/logout and AppKit can close the windows (emptying controllers)
+        // *before* this runs, which previously wiped the saved session and lost
+        // every tab on a Mac restart. The debounced persistSessionLight already
+        // writes [] correctly the moment you genuinely close everything, so
+        // skipping here only protects a good snapshot from a teardown race.
+        guard !tabs.isEmpty else {
+            clog("tabs", "terminate snapshot empty — keeping the continuous save")
+            return
+        }
         guard let data = try? JSONEncoder().encode(tabs) else { return }
         UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
         clog("tabs", "persisted \(tabs.count) tab(s) for next launch")
+    }
+
+    /// Continuous, debounced persistence — the robustness fix. `persistSession()`
+    /// only ran on a clean quit, so a Mac restart / crash / force-quit / quitting
+    /// by closing the last tab all left a stale-or-empty snapshot and restored
+    /// nothing. This keeps the saved set current after every change, so any exit
+    /// path restores. No lsof (unlike snapshot()): it trusts each tab's current
+    /// effective conversation, which the 8s reconcile already keeps adopted.
+    private var persistDebounce: DispatchWorkItem?
+
+    private func schedulePersist() {
+        persistDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.persistSessionLight() }
+        persistDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func persistSessionLight() {
+        var seen = Set<String>()
+        let tabs: [PersistedTab] = controllers.compactMap { controller in
+            let convo = controller.conversation
+            guard seen.insert(convo.id).inserted else { return nil }
+            return PersistedTab(conversationID: convo.id,
+                                agentRaw: convo.agent.rawValue,
+                                roomPath: convo.roomPath.path)
+        }
+        guard let data = try? JSONEncoder().encode(tabs) else { return }
+        UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
     }
 
     /// The tabs persisted by the last run, decoded but not opened — lets the
@@ -490,6 +532,11 @@ final class TabWindowCoordinator: ObservableObject {
         // With the live set settled, refresh the "your turn" lights from each
         // live agent tab's session file.
         updateAwaiting(live: live)
+
+        // A tab may have just adopted a hand-launched agent (its effective
+        // conversation changed without controllers changing) — re-persist so the
+        // restore snapshot reflects the agent, not the bare shell it started as.
+        schedulePersist()
     }
 
     /// Whether a tab's foreground process looks like a running agent — used for
