@@ -24,6 +24,11 @@ final class ConversationRegistry: ObservableObject {
     /// Derived grouping, recomputed only when `conversations` changes — not on
     /// every render or port-scan tick (both used to call the old computed var).
     @Published private(set) var rooms: [Room] = []
+    /// Sessions that have been superseded by a post-compaction continuation —
+    /// i.e. some other conversation lists them as its `continuedFromID`. The
+    /// sidebar dims + badges these so a compaction reads as one chain, not two
+    /// mysterious duplicates. Recomputed with `rooms` when conversations change.
+    @Published private(set) var supersededIDs: Set<String> = []
     @Published private(set) var isLoading: Bool = false
     @Published private(set) var lastError: String?
 
@@ -122,6 +127,8 @@ final class ConversationRegistry: ObservableObject {
                      conversations: $0.value.sorted { $0.lastActivityAt > $1.lastActivityAt })
             }
             .sorted { $0.lastActivityAt > $1.lastActivityAt }
+        // A session is superseded when another lists it as its parent.
+        supersededIDs = Set(conversations.compactMap(\.continuedFromID))
     }
 
     // MARK: - Scanner

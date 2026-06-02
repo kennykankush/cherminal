@@ -93,7 +93,9 @@ struct ClaudeSessionScanner {
             firstTimestamp: summary.firstTimestamp,
             lastTimestamp: lastActivity,
             messageCount: summary.userMessageCount,
-            previewText: preview
+            previewText: preview,
+            continuedFromSessionID: detectContinuedFrom(file: candidate.file, selfID: id),
+            continuationScanned: true
         )
         cache?.put(path: candidate.file.path,
                    mtime: candidate.mtime,
@@ -101,6 +103,47 @@ struct ClaudeSessionScanner {
                    summary: persisted)
 
         return Conversation(persisted: persisted, sessionFile: candidate.file)
+    }
+
+    // MARK: - Compaction-chain detection
+
+    private static let continuationPhrase = "Continue the conversation from where it left off"
+
+    /// Detect whether this session is a post-compaction *continuation* of
+    /// another. When Claude compacts a full conversation it starts a new session
+    /// whose first user turn embeds the parent's `…/<uuid>.jsonl` path immediately
+    /// followed by the "Continue the conversation from where it left off" handoff.
+    /// Returns the parent session id, or nil.
+    ///
+    /// The marker lives in the first user record — past the title/mode/snapshot
+    /// records, so beyond the 16 KB the summary parser reads — so we scan a
+    /// bounded head (512 KB) here. Reads stop there, so an unusually large
+    /// pre-turn snapshot just yields no detection (no harm, just no badge).
+    private static func detectContinuedFrom(file: URL, selfID: String) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 512 * 1024), !head.isEmpty else { return nil }
+        let text = String(decoding: head, as: UTF8.self) as NSString
+        // The handoff is specifically "<parent>.jsonl" immediately followed by the
+        // continuation phrase. Anchor on the *path* and require the phrase right
+        // after it — don't anchor on the phrase, which can also appear inside the
+        // compaction summary above the real handoff (then there'd be no UUID just
+        // before it and we'd wrongly bail).
+        let uuidJsonl = #"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.jsonl"#
+        guard let re = try? NSRegularExpression(pattern: uuidJsonl) else { return nil }
+        let full = NSRange(location: 0, length: text.length)
+        for m in re.matches(in: text as String, range: full) {
+            // Probe the few chars after "<uuid>.jsonl" (just an escaped newline in
+            // the handoff) for the phrase.
+            let probeStart = m.range.location + m.range.length
+            let probeLen = min(continuationPhrase.count + 8, text.length - probeStart)
+            guard probeLen > 0 else { continue }
+            let probe = text.substring(with: NSRange(location: probeStart, length: probeLen))
+            guard probe.contains(continuationPhrase) else { continue }
+            let parent = String(text.substring(with: m.range).dropLast(6))   // strip ".jsonl"
+            if parent != selfID { return parent }
+        }
+        return nil
     }
 }
 
@@ -118,7 +161,8 @@ extension Conversation {
             lastActivityAt: persisted.lastTimestamp,
             messageCount: persisted.messageCount,
             previewText: persisted.previewText,
-            state: .dormant
+            state: .dormant,
+            continuedFromID: persisted.continuedFromSessionID
         )
     }
 }

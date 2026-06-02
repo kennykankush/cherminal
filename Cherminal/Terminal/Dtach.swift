@@ -15,10 +15,18 @@ import Foundation
 /// Only resumed agent panes are wrapped; bare shells aren't (nothing worth
 /// keeping alive, and their foreground-pid liveness detection must stay raw).
 enum Dtach {
-    /// `~/.cherminal/dtach`, created on demand. One socket per conversation id.
+    /// `~/.cherminal/dtach/<bundle-id>`, created on demand. One socket per
+    /// conversation id, namespaced by bundle so separate app instances never
+    /// share a socket dir. This is critical: the launch sweep kills masters not
+    /// in *this* instance's saved set, so a shared dir made CherminalDev's sweep
+    /// reap the daily driver's live agents (and vice versa) → "Process exited"
+    /// under a running agent. Per-bundle dirs keep each instance's masters its
+    /// own; the sweep can only ever touch sockets it created.
     static var directory: URL {
+        let bundle = Bundle.main.bundleIdentifier ?? "dev.hamulia.Cherminal"
         let dir = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent(".cherminal/dtach", isDirectory: true)
+            .appendingPathComponent(bundle, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
