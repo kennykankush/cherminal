@@ -305,6 +305,7 @@ struct SidebarView: View {
                         .onTapGesture { open(convo) }
                         .contextMenu {
                             Button("Open") { open(convo) }
+                            Button("Open as Pane", systemImage: "rectangle.split.2x1") { openAsPane(convo) }
                             Button("Unpin", role: .destructive) { pins.toggle(convo.id) }
                         }
                 }
@@ -318,10 +319,12 @@ struct SidebarView: View {
         }
     }
 
-    /// Right-click menu for a conversation row: open it, and pin/unpin.
+    /// Right-click menu for a conversation row: open it (new tab), open as a
+    /// pane in the current grid, and pin/unpin.
     @ViewBuilder
     private func rowMenu(_ convo: Conversation) -> some View {
         Button("Open") { open(convo) }
+        Button("Open as Pane", systemImage: "rectangle.split.2x1") { openAsPane(convo) }
         Button(pins.isPinned(convo.id) ? "Unpin" : "Pin",
                systemImage: pins.isPinned(convo.id) ? "pin.slash" : "pin") {
             pins.toggle(convo.id)
@@ -332,6 +335,11 @@ struct SidebarView: View {
     /// a row tap/menu, which would re-enter the List's NSTableView delegate.
     private func open(_ convo: Conversation) {
         DispatchQueue.main.async { coordinator.openOrFocus(convo) }
+    }
+
+    /// Drop a conversation into the active window's grid as a new pane.
+    private func openAsPane(_ convo: Conversation) {
+        DispatchQueue.main.async { coordinator.openConversationInPane(convo) }
     }
 
     private var emptyState: some View {

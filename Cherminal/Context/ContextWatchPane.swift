@@ -104,17 +104,17 @@ struct ContextWatchPane: View {
 
     private func gaugeSection(_ u: ConversationUsage) -> some View {
         section("Context window") {
-            VStack(alignment: .leading, spacing: CHM.Space.sm) {
-                HStack(alignment: .firstTextBaseline, spacing: CHM.Space.xs) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text("\(Int(u.contextUsedPercent))%")
-                        .font(CHM.Font.metric)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(usageColor(u.contextUsedPercent))
                         .monospacedDigit()
                         .animation(CHM.Motion.appear, value: u.contextUsedPercent)
                     Text("full")
                         .font(CHM.Font.caption)
                         .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 4)
                     if let model = u.modelDisplayName {
                         Text(model)
                             .font(CHM.Font.caption)
@@ -134,29 +134,48 @@ struct ContextWatchPane: View {
         }
     }
 
+    /// 5h | Weekly side by side — label + %, a slim bar, and a clock countdown
+    /// to reset (matches the dashboard rate-limit card).
     private func limitsSection(_ u: ConversationUsage) -> some View {
         section("Usage limits") {
-            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+            HStack(alignment: .top, spacing: CHM.Space.lg) {
                 ForEach(u.rateWindows) { w in
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack {
-                            Text(w.label).font(CHM.Font.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            Text("\(Int(w.usedPercent))%")
-                                .font(CHM.Font.captionEmphasis)
-                                .foregroundStyle(usageColor(w.usedPercent))
-                                .monospacedDigit()
-                        }
-                        usageBar(percent: w.usedPercent)
-                        if let resets = w.resetsAt {
-                            Text("resets \(resets.formatted(.relative(presentation: .named)))")
-                                .font(CHM.Font.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
+                    windowMeter(w).frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
+    }
+
+    private func windowMeter(_ w: ConversationUsage.RateWindow) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(w.label).font(CHM.Font.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Text("\(Int(w.usedPercent))%")
+                    .font(CHM.Font.captionEmphasis)
+                    .foregroundStyle(usageColor(w.usedPercent))
+                    .monospacedDigit()
+            }
+            usageBar(percent: w.usedPercent)
+            if let resets = w.resetsAt {
+                HStack(spacing: 3) {
+                    Image(systemName: "clock").font(.system(size: 9))
+                    Text("in \(Self.compactCountdown(to: resets))")
+                }
+                .font(CHM.Font.caption)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+            }
+        }
+    }
+
+    /// "6d 7h" / "4h 50m" / "12m" — the largest two units until reset.
+    private static func compactCountdown(to date: Date) -> String {
+        let secs = Int(max(0, date.timeIntervalSinceNow))
+        let d = secs / 86_400, h = (secs % 86_400) / 3_600, m = (secs % 3_600) / 60
+        if d > 0 { return "\(d)d \(h)h" }
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
     }
 
     /// Calm ramp: neutral until 75%, the app's clay accent 75–90%, a muted
