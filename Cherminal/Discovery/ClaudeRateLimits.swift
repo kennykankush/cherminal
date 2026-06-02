@@ -28,9 +28,15 @@ actor ClaudeRateLimits {
     /// Cached windows, refreshed at most once a minute. Empty if no token /
     /// offline / plan doesn't report limits.
     func windows() async -> [ConversationUsage.RateWindow] {
-        if Date().timeIntervalSince(lastFetch) < windowTTL, !cachedWindows.isEmpty { return cachedWindows }
+        // Throttle every fetch attempt — including empty/failed ones — so an
+        // account that legitimately reports no windows (or a persistent non-200)
+        // can't turn this into an unthrottled 8s-per-tab poll. Stamp lastFetch
+        // *before* the await so a concurrent caller also short-circuits, and keep
+        // the last-good windows on an empty/failed result.
+        if Date().timeIntervalSince(lastFetch) < windowTTL { return cachedWindows }
+        lastFetch = Date()
         let fresh = await fetch()
-        if !fresh.isEmpty { cachedWindows = fresh; lastFetch = Date() }
+        if !fresh.isEmpty { cachedWindows = fresh }
         return cachedWindows
     }
 
@@ -52,15 +58,25 @@ actor ClaudeRateLimits {
         if code == 401 { invalidateToken() }   // stale token → re-read source next time
         guard code == 200, let usage = try? JSONDecoder().decode(UsageResponse.self, from: data) else { return [] }
 
-        let iso = ISO8601DateFormatter()
         var out: [ConversationUsage.RateWindow] = []
         if let w = usage.five_hour, let pct = w.utilization {
-            out.append(.init(label: "5h", usedPercent: pct, resetsAt: w.resets_at.flatMap { iso.date(from: $0) }))
+            out.append(.init(label: "5h", usedPercent: pct, resetsAt: Self.isoDate(w.resets_at)))
         }
         if let w = usage.seven_day, let pct = w.utilization {
-            out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: w.resets_at.flatMap { iso.date(from: $0) }))
+            out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: Self.isoDate(w.resets_at)))
         }
         return out
+    }
+
+    /// Parse an ISO8601 timestamp, tolerating fractional seconds (the OAuth usage
+    /// endpoint includes them) — the same fractional-then-plain fallback the rest
+    /// of Discovery uses (CodexSessionScanner, SessionParser).
+    private static func isoDate(_ str: String?) -> Date? {
+        guard let str else { return nil }
+        let frac = ISO8601DateFormatter()
+        frac.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = frac.date(from: str) { return d }
+        return ISO8601DateFormatter().date(from: str)
     }
 
     private struct UsageResponse: Decodable {
@@ -79,10 +95,13 @@ actor ClaudeRateLimits {
         if let t = readTokenFile(tokenCacheURL), t.expiresAt > Date().addingTimeInterval(60) {
             token = t; return t.value
         }
-        // 3. Claude's plaintext creds file, if present (no prompt).
+        // 3. Claude's plaintext creds file, if present (no prompt). Gate on
+        //    expiry like the cache-file path above — without this a stale token
+        //    here is re-read every poll and 401s forever (we can't delete
+        //    Claude's own file, so skipping it lets us fall through to Keychain).
         let credsFile = URL(fileURLWithPath:
             (NSHomeDirectory() as NSString).appendingPathComponent(".claude/.credentials.json"))
-        if let t = readTokenFile(credsFile) {
+        if let t = readTokenFile(credsFile), t.expiresAt > Date().addingTimeInterval(60) {
             token = t; cacheToken(t); return t.value
         }
         // 4. Keychain — the only prompting path; we land here rarely (token

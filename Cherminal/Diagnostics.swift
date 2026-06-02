@@ -12,6 +12,12 @@ import os
 /// (Zig) panics, Swift `fatalError`/precondition messages, and any C `fprintf`
 /// land here even when nothing else survives.
 private var faultFD: Int32 = -1
+/// Reentrancy guard for the fatal-signal handler. A second fatal signal (e.g. a
+/// SIGABRT from a malloc trip inside `backtrace_symbols_fd` while handling a
+/// heap-corruption SIGSEGV) must not re-run the non-async-signal-safe backtrace
+/// path against an already-corrupt heap. `sig_atomic_t` is the only type the C
+/// standard guarantees safe to touch from a handler.
+private var inCrashHandler: sig_atomic_t = 0
 private let backtraceSlots: Int32 = 128
 private let backtraceBuffer = UnsafeMutablePointer<UnsafeMutableRawPointer?>.allocate(capacity: Int(backtraceSlots))
 private let crashHeader = Array("\n=== FATAL SIGNAL — backtrace follows ===\n".utf8)
@@ -71,6 +77,7 @@ enum Diagnostics {
         _ = backtraceBuffer
         _ = crashHeader.count
         _ = crashFooter.count
+        _ = inCrashHandler   // force its global init off the async-signal path
 
         installCrashHandlers()
         let version = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
@@ -120,7 +127,12 @@ enum Diagnostics {
         // hand-rolled hex writer and symbolicate offline against the dSYM.)
         for sig in [SIGSEGV, SIGABRT, SIGILL, SIGBUS, SIGTRAP, SIGFPE] {
             signal(sig) { received in
-                if faultFD >= 0 {
+                // Only the first fatal signal runs the (malloc-using, not
+                // strictly async-signal-safe) backtrace path; a nested signal
+                // goes straight to default disposition so we never fault-loop on
+                // a corrupt heap.
+                if inCrashHandler == 0, faultFD >= 0 {
+                    inCrashHandler = 1
                     crashHeader.withUnsafeBufferPointer { _ = write(faultFD, $0.baseAddress, $0.count) }
                     let n = backtrace(backtraceBuffer, backtraceSlots)
                     backtrace_symbols_fd(backtraceBuffer, n, faultFD)

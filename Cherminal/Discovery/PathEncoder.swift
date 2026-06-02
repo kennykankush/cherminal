@@ -27,21 +27,13 @@ enum PathEncoder {
         let segments = stripped.split(separator: "-", omittingEmptySubsequences: false)
             .map(String.init)
 
-        // Fast path: every segment is a real directory name on disk.
-        var url = URL(fileURLWithPath: "/")
-        var ok = true
-        for segment in segments {
-            let candidate = url.appendingPathComponent(segment)
-            if FileManager.default.fileExists(atPath: candidate.path) {
-                url = candidate
-            } else {
-                ok = false
-                break
-            }
-        }
-        if ok {
-            cacheLock.lock(); cache[encoded] = url; cacheLock.unlock()
-            return url
+        // Resolve against the filesystem with longest-hyphen-match-first descent,
+        // so a real hyphenated dir (e.g. `fantopy-hadi`) is preferred over a
+        // split (`fantopy/hadi`) even when both exist on disk — the old greedy
+        // one-segment walk silently picked the wrong nested path and cached it.
+        if let resolved = resolve(segments: segments[...], base: URL(fileURLWithPath: "/")) {
+            cacheLock.lock(); cache[encoded] = resolved; cacheLock.unlock()
+            return resolved
         }
         // Fallback: join segments with `/`. Loses any original `-` in names, but
         // the sidebar still has *something* to render and group by. NOT cached —
@@ -49,5 +41,21 @@ enum PathEncoder {
         // later rescan should re-probe and self-heal rather than be stuck on the
         // lossy guess for the whole session.
         return URL(fileURLWithPath: "/" + segments.joined(separator: "/"))
+    }
+
+    /// Consume `segments` into existing directory components under `base`,
+    /// trying the LONGEST hyphen-joined prefix first and backtracking. Returns a
+    /// fully-resolved URL only when every segment is accounted for by real dirs.
+    private static func resolve(segments: ArraySlice<String>, base: URL) -> URL? {
+        if segments.isEmpty { return base }   // every segment accounted for
+        let fm = FileManager.default
+        for len in stride(from: segments.count, through: 1, by: -1) {
+            let component = segments.prefix(len).joined(separator: "-")
+            let candidate = base.appendingPathComponent(component)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if let resolved = resolve(segments: segments.dropFirst(len), base: candidate) { return resolved }
+        }
+        return nil
     }
 }
