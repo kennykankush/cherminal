@@ -26,6 +26,10 @@ struct InspectorPane: View {
             }
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
+        // @AppStorage writes round-trip through UserDefaults and drop out of a
+        // withAnimation transaction (so the swap would just snap). Scope the
+        // animation to the value instead — same workaround as SidebarView/ModeToggle.
+        .animation(CHM.Motion.appear, value: tab)
     }
 
     private var header: some View {
@@ -41,7 +45,7 @@ struct InspectorPane: View {
     private func segment(_ label: String, _ value: Tab, count: Int, alert: Bool) -> some View {
         let selected = tab == value
         return Button {
-            withAnimation(CHM.Motion.appear) { tab = value }
+            tab = value
         } label: {
             HStack(spacing: 5) {
                 Text(label).font(CHM.Font.captionEmphasis)

@@ -197,7 +197,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// is created on main (libghostty requires it), re-checking the pane is
     /// still live. Shared by openOrFocus and addPane.
     private func spawnSurface(for pane: Pane, in controller: TerminalTabWindowController) {
-        guard pane.surfaceView == nil else { return }
+        // Bail if a surface exists OR a build is already in flight. The config
+        // build is ~3s async during which surfaceView stays nil, so guarding on
+        // surfaceView alone would let a re-entrant call kick off a redundant
+        // build; lifecycleState is the value actually set to mark it in-flight.
+        guard pane.surfaceView == nil, pane.lifecycleState != .spawning else { return }
         pane.lifecycleState = .spawning
         let conversation = pane.conversation
         Task.detached(priority: .userInitiated) {
@@ -242,9 +246,30 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// Open a specific conversation as a pane in the active window's grid (the
     /// sidebar "Open as Pane"). No active window → opens it as a tab instead.
+    /// Dedups like `openOrFocus`: if this conversation is already live in some
+    /// pane, focus it rather than spawning a second pane on the same dtach socket
+    /// (which would mirror I/O and confuse pid→id bookkeeping).
     func openConversationInPane(_ conversation: Conversation) {
+        if focusExistingPane(conversationID: conversation.id) { return }
         guard let controller = activeController else { openOrFocus(conversation); return }
         addPane(conversation, to: controller)
+    }
+
+    /// Find a live pane already running `conversationID` (by effective or opened
+    /// identity), focus its window + pane, and return true. Used to dedup
+    /// "Open as Pane" / rail reattach against an already-open conversation.
+    @discardableResult
+    private func focusExistingPane(conversationID: String) -> Bool {
+        for controller in controllers {
+            if let pane = controller.workspace.panes.first(where: {
+                $0.conversation.id == conversationID || $0.base.id == conversationID
+            }) {
+                select(controller)
+                focusPane(pane, in: controller.workspace)
+                return true
+            }
+        }
+        return false
     }
 
     private func addPane(_ conversation: Conversation, to controller: TerminalTabWindowController) {
@@ -619,6 +644,10 @@ final class TabWindowCoordinator: ObservableObject {
         // base identity so a shell↔agent flip can't strand it either.
         awaitingTurnIDs.remove(controller.conversation.id)
         awaitingTurnIDs.remove(controller.base.id)
+        // Prune the seen-offset map too, else it grows unbounded over a long
+        // session (entries are written per conversation but were never removed).
+        seenTurnSize.removeValue(forKey: controller.conversation.id)
+        seenTurnSize.removeValue(forKey: controller.base.id)
 
         // Last tab gone → show the "no tabs open" home window instead of letting
         // the app quit. Inherit the closing window's frame for continuity.
