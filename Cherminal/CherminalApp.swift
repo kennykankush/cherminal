@@ -252,10 +252,13 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
 
         if mods == .command {
             if chars == "t" { coordinator.openFreshShell(); return true }
+            if chars == "d" { coordinator.addPaneToActiveWindow(); return true }   // split: add pane
+            if chars == "`" { coordinator.focusNextPane(); return true }           // cycle panes
             if let n = Int(chars), (1...9).contains(n) { coordinator.selectTab(number: n); return true }
         } else if mods == [.command, .shift] {
             if chars == "]" || chars == "}" { coordinator.selectNextTab(); return true }
             if chars == "[" || chars == "{" { coordinator.selectPreviousTab(); return true }
+            if chars == "w" || chars == "W" { coordinator.closeActivePane(); return true }   // close pane
         }
         return false
     }

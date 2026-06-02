@@ -8,11 +8,12 @@ struct TabWindowRootView: View {
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var caffeine: CaffeineManager
-    @ObservedObject var holder: TabSurfaceHolder
+    @ObservedObject var workspace: Workspace
 
-    /// The tab's effective conversation, observed from the holder so the badge,
-    /// title, and context pane follow when the tab adopts a live agent session.
-    private var conversation: Conversation { holder.conversation }
+    /// The active pane's conversation drives the title, sidebar highlight, and
+    /// context pane. (Coordinator @Published changes re-render this view when an
+    /// adoption flips a pane's identity.)
+    private var conversation: Conversation? { workspace.activePane?.conversation }
 
     // App-wide, persisted — NOT per-window @State, so every tab shows the same
     // sidebar mode / inspector visibility instead of each tab remembering its
@@ -25,14 +26,13 @@ struct TabWindowRootView: View {
             SidebarView(mode: $sidebarMode, selection: sidebarSelection)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 420)
         } detail: {
-            terminal
+            TerminalGridView(workspace: workspace)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .inspector(isPresented: $showContext) {
                     ContextWatchPane(conversation: conversation)
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 460)
                 }
-                // Global utility toggles grouped in the top-right cluster:
-                // coffee (keep-awake) then the Context inspector toggle.
+                // Top-right cluster: coffee (keep-awake), then Context.
                 .toolbar {
                     ToolbarItemGroup(placement: .primaryAction) {
                         Button {
@@ -56,23 +56,12 @@ struct TabWindowRootView: View {
         }
     }
 
-    /// The surface is created lazily once the pane has laid out (see
-    /// TabWindowCoordinator), so until then we show the window's background
-    /// color — no flash of mis-sized terminal.
-    @ViewBuilder
-    private var terminal: some View {
-        if let surfaceView = holder.surfaceView {
-            Ghostty.SurfaceWrapper(surfaceView: surfaceView)
-        } else {
-            Color.clear
-        }
-    }
 
-    /// Highlights this window's conversation; a click opens or focuses the
+    /// Highlights this window's active conversation; a click opens or focuses the
     /// corresponding tab. Missing-from-registry ids produce no write.
     private var sidebarSelection: Binding<Conversation.ID?> {
         Binding(
-            get: { conversation.id },
+            get: { conversation?.id },
             set: { newID in
                 guard let newID, let convo = registry.conversation(id: newID) else { return }
                 // Defer to the next runloop: opening a tab mutates published
