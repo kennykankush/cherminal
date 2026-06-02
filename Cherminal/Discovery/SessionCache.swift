@@ -13,6 +13,12 @@ import os
 /// safe to call from any thread — internal access is serialized by a lock.
 final class SessionCache: @unchecked Sendable {
     private static let logger = Logger(subsystem: "dev.hamulia.Cherminal", category: "cache")
+    // Deliberately NOT bumped for the compaction-chain field: a bump runs
+    // `DELETE FROM conversations`, emptying the cache that launch restore reads
+    // *before* the first scan, so saved agent tabs would restore as bare shells.
+    // Instead, pre-feature rows carry `continuationScanned == nil` and the scan
+    // engine forces a one-time per-row reparse (see SessionScanEngine) — restore
+    // still reads every conversation via loadAll(), and detection backfills.
     private static let schemaVersion: Int = 5
 
     private var db: OpaquePointer?
@@ -35,6 +41,16 @@ final class SessionCache: @unchecked Sendable {
         var lastTimestamp: Date
         var messageCount: Int
         var previewText: String?
+        /// Parent session id when this is a post-compaction continuation (see
+        /// Conversation.continuedFromID). Optional with a default → old cache
+        /// rows decode nil and every existing construction site (Codex scanner,
+        /// tests) compiles without passing it.
+        var continuedFromSessionID: String? = nil
+        /// True once the Claude scanner has run compaction-chain detection for
+        /// this row. nil on rows cached before the feature → the scan engine
+        /// forces a one-time reparse so historical continuations get detected,
+        /// WITHOUT invalidating the cache (which would break tab restore).
+        var continuationScanned: Bool? = nil
     }
 
     convenience init() throws {

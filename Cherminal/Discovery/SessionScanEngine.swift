@@ -47,7 +47,17 @@ enum SessionScanEngine {
                     if let cache,
                        let entry = cache.get(path: c.file.path, mtime: c.mtime, size: c.size),
                        let convo = Conversation(persisted: entry.summary, sessionFile: c.file) {
-                        hits.append(convo)
+                        // One-time backfill: a Claude row cached before
+                        // compaction-chain detection existed (continuationScanned
+                        // != true) is reparsed once so its continuation link is
+                        // detected. loadCacheSnapshot already served it for restore,
+                        // so this only refreshes — no cache invalidation needed.
+                        if entry.summary.agentRaw == AgentKind.claudeCode.rawValue,
+                           entry.summary.continuationScanned != true {
+                            misses.append(c)
+                        } else {
+                            hits.append(convo)
+                        }
                     } else {
                         misses.append(c)
                     }

@@ -120,7 +120,8 @@ struct SidebarView: View {
                                     ForEach(convos) { convo in
                                         ConversationRow(conversation: convo,
                                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
-                                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id))
+                                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
+                                                        isSuperseded: registry.supersededIDs.contains(convo.id))
                                             .tag(convo.id as Conversation.ID?)
                                             .contextMenu { rowMenu(convo) }
                                     }
@@ -154,7 +155,8 @@ struct SidebarView: View {
                     ForEach(filteredConversations.filter { !pins.isPinned($0.id) }) { convo in
                         ConversationRow(conversation: convo, showRoom: true,
                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
-                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id))
+                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
+                                        isSuperseded: registry.supersededIDs.contains(convo.id))
                             .tag(convo.id as Conversation.ID?)
                             .contextMenu { rowMenu(convo) }
                     }
@@ -297,7 +299,8 @@ struct SidebarView: View {
                     ConversationRow(conversation: convo, showRoom: true,
                                     isLive: coordinator.liveConversationIDs.contains(convo.id),
                                     isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                                    isPinned: true)
+                                    isPinned: true,
+                                    isSuperseded: registry.supersededIDs.contains(convo.id))
                         // Pinned rows aren't List-selectable (they open on tap),
                         // so highlight the active one manually for "you are here".
                         .listRowBackground(convo.id == selection ? CHM.Color.activeFill : Color.clear)
@@ -387,7 +390,8 @@ struct SidebarView: View {
                         snippet: bodyHits[convo.sessionFile.path],
                         isLive: coordinator.liveConversationIDs.contains(convo.id),
                         isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                        isPinned: pins.isPinned(convo.id)
+                        isPinned: pins.isPinned(convo.id),
+                        isSuperseded: registry.supersededIDs.contains(convo.id)
                     )
                     .tag(convo.id as Conversation.ID?)
                     .contextMenu { rowMenu(convo) }
@@ -558,6 +562,9 @@ private struct ConversationRow: View {
     var isAwaiting: Bool = false
     /// Pinned — show a small marker so pin state is visible while browsing.
     var isPinned: Bool = false
+    /// This session was compacted and continued in a newer one — dim it and
+    /// badge it so the pair reads as one chain, not a confusing duplicate.
+    var isSuperseded: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var breathing = false
@@ -597,6 +604,12 @@ private struct ConversationRow: View {
                         .foregroundStyle(conversation.previewText == nil ? .secondary : .primary)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                    if isSuperseded {
+                        Image(systemName: "arrow.triangle.merge")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .help("Compacted — continued in a newer session")
+                    }
                 }
                 HStack(spacing: 4) {
                     if showRoom {
@@ -626,6 +639,7 @@ private struct ConversationRow: View {
             }
         }
         .padding(.vertical, 6)
+        .opacity(isSuperseded ? 0.5 : 1)
         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
     }
 }

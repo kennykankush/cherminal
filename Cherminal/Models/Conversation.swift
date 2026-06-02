@@ -79,6 +79,13 @@ struct Conversation: Identifiable, Hashable, Sendable {
     let messageCount: Int
     let previewText: String?
     let state: ConversationState
+    /// If this session is a post-compaction continuation, the id of the session
+    /// it continues from (Claude writes the parent's path + a "Continue the
+    /// conversation…" handoff into the new session's first user turn). Lets the
+    /// sidebar mark the superseded parent so a compaction never reads as a
+    /// mysterious duplicate. `var` with a default so call sites that don't know
+    /// about it (shell conversations, etc.) compile unchanged.
+    var continuedFromID: String? = nil
 
     var roomName: String { roomPath.lastPathComponent }
 }
