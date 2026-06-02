@@ -27,11 +27,13 @@ enum TerminalCommand {
         case .claudeCode:
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "claude")
-            return "\(bin) --dangerously-skip-permissions --resume \(id)\(dropToShell)"
+            let inner = "\(bin) --dangerously-skip-permissions --resume \(id)\(dropToShell)"
+            return Dtach.wrap(inner, id: id)
         case .codex:
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "codex")
-            return "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)\(dropToShell)"
+            let inner = "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)\(dropToShell)"
+            return Dtach.wrap(inner, id: id)
         case .shell, .unknown:
             // No command override → Ghostty spawns the user's default shell
             // in `cfg.workingDirectory`.
