@@ -46,6 +46,23 @@ final class TabWindowCoordinator: ObservableObject {
     /// already read doesn't re-trigger, and only a genuinely *new* turn does.
     private var seenTurnSize: [String: UInt64] = [:]
 
+    /// Agents detached into the side rail: their pane was closed but their
+    /// `dtach` master is still alive, so they keep running off-screen for ≈0
+    /// memory. The tray UI renders one cell per entry, lit by `state`.
+    @Published private(set) var detachedAgents: [DetachedAgent] = [] {
+        didSet {
+            updateLinkPolling()   // keep the watcher/poll alive while the tray has agents
+            persistDetached()     // survive relaunch (reconciled against live masters)
+        }
+    }
+
+    /// Set the instant the app starts quitting. Closing a window during normal
+    /// use detaches its agents to the tray; closing windows during *termination*
+    /// must not — the masters survive anyway and session restore reattaches them
+    /// into tabs on next launch, so tray-on-quit would just duplicate them.
+    private var isTerminating = false
+    func beginTermination() { isTerminating = true }
+
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
     /// Drives the "your turn" light off FSEvents — the OS tells us the instant
@@ -195,6 +212,11 @@ final class TabWindowCoordinator: ObservableObject {
                 pane.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
                 pane.lifecycleState = .live
                 pane.lastActiveAt = Date()
+                // This conversation is back on screen — drop any rail cell for it
+                // (covers reattach from the sidebar / "Open as Pane", not just the
+                // rail's own click). The dtach socket is shared, so the surface
+                // reattaches the same master.
+                self.detachedAgents.removeAll { $0.id == conversation.id }
                 clog("tabs", "spawn surface ok id=\(conversation.id) pane=\(pane.id)")
                 // No cap: panes you open stay live (you split to *see* them).
                 // Each surface is mostly the shared GPU baseline; marginal cost
@@ -234,26 +256,44 @@ final class TabWindowCoordinator: ObservableObject {
         schedulePersist()
     }
 
-    /// Close the active pane; if it's the last one, close the window.
+    /// Close the active pane; if it's the last one, close the window. An agent
+    /// pane is *detached* (parked in the rail, master kept alive) rather than
+    /// killed; a shell pane just closes.
     func closeActivePane() {
         guard let controller = activeController else { return }
         let ws = controller.workspace
         guard ws.panes.count > 1, let active = ws.activePane else {
-            controller.window?.performClose(nil)
+            controller.window?.performClose(nil)   // last pane → window close (handles detach)
             return
         }
-        ws.removePane(id: active.id)   // pane deinit drops its surface (SIGHUP)
+        let parked = active.base       // capture before teardown; defer the tray write
+        ws.removePane(id: active.id)   // pane deinit drops its surface (SIGHUP to the dtach client)
         controller.window?.contentView?.layoutSubtreeIfNeeded()
+        DispatchQueue.main.async { [weak self] in self?.detachToTray(parked) }
         schedulePersist()
     }
 
-    func focusNextPane() { activeController?.workspace.focusNext() }
+    func focusNextPane() {
+        guard let ws = activeController?.workspace else { return }
+        ws.focusNext()
+        if let pane = ws.activePane { focusPane(pane, in: ws) }
+    }
 
-    /// Activate a pane (on click). No suspension/cap — every opened pane stays
-    /// live; this just sets focus + recency.
+    /// Activate a pane (on click or ⌘`). Sets the active-pane border AND moves
+    /// the AppKit first responder to the pane's surface — these must stay in
+    /// lockstep. The surface's own click-to-focus transfer is defeated in a grid:
+    /// it only fires when `window.contentView.hitTest` returns the surface, but
+    /// our SwiftUI overlays (contentShape/border/badge) sit above it, so the
+    /// hit-test returns a SwiftUI layer and the surface never takes focus. Moving
+    /// the responder here is what keeps typing going to the pane you clicked.
     func focusPane(_ pane: Pane, in workspace: Workspace) {
         workspace.activePaneID = pane.id
         pane.lastActiveAt = Date()
+        if let surface = pane.surfaceView,
+           let window = surface.window,
+           window.firstResponder !== surface {
+            window.makeFirstResponder(surface)
+        }
     }
 
     /// Open a bare shell tab. cwd defaults to the active tab's room, else $HOME.
@@ -262,6 +302,88 @@ final class TabWindowCoordinator: ObservableObject {
             ?? activeConversation?.roomPath
             ?? URL(fileURLWithPath: NSHomeDirectory())
         openOrFocus(Conversation.shellConversation(cwd: cwd))
+    }
+
+    // MARK: - Detach tray ("minesweeper" rail)
+
+    /// Park an agent pane in the side rail instead of ending it: its `dtach`
+    /// master outlives the surface teardown, so it keeps running off-screen.
+    /// Only resumed agents are dtach-wrapped (see TerminalCommand), so only a
+    /// pane opened *as* an agent can detach; bare shells (and agents
+    /// hand-launched inside a shell pane, which run raw) just close. No-op if
+    /// it's already parked.
+    /// Takes the opened identity (a value type) so callers can capture it and
+    /// defer this off the surface-teardown runloop — see callers. Mutating the
+    /// `@Published` tray + spawning tasks *during* a window/pane close (i.e.
+    /// mid Metal-surface dealloc) is a libghostty fault risk; deferring avoids it.
+    private func detachToTray(_ convo: Conversation) {
+        guard convo.agent == .claudeCode || convo.agent == .codex else { return }
+        guard !detachedAgents.contains(where: { $0.id == convo.id }) else { return }
+        detachedAgents.append(DetachedAgent(conversation: convo))
+        clog("tabs", "detached agent \(convo.id) → tray")
+        refreshDetachedStates()
+    }
+
+    /// Pull a parked agent back onto the screen. Opening its conversation
+    /// respawns with the same dtach socket, so `dtach -A` reattaches the live
+    /// master (or, if it died, cold-resumes the conversation). Drops it from the
+    /// rail either way.
+    func reattach(_ agent: DetachedAgent) {
+        detachedAgents.removeAll { $0.id == agent.id }
+        openConversationInPane(agent.conversation)
+    }
+
+    /// Reattach into a fresh tab instead of the active grid.
+    func reattachAsTab(_ agent: DetachedAgent) {
+        detachedAgents.removeAll { $0.id == agent.id }
+        openOrFocus(agent.conversation)
+    }
+
+    /// End a parked agent for good: SIGTERM its master and drop the cell.
+    func killDetached(_ agent: DetachedAgent) {
+        Dtach.kill(id: agent.id)
+        detachedAgents.removeAll { $0.id == agent.id }
+        clog("tabs", "killed detached agent \(agent.id)")
+    }
+
+    /// Reentrancy guard + last pgrep time. FSEvents can fire many times a second
+    /// while an agent works; without these, each fire would spawn one `pgrep`
+    /// Process per parked agent — a process storm. The guard collapses
+    /// overlapping refreshes; liveness (pgrep) is rate-limited to ~4s while the
+    /// cheap JSONL tail read still runs every time.
+    private var detachedRefreshing = false
+    private var lastLivenessCheck = Date.distantPast
+
+    /// Recompute each parked agent's cell state off the main thread — a cheap
+    /// JSONL tail read every time, master liveness (pgrep) at most every ~4s —
+    /// then publish any changes. Driven by the FSEvents callback + 8s reconcile.
+    private func refreshDetachedStates() {
+        guard !detachedAgents.isEmpty, !detachedRefreshing else { return }
+        detachedRefreshing = true
+        let agents = detachedAgents
+        let checkLiveness = Date().timeIntervalSince(lastLivenessCheck) > 4
+        Task.detached(priority: .utility) {
+            var next: [String: DetachState] = [:]
+            for a in agents {
+                if checkLiveness && !Dtach.isMasterAlive(id: a.id) { next[a.id] = .dead; continue }
+                let reading = TurnState.read(sessionFile: a.conversation.sessionFile, agent: a.conversation.agent)
+                next[a.id] = reading.awaitingUser ? .attention : .working
+            }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.detachedRefreshing = false
+                if checkLiveness { self.lastLivenessCheck = Date() }
+                let updated = self.detachedAgents.map { agent -> DetachedAgent in
+                    guard let s = next[agent.id] else { return agent }
+                    // Don't resurrect a known-dead cell from a stale file read on
+                    // a tick where we skipped the liveness check.
+                    let resolved: DetachState = (!checkLiveness && agent.state == .dead) ? .dead : s
+                    guard resolved != agent.state else { return agent }
+                    var copy = agent; copy.state = resolved; return copy
+                }
+                if updated != self.detachedAgents { self.detachedAgents = updated }
+            }
+        }
     }
 
     // MARK: - Ports
@@ -407,6 +529,61 @@ final class TabWindowCoordinator: ObservableObject {
         return !controllers.isEmpty
     }
 
+    // MARK: - Detach tray persistence + launch sweep
+
+    private static let detachedKey = "cherminal.detachedAgents"
+
+    /// Persist the parked agents (id/agent/room) so the rail survives relaunch.
+    /// Reconciled against live masters at launch (restoreDetachedAgents), so a
+    /// master that died while the app was off is dropped, not shown as alive.
+    private func persistDetached() {
+        let items = detachedAgents.map {
+            PersistedTab(conversationID: $0.id,
+                         agentRaw: $0.conversation.agent.rawValue,
+                         roomPath: $0.conversation.roomPath.path)
+        }
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: Self.detachedKey)
+    }
+
+    /// The parked agents persisted by the last run, decoded but not resolved.
+    func savedDetached() -> [PersistedTab] {
+        guard let data = UserDefaults.standard.data(forKey: Self.detachedKey),
+              let items = try? JSONDecoder().decode([PersistedTab].self, from: data)
+        else { return [] }
+        return items
+    }
+
+    /// Rebuild the rail from the saved set, keeping only those whose `dtach`
+    /// master is still alive (resolving each id against the registry, so the
+    /// cache snapshot must be loaded first). Dead ones are dropped.
+    func restoreDetachedAgents() {
+        let saved = savedDetached()
+        guard !saved.isEmpty else { return }
+        var restored: [DetachedAgent] = []
+        for it in saved where it.agentRaw != AgentKind.shell.rawValue {
+            guard Dtach.isMasterAlive(id: it.conversationID),
+                  let convo = registry.conversation(id: it.conversationID) else { continue }
+            restored.append(DetachedAgent(conversation: convo))
+        }
+        if !restored.isEmpty { detachedAgents = restored }
+        refreshDetachedStates()
+    }
+
+    /// Reap dtach masters that nothing will reattach. At launch, the only
+    /// sockets we keep are those a restored tab or a restored tray cell will
+    /// reattach; any other live master is an orphan from a crash (it'd run
+    /// forgotten), and any dead socket is stale — both get killed (socket
+    /// removed). Run once, before restore, so nothing lingers invisibly.
+    func sweepDtachSockets() {
+        let keep = Set(savedSessionTabs().map { $0.conversationID })
+            .union(savedDetached().map { $0.conversationID })
+        for id in Dtach.knownSocketIDs() where !keep.contains(id) {
+            Dtach.kill(id: id)
+            clog("tabs", "swept orphan dtach socket \(id)")
+        }
+    }
+
     // MARK: - Active
 
     var isEmpty: Bool { controllers.isEmpty }
@@ -424,7 +601,18 @@ final class TabWindowCoordinator: ObservableObject {
     /// Called from the window controller's `windowWillClose`. Dropping the
     /// strong ref deallocates the window + surface.
     func windowClosed(_ controller: TerminalTabWindowController) {
+        // Closing a window during normal use parks its agent panes in the tray
+        // (masters survive); during app termination it must not (restore
+        // reattaches them into tabs next launch — see beginTermination).
+        // Capture identities now but defer the tray write to the next runloop:
+        // mutating @Published state mid window-close (during surface dealloc)
+        // faults libghostty.
+        if !isTerminating {
+            let parked = controller.workspace.panes.map(\.base)
+            DispatchQueue.main.async { [weak self] in parked.forEach { self?.detachToTray($0) } }
+        }
         controllers.removeAll { $0 === controller }
+        clog("tabs", "window closed (surfaces freed)")
         // The attention light is insert-on-bell / remove-on-focus; a tab that
         // closes while flagged would leak its id forever (clearAwaiting only
         // fires for still-registered windows). Clear both the effective and
@@ -439,6 +627,11 @@ final class TabWindowCoordinator: ObservableObject {
             let frame = controller.window?.frame
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.controllers.isEmpty else { return }
+                // Show the placeholder as usual even with parked agents: their
+                // dtach masters survive a full quit and reappear in the Sessions
+                // tab on relaunch, so we must NOT force a window open — doing so
+                // made the app impossible to close (closing the last window kept
+                // respawning a shell to "keep the tray visible").
                 self.showPlaceholder(near: frame)
             }
         }
@@ -505,9 +698,11 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Live session linking
 
-    /// Start polling once there's at least one tab; stop when the last closes.
+    /// Start polling once there's at least one tab *or* a parked agent; stop
+    /// when both are empty. Detached agents need the FSEvents watcher + reconcile
+    /// running so their cells stay lit even with no tabs open.
     private func updateLinkPolling() {
-        if controllers.isEmpty {
+        if controllers.isEmpty && detachedAgents.isEmpty {
             linkTimer?.invalidate()
             linkTimer = nil
             awaitWatcher?.stop()
@@ -544,6 +739,7 @@ final class TabWindowCoordinator: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.updateAwaiting(live: self.liveConversationIDs)
+                self.refreshDetachedStates()   // a background agent's turn lights its rail cell
             }
         }
         watcher.start()
@@ -597,8 +793,9 @@ final class TabWindowCoordinator: ObservableObject {
         for c in controllers { c.window?.title = c.holder.conversation.roomName }
 
         // With the live set settled, refresh the "your turn" lights from each
-        // live agent tab's session file.
+        // live agent tab's session file, and the parked agents' rail cells.
         updateAwaiting(live: live)
+        refreshDetachedStates()
 
         // A tab may have just adopted a hand-launched agent (its effective
         // conversation changed without controllers changing) — re-persist so the
@@ -613,7 +810,11 @@ final class TabWindowCoordinator: ObservableObject {
         guard let info else { return false }
         if info.openSessionFile != nil { return true }
         let c = info.command.lowercased()
-        return c.hasPrefix("claude") || c.hasPrefix("codex")
+        // A resumed agent now runs under a `dtach` master (see TerminalCommand /
+        // Dtach), so the surface's foreground process is `dtach`, not the agent.
+        // For these fixed-identity panes that's the live signal — the master
+        // wraps the agent (or its drop-to-shell fallback) for this whole pane.
+        return c.hasPrefix("claude") || c.hasPrefix("codex") || c.hasPrefix("dtach")
     }
 
     /// Every live pane across every window, keyed by foreground pid.

@@ -85,6 +85,10 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // snapshot first so they resume with the right sessionFile (the context
         // gauge reads it), so those restore inside the Task after the (cheap)
         // cache load. Ghostty is ready synchronously once AppEnvironment is built.
+        // Reap any dtach masters nothing will reattach (crash orphans / stale
+        // sockets) before restoring, so nothing keeps running invisibly.
+        env.coordinator.sweepDtachSockets()
+
         let saved = env.coordinator.savedSessionTabs()
         let needsCache = saved.contains { $0.agentRaw != AgentKind.shell.rawValue }
         if env.coordinator.isEmpty && !needsCache {
@@ -94,12 +98,19 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         Task { @MainActor in
-            if env.coordinator.isEmpty && needsCache {
+            // Detached agents are always agents, so resolving them needs the
+            // cache even when the restored tabs were shell-only.
+            let hasDetached = !env.coordinator.savedDetached().isEmpty
+            if (env.coordinator.isEmpty && needsCache) || hasDetached {
                 await env.registry.loadCacheSnapshot()
+            }
+            if env.coordinator.isEmpty && needsCache {
                 if !env.coordinator.restoreSession() {
                     env.coordinator.openFreshShell()
                 }
             }
+            // Rebuild the rail from masters that are still alive.
+            if hasDetached { env.coordinator.restoreDetachedAgents() }
             // Full reconcile + watcher (cache load above is idempotent-skipped).
             await env.registry.bootstrap()
         }
@@ -112,6 +123,9 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     /// the tabs are still alive. A crash skips this, leaving the prior snapshot.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if !isRunningTests {
+            // Mark teardown so the window closes that follow don't park agents in
+            // the rail — their masters survive quit and restore reattaches them.
+            AppEnvironment.shared.coordinator.beginTermination()
             // Durable (os_log) breadcrumb so a *clean* quit is never again
             // mistaken for a crash: if this line is in the log the app exited
             // normally; if the log just stops with no such line, it was killed

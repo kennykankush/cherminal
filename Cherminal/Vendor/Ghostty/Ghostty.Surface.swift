@@ -1,3 +1,4 @@
+import Foundation
 import GhosttyKit
 
 extension Ghostty {
@@ -24,14 +25,25 @@ extension Ghostty {
         }
 
         deinit {
-            // deinit is not guaranteed to happen on the main actor and our API
-            // calls into libghostty must happen there so we capture the surface
-            // value so we don't capture `self` and then we detach it in a task.
-            // We can't wait for the task to succeed so this will happen sometime
-            // but that's okay.
+            // libghostty calls must happen on the main thread. When deinit is
+            // ALREADY on main (the common path — panes are @MainActor, so a
+            // closed pane releases its surface on main) we MUST free
+            // synchronously. Deferring it (the old behavior) left a window where
+            // this wrapper and the SurfaceView whose pointer is the C surface's
+            // `userdata` were already deallocated, yet libghostty still had the
+            // surface registered — so an action queued for it (e.g. a `set_title`
+            // from a still-running agent kept alive by dtach) delivered during
+            // `ghostty_app_tick` resolved that userdata to a freed SurfaceView and
+            // crashed in objc_retain. Freeing here, in the same synchronous
+            // dealloc chain on main, closes that window: no app tick can run in
+            // between. Off-main deinit (not expected) keeps the deferred hop.
             let surface = self.surface
-            Task.detached { @MainActor in
+            if Thread.isMainThread {
                 ghostty_surface_free(surface)
+            } else {
+                Task.detached { @MainActor in
+                    ghostty_surface_free(surface)
+                }
             }
         }
 
