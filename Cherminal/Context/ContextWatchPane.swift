@@ -25,8 +25,10 @@ struct ContextWatchPane: View {
                     VStack(alignment: .leading, spacing: CHM.Space.lg) {
                         headerRow(convo)
                         if let usage {
-                            gaugeSection(usage)
+                            // 5H / Weekly account windows sit ABOVE the context
+                            // window — glanceable rate-limit headroom first.
                             if !usage.rateWindows.isEmpty { limitsSection(usage) }
+                            gaugeSection(usage)
                             tokensSection(usage)
                         }
                         sessionSection(convo)
@@ -52,11 +54,17 @@ struct ContextWatchPane: View {
             let agent = convo.agent
             let accumulator = ClaudeUsageAccumulator()
             while !Task.isCancelled {
-                let parsed = await Task.detached(priority: .utility) {
+                var parsed = await Task.detached(priority: .utility) {
                     agent == .codex
                         ? ConversationUsageParser.parseCodex(sessionFile: file)
                         : accumulator.ingest(file: file)
                 }.value
+                // Codex carries its 5H/Weekly windows in-file; Claude's only come
+                // from the OAuth usage API (cached/throttled). Merge them in.
+                if agent == .claudeCode {
+                    let windows = await ClaudeRateLimits.shared.windows()
+                    if !windows.isEmpty { parsed?.rateWindows = windows }
+                }
                 if Task.isCancelled { break }
                 if let parsed { usage = parsed }
                 try? await Task.sleep(for: .seconds(8))
