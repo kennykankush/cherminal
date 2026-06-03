@@ -14,26 +14,24 @@ import GhosttyKit
 /// `--enable hooks` to honor the vision's "observe externally, never
 /// inject" rule.
 enum TerminalCommand {
-    /// Appended to agent commands so that when the agent exits you drop to a
-    /// normal interactive shell in the same room (output still on screen),
-    /// instead of Ghostty's "Process exited. Press any key to close." Cherminal
-    /// runs the agent AS the surface command (no shell underneath), so without
-    /// this the surface has nothing left alive once the agent quits. `exec`
-    /// replaces the bash that Ghostty spawned the command through.
-    private static let dropToShell = "; exec ${SHELL:-/bin/zsh} -il"
+    // NOTE: agents are wrapped in `dtach` and deliberately DON'T drop to a
+    // fallback shell when they exit. With `dtach`, a `; exec $SHELL` tail left
+    // the master alive as a bare shell after the agent quit — so reopening the
+    // conversation reattached that zombie shell instead of resuming the agent
+    // ("doesn't go to the convo"). Without the tail, a finished agent's master
+    // exits, the socket frees, and reopening re-runs `--resume` and lands back
+    // in the conversation. (Trade: a brief "Process exited" instead of a shell.)
 
     static func resume(for conversation: Conversation) -> String? {
         switch conversation.agent {
         case .claudeCode:
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "claude")
-            let inner = "\(bin) --dangerously-skip-permissions --resume \(id)\(dropToShell)"
-            return Dtach.wrap(inner, id: id)
+            return Dtach.wrap("\(bin) --dangerously-skip-permissions --resume \(id)", id: id)
         case .codex:
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "codex")
-            let inner = "\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)\(dropToShell)"
-            return Dtach.wrap(inner, id: id)
+            return Dtach.wrap("\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)", id: id)
         case .shell, .unknown:
             // No command override → Ghostty spawns the user's default shell
             // in `cfg.workingDirectory`.

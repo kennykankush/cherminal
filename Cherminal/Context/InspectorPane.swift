@@ -10,6 +10,7 @@ struct InspectorPane: View {
     let conversation: Conversation?
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @AppStorage("cherminal.inspectorTab") private var tab: Tab = .context
+    @State private var spawnedAgents: [SpawnedAgent] = []
 
     enum Tab: String { case context, sessions }
 
@@ -22,7 +23,7 @@ struct InspectorPane: View {
             Divider()
             switch tab {
             case .context:  ContextWatchPane(conversation: conversation)
-            case .sessions: SessionsPane()
+            case .sessions: SessionsPane(spawnedAgents: spawnedAgents)
             }
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
@@ -30,11 +31,26 @@ struct InspectorPane: View {
         // withAnimation transaction (so the swap would just snap). Scope the
         // animation to the value instead — same workaround as SidebarView/ModeToggle.
         .animation(CHM.Motion.appear, value: tab)
+        // Scan the active Claude session's spawned sub-agents here (always-present
+        // root, fires for both tabs) and hand them to SessionsPane. Hosting the
+        // scan on the conditionally-empty pets view never fired its .task.
+        .task(id: conversation?.id) {
+            spawnedAgents = []
+            guard let convo = conversation, convo.agent == .claudeCode else { return }
+            while !Task.isCancelled {
+                let scanned = await Task.detached(priority: .utility) {
+                    SpawnedAgentScanner.scan(for: convo)
+                }.value
+                if Task.isCancelled { break }
+                if scanned != spawnedAgents { spawnedAgents = scanned }
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
     }
 
     private var header: some View {
         HStack(spacing: CHM.Space.xs) {
-            segment("Context", .context, count: 0, alert: false)
+            segment("Details", .context, count: 0, alert: false)
             segment("Sessions", .sessions, count: parkedCount, alert: needsYou)
         }
         .padding(.horizontal, CHM.Space.md)
@@ -76,17 +92,27 @@ struct InspectorPane: View {
 /// when nothing's parked.
 struct SessionsPane: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
+    /// Sub-agents the active Claude session has spawned (scanned by InspectorPane).
+    var spawnedAgents: [SpawnedAgent] = []
 
     private let columns = [GridItem(.adaptive(minimum: 132, maximum: 220), spacing: CHM.Space.sm)]
 
     var body: some View {
-        if coordinator.detachedAgents.isEmpty {
+        if coordinator.detachedAgents.isEmpty && spawnedAgents.isEmpty {
             emptyState
         } else {
             ScrollView {
-                LazyVGrid(columns: columns, spacing: CHM.Space.sm) {
-                    ForEach(coordinator.detachedAgents) { agent in
-                        MineCell(agent: agent)
+                VStack(alignment: .leading, spacing: CHM.Space.lg) {
+                    if !coordinator.detachedAgents.isEmpty {
+                        LazyVGrid(columns: columns, spacing: CHM.Space.sm) {
+                            ForEach(coordinator.detachedAgents) { agent in
+                                MineCell(agent: agent)
+                            }
+                        }
+                    }
+                    // The spawned-agent Clawd field, below the parked sessions.
+                    if !spawnedAgents.isEmpty {
+                        ClawdPetsView(agents: spawnedAgents)
                     }
                 }
                 .padding(CHM.Space.md)
