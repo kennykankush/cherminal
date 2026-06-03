@@ -227,7 +227,15 @@ final class ConversationRegistry: ObservableObject {
 
         guard !paths.isEmpty else { return }
 
-        let watcher = FilesystemWatcher(paths: paths) { [weak self] in
+        // Coalesce hard (2.5s vs the 0.3s default): each fire runs a FULL
+        // re-scan of every session, and an active agent writing its JSONL emits
+        // a continuous stream of FS events. At ~1000 conversations a 0.3s
+        // debounce turned that into ~2 full scans/sec — each ending in a
+        // main-thread @Published update + room rebuild + sidebar re-render —
+        // which burned ~18% CPU and visibly lagged typing. The sidebar doesn't
+        // need sub-second freshness; the "your turn"/live dots come from the
+        // coordinator's own faster watcher, not this scan.
+        let watcher = FilesystemWatcher(paths: paths, debounce: 2.5) { [weak self] in
             // FSEvents callback fires on a background queue; hop to main
             // before touching @Published state.
             Task { @MainActor [weak self] in
