@@ -28,6 +28,15 @@ targets:
     platform: macOS
     sources:
       - path: Cherminal
+      # libghostty's resources (terminfo, etc.), copied wholesale into
+      # Contents/Resources/ghostty as a folder reference. Without the bundled
+      # xterm-ghostty terminfo, libghostty falls back to TERM=xterm-256color —
+      # which has no bracketed paste (multi-line paste into agent TUIs silently
+      # fails) and no kitty keyboard protocol (Shift+Enter). See the
+      # GHOSTTY_RESOURCES_DIR setup in CherminalAppDelegate.
+      - path: Resources/ghostty
+        type: folder
+        buildPhase: resources
     dependencies:
       - framework: vendor/GhosttyKit.xcframework
         embed: false
@@ -39,7 +48,7 @@ targets:
         CFBundleName: Cherminal
         CFBundleDisplayName: Cherminal
         CFBundleShortVersionString: "0.1.1"
-        CFBundleVersion: "3"
+        CFBundleVersion: "4"
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: ""
         NSPrincipalClass: NSApplication
