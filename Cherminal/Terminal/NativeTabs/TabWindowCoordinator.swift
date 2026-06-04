@@ -216,6 +216,16 @@ final class TabWindowCoordinator: ObservableObject {
                 pane.surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
                 pane.lifecycleState = .live
                 pane.lastActiveAt = Date()
+                // Make the freshly-spawned surface the keyboard first responder so
+                // a new / restored / split tab is typeable (and ⌘V works) without a
+                // click. Only when it's the active pane — a background split must not
+                // steal focus. moveFocus retries until the new NSView attaches to its
+                // window; setting first responder never changes the *key* window, so a
+                // surface spawned in a non-key tab simply becomes that tab's responder
+                // for when you switch to it.
+                if controller.workspace.activePaneID == pane.id {
+                    Ghostty.moveFocus(to: pane.surfaceView!)
+                }
                 // This conversation is back on screen — drop any rail cell for it
                 // (covers reattach from the sidebar / "Open as Pane", not just the
                 // rail's own click). The dtach socket is shared, so the surface
@@ -314,10 +324,13 @@ final class TabWindowCoordinator: ObservableObject {
     func focusPane(_ pane: Pane, in workspace: Workspace) {
         workspace.activePaneID = pane.id
         pane.lastActiveAt = Date()
-        if let surface = pane.surfaceView,
-           let window = surface.window,
-           window.firstResponder !== surface {
-            window.makeFirstResponder(surface)
+        // Route through moveFocus, not a bare makeFirstResponder: it retries
+        // (backoff up to 0.5s) until the surface's NSView is attached to a
+        // window, so this also works for a pane whose surface was just spawned
+        // and isn't in the view hierarchy yet — the bare call silently no-op'd
+        // when `surface.window` was nil, leaving the pane unfocusable.
+        if let surface = pane.surfaceView {
+            Ghostty.moveFocus(to: surface)
         }
     }
 
@@ -688,6 +701,26 @@ final class TabWindowCoordinator: ObservableObject {
         guard let window = controller.window else { return }
         window.makeKeyAndOrderFront(nil)
         window.tabGroup?.selectedWindow = window
+        // Put keyboard focus on the active pane's surface. AppKit only restores a
+        // window's *prior* first responder when it becomes key — a tab you've
+        // never clicked into has none, so without this a sidebar-opened or
+        // re-focused tab couldn't receive typing/paste until clicked. (On the
+        // very first open the surface is still nil here; spawnSurface focuses it.)
+        focusActivePaneSurface(in: controller)
+    }
+
+    /// Move keyboard focus to a window's active-pane surface. Called on every
+    /// path that brings a tab to the front (open, select, tab switch) so the
+    /// terminal is always input-ready without a click. No-op while the surface
+    /// is still spawning (nil) — spawnSurface handles that case.
+    private func focusActivePaneSurface(in controller: TerminalTabWindowController) {
+        guard let surface = controller.workspace.activePane?.surfaceView else { return }
+        Ghostty.moveFocus(to: surface)
+    }
+
+    private func focusActivePaneSurface(inWindow window: NSWindow) {
+        guard let controller = controllers.first(where: { $0.window === window }) else { return }
+        focusActivePaneSurface(in: controller)
     }
 
     // MARK: - Tab navigation (menu shortcuts)
@@ -709,6 +742,7 @@ final class TabWindowCoordinator: ObservableObject {
         guard idx >= 0, idx < windows.count else { return }
         group.selectedWindow = windows[idx]
         windows[idx].makeKeyAndOrderFront(nil)
+        focusActivePaneSurface(inWindow: windows[idx])
     }
 
     func selectNextTab() { cycleTab(+1) }
@@ -723,6 +757,7 @@ final class TabWindowCoordinator: ObservableObject {
         let j = ((i + delta) % n + n) % n
         group.selectedWindow = group.windows[j]
         group.windows[j].makeKeyAndOrderFront(nil)
+        focusActivePaneSurface(inWindow: group.windows[j])
     }
 
     // MARK: - Live session linking
