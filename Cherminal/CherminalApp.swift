@@ -58,6 +58,18 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // produce no standard crash report).
         Diagnostics.bootstrap()
 
+        // Point libghostty at our bundled resources (terminfo etc.). Without
+        // this, libghostty can't find the xterm-ghostty terminfo and falls back
+        // to TERM=xterm-256color for spawned surfaces — which lacks bracketed
+        // paste (so multi-line paste into agent TUIs is flagged "unsafe" and
+        // silently dropped) and the kitty keyboard protocol (Shift+Enter). The
+        // bundled folder is Contents/Resources/ghostty (see project.yml). Set
+        // before ghostty_init; respect an existing value so it stays overridable.
+        if getenv("GHOSTTY_RESOURCES_DIR") == nil,
+           let resources = Bundle.main.resourcePath {
+            setenv("GHOSTTY_RESOURCES_DIR", resources + "/ghostty", 1)
+        }
+
         // libghostty has process-wide globals that must be initialized before
         // any other ghostty API call — segfaults otherwise. Must run before
         // AppEnvironment.shared (which constructs Ghostty.App) is first touched.
