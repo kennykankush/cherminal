@@ -145,8 +145,14 @@ final class ConversationRegistry: ObservableObject {
         // emits over its own AsyncStream; we round-robin the iterators and
         // publish after every update so the sidebar fills in incrementally as
         // either source's parses complete.
+        // Tolerate duplicate ids: Codex can emit two rollout files with the SAME
+        // session id (a fork/resume, or a session bridged across runtimes), so two
+        // conversations legitimately share an id. `uniqueKeysWithValues` TRAPS on a
+        // dup → crash-on-launch — never use it for agent-derived ids we don't
+        // control. Keep the most recently active on collision.
         var staged: [String: Conversation] = Dictionary(
-            uniqueKeysWithValues: conversations.map { ($0.id, $0) }
+            conversations.map { ($0.id, $0) },
+            uniquingKeysWith: { $0.lastActivityAt >= $1.lastActivityAt ? $0 : $1 }
         )
         var live: Set<String> = []
 
