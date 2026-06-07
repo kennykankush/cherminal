@@ -652,6 +652,18 @@ extension Ghostty {
             // get forwarded to the terminal as a mouse click.
             if NSApp.isActive && window.isKeyWindow {
                 window.makeFirstResponder(self)
+
+                // Exception: a shift-click is a selection gesture (extend
+                // selection), not a plain focus tap. Eating it to "just focus
+                // the pane" is the "shift-click sometimes does nothing" bug —
+                // it only bites when the surface wasn't already first responder
+                // (e.g. clicking in from the sidebar or another pane). Focus
+                // AND forward the event so libghostty also runs the selection;
+                // leave suppressNextLeftMouseUp false so the release lands too.
+                if event.modifierFlags.contains(.shift) {
+                    return event
+                }
+
                 suppressNextLeftMouseUp = true
                 return nil
             }

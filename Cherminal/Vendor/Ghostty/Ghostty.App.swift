@@ -354,18 +354,30 @@ extension Ghostty {
             state: UnsafeMutableRawPointer?,
             request: ghostty_clipboard_request_e
         ) {
-            let surface = self.surfaceUserdata(from: userdata)
+            // Frictionless paste: libghostty calls this when it considers a paste
+            // "unsafe" (any multi-line / control-char content — i.e. every large
+            // chunk) and wants the app to confirm. Upstream Ghostty.app shows a
+            // dialog here and completes the request when the user clicks "Paste".
+            //
+            // Cherminal never wired up that confirmation UI: this callback used to
+            // post a `confirmClipboard` notification that NOTHING observed, so the
+            // request was orphaned and the paste silently vanished. That's why only
+            // short single-line snippets (which skip this path) ever pasted.
+            //
+            // Per the product decision, we auto-allow: complete the request as
+            // confirmed so the paste goes straight through, no dialog. (You're
+            // pasting your own clipboard into your own sessions — the paste-jacking
+            // guard is low value here and the friction was unacceptable.)
+            let surfaceView = self.surfaceUserdata(from: userdata)
             guard let valueStr = String(cString: string!, encoding: .utf8) else { return }
-            guard let request = Ghostty.ClipboardRequest.from(request: request) else { return }
-            NotificationCenter.default.post(
-                name: Notification.confirmClipboard,
-                object: surface,
-                userInfo: [
-                    Notification.ConfirmClipboardStrKey: valueStr,
-                    Notification.ConfirmClipboardStateKey: state as Any,
-                    Notification.ConfirmClipboardRequestKey: request,
-                ]
-            )
+            // Defer one runloop tick: never call back into libghostty
+            // (`ghostty_surface_complete_clipboard_request`) synchronously from
+            // inside its own callback — upstream only ever completes async (after
+            // the dialog), so re-entering here risks the apprt mutex.
+            DispatchQueue.main.async {
+                guard let surface = surfaceView.surface else { return }
+                completeClipboardRequest(surface, data: valueStr, state: state, confirmed: true)
+            }
         }
 
         static func completeClipboardRequest(
@@ -386,7 +398,6 @@ extension Ghostty {
             len: Int,
             confirm: Bool
         ) {
-            let surface = self.surfaceUserdata(from: userdata)
             guard let pasteboard = NSPasteboard.ghostty(location) else { return }
             guard let content = content, len > 0 else { return }
 
@@ -396,39 +407,35 @@ extension Ghostty {
             }
             guard !contentArray.isEmpty else { return }
 
-            // Assert there is only one text/plain entry. For security reasons we need
-            // to guarantee this for now since our confirmation dialog only shows one.
-            assert(contentArray.filter({ $0.mime == "text/plain" }).count <= 1,
-                   "clipboard contents should have at most one text/plain entry")
+            // OSC-52 writes are PROGRAM-initiated: any output written to the
+            // terminal can drive this — a `cat`'d file, a compromised SSH host,
+            // attacker-controlled bytes rendered in an agent/tmux session. When
+            // libghostty asks us to CONFIRM a write (clipboard-write = ask, or
+            // content it flags), we DENY it. Silently overwriting the user's
+            // clipboard from untrusted output is a clipboard-hijack vector (swap
+            // a copied command / address / URL for a malicious one the user then
+            // pastes). We have no confirmation UI, so "ask" collapses to the safe
+            // interpretation, "deny".
+            //
+            // Normal writes (clipboard-write = allow — the default, e.g. a
+            // tmux/nvim yank over SSH) arrive with confirm == false and fall
+            // through to the write below, so legitimate copy-out still works.
+            //
+            // (The old code posted a `confirmClipboard` notification that nothing
+            // observed, so confirmed writes were silently dropped anyway — this
+            // is the same outcome, now on purpose and for a stated reason. The
+            // paste-side fix in `confirmReadClipboard` is the user's own
+            // clipboard and is intentionally auto-allowed; writes are not.)
+            guard !confirm else { return }
 
-            if !confirm {
-                // Declare all types
-                let types = contentArray.compactMap { item in
-                    NSPasteboard.PasteboardType(mimeType: item.mime)
-                }
-                pasteboard.declareTypes(types, owner: nil)
-
-                // Set data for each type
-                for item in contentArray {
-                    guard let type = NSPasteboard.PasteboardType(mimeType: item.mime) else { continue }
-                    pasteboard.setString(item.data, forType: type)
-                }
-                return
+            let types = contentArray.compactMap { item in
+                NSPasteboard.PasteboardType(mimeType: item.mime)
             }
-
-            // For confirmation, use the text/plain content if it exists
-            guard let textPlainContent = contentArray.first(where: { $0.mime == "text/plain" }) else {
-                return
+            pasteboard.declareTypes(types, owner: nil)
+            for item in contentArray {
+                guard let type = NSPasteboard.PasteboardType(mimeType: item.mime) else { continue }
+                pasteboard.setString(item.data, forType: type)
             }
-
-            NotificationCenter.default.post(
-                name: Notification.confirmClipboard,
-                object: surface,
-                userInfo: [
-                    Notification.ConfirmClipboardStrKey: textPlainContent.data,
-                    Notification.ConfirmClipboardRequestKey: Ghostty.ClipboardRequest.osc_52_write(pasteboard),
-                ]
-            )
         }
 
         static func wakeup(_ userdata: UnsafeMutableRawPointer?) {
