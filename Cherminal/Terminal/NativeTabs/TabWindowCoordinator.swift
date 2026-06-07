@@ -542,8 +542,34 @@ final class TabWindowCoordinator: ObservableObject {
                                 agentRaw: convo.agent.rawValue,
                                 roomPath: convo.roomPath.path)
         }
+        // Do NOT clobber the saved set with [] just because every tab closed.
+        // Closing the last tab (→ placeholder) used to wipe the session, so a
+        // later quit restored nothing. We keep the last non-empty snapshot; the
+        // quit path is the only thing that *clears* it, and only when the user
+        // chooses "Don't Reopen" (see CherminalAppDelegate / reopenChoice).
+        guard !tabs.isEmpty else { return }
         guard let data = try? JSONEncoder().encode(tabs) else { return }
         UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
+    }
+
+    /// Forget the saved session so the next launch starts fresh. Called when the
+    /// user answers "Don't Reopen" at quit.
+    func clearSavedSession() {
+        UserDefaults.standard.removeObject(forKey: Self.lastSessionKey)
+    }
+
+    // MARK: - Reopen-on-launch preference ("save windows"-style)
+
+    /// Whether to reopen the saved tabs on next launch. `ask` shows the prompt
+    /// at quit; the user can pick "Don't ask again" to lock in reopen/dontReopen.
+    enum ReopenChoice: String { case ask, reopen, dontReopen }
+    private static let reopenChoiceKey = "cherminal.reopenChoice"
+
+    var reopenChoice: ReopenChoice {
+        ReopenChoice(rawValue: UserDefaults.standard.string(forKey: Self.reopenChoiceKey) ?? "") ?? .ask
+    }
+    func setReopenChoice(_ choice: ReopenChoice) {
+        UserDefaults.standard.set(choice.rawValue, forKey: Self.reopenChoiceKey)
     }
 
     /// The tabs persisted by the last run, decoded but not opened — lets the
@@ -645,9 +671,24 @@ final class TabWindowCoordinator: ObservableObject {
         // Capture identities now but defer the tray write to the next runloop:
         // mutating @Published state mid window-close (during surface dealloc)
         // faults libghostty.
+        // Park the closed window's agents in the tray — but NOT when the app is
+        // quitting (restore reattaches them as tabs next launch; parking them
+        // would also let one survive a "Don't Reopen"). Closing the last window
+        // routes to quit, yet windowClosed fires BEFORE applicationShouldTerminate
+        // can call beginTermination, so isTerminating is still false right here.
+        // We re-check it inside the deferred block: on a real quit, beginTermination
+        // runs synchronously during this same close event — before the next-runloop
+        // block executes — so it skips. If the app is NOT terminating (e.g. another
+        // window like Settings keeps it alive, or it's not the last window), the
+        // re-check still parks the agent so it never runs invisibly. The defer is
+        // also required because mutating @Published state mid window-close (during
+        // surface dealloc) faults libghostty.
         if !isTerminating {
             let parked = controller.workspace.panes.map(\.base)
-            DispatchQueue.main.async { [weak self] in parked.forEach { self?.detachToTray($0) } }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.isTerminating else { return }   // quit won the race
+                parked.forEach { self.detachToTray($0) }
+            }
         }
         controllers.removeAll { $0 === controller }
         clog("tabs", "window closed (surfaces freed)")
@@ -662,21 +703,13 @@ final class TabWindowCoordinator: ObservableObject {
         seenTurnSize.removeValue(forKey: controller.conversation.id)
         seenTurnSize.removeValue(forKey: controller.base.id)
 
-        // Last tab gone → show the "no tabs open" home window instead of letting
-        // the app quit. Inherit the closing window's frame for continuity.
-        // Deferred + re-checked: a new tab may open in the same beat (e.g. ⌘T).
-        if controllers.isEmpty {
-            let frame = controller.window?.frame
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.controllers.isEmpty else { return }
-                // Show the placeholder as usual even with parked agents: their
-                // dtach masters survive a full quit and reappear in the Sessions
-                // tab on relaunch, so we must NOT force a window open — doing so
-                // made the app impossible to close (closing the last window kept
-                // respawning a shell to "keep the tray visible").
-                self.showPlaceholder(near: frame)
-            }
-        }
+        // Last tab gone → let the app quit like normal software (see
+        // applicationShouldTerminateAfterLastWindowClosed → true, which routes to
+        // the reopen prompt). We deliberately do NOT pop the placeholder here: it
+        // kept the app alive after closing the last tab, which is exactly the
+        // "close, then a home window appears, then close again" double-X that felt
+        // broken. The placeholder window/controller still exists for explicit use,
+        // it's just not forced open on close.
     }
 
     // MARK: - Placeholder (no tabs open)

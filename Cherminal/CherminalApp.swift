@@ -97,8 +97,20 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // snapshot first so they resume with the right sessionFile (the context
         // gauge reads it), so those restore inside the Task after the (cheap)
         // cache load. Ghostty is ready synchronously once AppEnvironment is built.
+        //
+        // Honor a persisted "Don't Reopen" here too, not only at quit. The quit
+        // handler is the only *other* place that clears the session, so a crash or
+        // force-quit (which skips applicationShouldTerminate) would otherwise
+        // restore the old tabs for a user who chose "Don't ask again + Don't
+        // Reopen." Must run BEFORE the sweep: sweepDtachSockets() keeps masters
+        // referenced by savedSessionTabs(), so clearing first lets the sweep reap
+        // the now-unwanted agents instead of leaving them running invisibly.
+        if env.coordinator.reopenChoice == .dontReopen {
+            env.coordinator.clearSavedSession()
+        }
+
         // Reap any dtach masters nothing will reattach (crash orphans / stale
-        // sockets) before restoring, so nothing keeps running invisibly.
+        // sockets, and — per above — dont-reopen sessions) before restoring.
         env.coordinator.sweepDtachSockets()
 
         let saved = env.coordinator.savedSessionTabs()
@@ -134,20 +146,71 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     /// *before* `willTerminate`, so a snapshot taken there is always empty. Here
     /// the tabs are still alive. A crash skips this, leaving the prior snapshot.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if !isRunningTests {
-            // Mark teardown so the window closes that follow don't park agents in
-            // the rail — their masters survive quit and restore reattaches them.
-            AppEnvironment.shared.coordinator.beginTermination()
-            // Durable (os_log) breadcrumb so a *clean* quit is never again
-            // mistaken for a crash: if this line is in the log the app exited
-            // normally; if the log just stops with no such line, it was killed
-            // (SIGKILL/OOM) or crashed. Closing the last tab routes here via
-            // applicationShouldTerminateAfterLastWindowClosed.
-            let tabs = AppEnvironment.shared.coordinator.tabCount
-            clog("app", "clean termination (open tabs at quit=\(tabs)) — persisting session")
-            AppEnvironment.shared.coordinator.persistSession()
+        guard !isRunningTests else { return .terminateNow }
+        let coordinator = AppEnvironment.shared.coordinator
+
+        // Capture what's open now. persistSession keeps the last non-empty
+        // snapshot if we're quitting from the placeholder (nothing open), so the
+        // prompt still offers to reopen the tabs you last had.
+        coordinator.persistSession()
+        let count = coordinator.savedSessionTabs().count
+
+        // "Save windows"-style reopen decision. Nothing to reopen → just quit.
+        let reply: NSApplication.TerminateReply
+        if count == 0 {
+            reply = .terminateNow
+        } else {
+            switch coordinator.reopenChoice {
+            case .reopen:     reply = .terminateNow                 // session kept as-is
+            case .dontReopen: coordinator.clearSavedSession(); reply = .terminateNow
+            case .ask:        reply = promptReopen(count: count, coordinator: coordinator)
+            }
         }
-        return .terminateNow
+
+        // Mark teardown ONLY when actually quitting, so a cancelled quit doesn't
+        // leave isTerminating set (which would stop window closes from parking
+        // agents in the rail). Durable breadcrumb: a clean quit logs this line;
+        // a crash/SIGKILL just stops with no such line.
+        if reply == .terminateNow {
+            coordinator.beginTermination()
+            clog("app", "clean termination (reopen=\(count) tabs, choice=\(coordinator.reopenChoice.rawValue))")
+        } else if coordinator.isEmpty {
+            // Quit cancelled, but this was a close-the-last-window quit so the
+            // window is already gone — reopen the tabs so we're not left running
+            // with no window (and nothing to click).
+            coordinator.restoreSession()
+        }
+        return reply
+    }
+
+    /// "Reopen your N tabs next time?" dialog (macOS save-windows style). Cancel
+    /// aborts the quit; "Don't ask again" persists the choice so it's silent
+    /// thereafter.
+    @MainActor
+    private func promptReopen(count: Int, coordinator: TabWindowCoordinator) -> NSApplication.TerminateReply {
+        let alert = NSAlert()
+        alert.messageText = "Reopen your \(count) tab\(count == 1 ? "" : "s") next time?"
+        alert.informativeText = "Cherminal can reopen the tabs you have open the next time you launch it."
+        alert.addButton(withTitle: "Reopen")        // .alertFirstButtonReturn (default / Return)
+        alert.addButton(withTitle: "Don't Reopen")  // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Cancel")        // .alertThirdButtonReturn (Esc)
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't ask again"
+
+        let response = alert.runModal()
+        let remember = alert.suppressionButton?.state == .on
+
+        switch response {
+        case .alertFirstButtonReturn:               // Reopen
+            if remember { coordinator.setReopenChoice(.reopen) }
+            return .terminateNow                    // session already persisted
+        case .alertSecondButtonReturn:              // Don't Reopen
+            if remember { coordinator.setReopenChoice(.dontReopen) }
+            coordinator.clearSavedSession()
+            return .terminateNow
+        default:                                    // Cancel
+            return .terminateCancel
+        }
     }
 
     // MARK: - Groups menu
@@ -289,11 +352,12 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// Don't quit when the last window closes — closing the last conversation
-    /// tab shows the "no tabs open" placeholder window instead (see
-    /// TabWindowCoordinator). The app quits only via ⌘Q.
+    /// Quit when the last window closes, like normal Mac software — closing the
+    /// last tab routes to applicationShouldTerminate (the reopen prompt), it does
+    /// NOT pop a placeholder you have to close again. The placeholder is no longer
+    /// shown on close (see TabWindowCoordinator.windowClosed).
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        true
     }
 }
 
