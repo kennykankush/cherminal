@@ -45,8 +45,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// Conversations whose agent finished its turn and is waiting on you —
     /// detected by reading the session JSONL (no bell, no hooks; see TurnState).
     /// The sidebar shows a calm blue "your turn" light for these; it clears the
-    /// moment you focus the tab.
-    @Published private(set) var awaitingTurnIDs: Set<String> = []
+    /// moment you focus the tab. The Dock badge mirrors the count (agents waiting
+    /// on you that you haven't looked at).
+    @Published private(set) var awaitingTurnIDs: Set<String> = [] {
+        didSet { FleetAlerts.updateBadge(awaitingTurnIDs.count) }
+    }
 
     /// Open panes whose agent is waiting on you *right now* — a live status set
     /// for the quick-look minimap, recomputed fresh each pass. Unlike
@@ -175,6 +178,7 @@ final class TabWindowCoordinator: ObservableObject {
         if frontmostTabID != oid { frontmostTabID = oid }   // "you are here" in the minimap
         let id = controller.conversation.id
         awaitingTurnIDs.remove(id)
+        FleetAlerts.clearDelivered(conversationID: id)   // you looked — drop the banner
         seenTurnSize[id] = Self.fileSize(controller.conversation.sessionFile)
     }
 
@@ -208,8 +212,26 @@ final class TabWindowCoordinator: ObservableObject {
         }
         // A pane that closed or whose agent exited is no longer awaiting.
         awaiting = awaiting.filter { live.contains($0) }
-        if awaitingTurnIDs != awaiting { awaitingTurnIDs = awaiting }
+        if awaitingTurnIDs != awaiting {
+            // Notify for each agent that JUST entered "your turn" (a new completed
+            // turn in a pane you're not viewing) — before we overwrite the set.
+            let newlyDone = awaiting.subtracting(awaitingTurnIDs)
+            awaitingTurnIDs = awaiting   // didSet refreshes the Dock badge
+            for id in newlyDone {
+                if let convo = conversation(forAwaitingID: id) { FleetAlerts.notifyDone(convo) }
+            }
+        }
         if awaitingPaneIDs != panesAwaiting { awaitingPaneIDs = panesAwaiting }
+    }
+
+    /// The live conversation behind an awaiting id (for the finish notification).
+    private func conversation(forAwaitingID id: String) -> Conversation? {
+        for c in controllers {
+            for pane in c.workspace.panes where pane.conversation.id == id {
+                return pane.conversation
+            }
+        }
+        return nil
     }
 
     private static func fileSize(_ url: URL) -> UInt64 {
@@ -460,6 +482,33 @@ final class TabWindowCoordinator: ObservableObject {
         tabOverviews = controllers.map {
             TabOverview(id: ObjectIdentifier($0), title: $0.conversation.roomName, workspace: $0.workspace)
         }
+    }
+
+    /// Jump to the pane running `id` (a finish-notification tap). Selects its tab
+    /// and focuses it; no-op if that conversation isn't open in a pane anymore.
+    func revealConversation(id: String) {
+        focusExistingPane(conversationID: id)
+    }
+
+    /// Cycle focus to the next agent pane waiting on you (the cells lit in the
+    /// minimap), across all tabs and panes, wrapping. No-op when none are waiting.
+    /// Lets you clear a fleet of finished agents with one repeated keystroke.
+    func focusNextWaiting() {
+        var waiting: [(controller: TerminalTabWindowController, pane: Pane)] = []
+        for c in controllers {
+            for pane in c.workspace.panes where awaitingPaneIDs.contains(pane.conversation.id) {
+                waiting.append((c, pane))
+            }
+        }
+        guard !waiting.isEmpty else { return }
+        // Resume after the currently-focused pane, so repeated presses advance.
+        let key = NSApp.keyWindow
+        let cur = waiting.firstIndex {
+            $0.controller.window === key && $0.controller.workspace.activePaneID == $0.pane.id
+        }
+        let next = waiting[((cur ?? -1) + 1) % waiting.count]
+        select(next.controller)
+        focusPane(next.pane, in: next.controller.workspace)
     }
 
     /// Jump to a pane from the quick-look minimap: select its tab window and move

@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import GhosttyKit
+import UserNotifications
 
 @main
 struct CherminalApp: App {
@@ -22,6 +23,11 @@ struct CherminalApp: App {
                 // the shortcuts app-wide (the key reaches the menu before the
                 // focused Ghostty surface, so the terminal never swallows them).
                 CommandMenu("Tabs") {
+                    Button("Jump to Next Waiting Agent") {
+                        AppEnvironment.shared.coordinator.focusNextWaiting()
+                    }
+                    .keyboardShortcut("j", modifiers: [.command, .shift])
+                    Divider()
                     Button("Show Next Tab") {
                         AppEnvironment.shared.coordinator.selectNextTab()
                     }
@@ -86,6 +92,11 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         let env = AppEnvironment.shared
         env.metrics.startIfEnabled()   // headless perf CSV (off unless cherminal.metrics)
         installTabShortcutMonitor()
+
+        // Fleet alerts: notify + Dock-badge when an agent finishes in a pane you're
+        // not watching. We are the UN delegate so a tapped banner jumps to the pane.
+        UNUserNotificationCenter.current().delegate = self
+        FleetAlerts.requestAuthorization()
         // Defer the Groups menu: SwiftUI installs its own main menu *after*
         // this callback, so an insert here gets wiped. The next runloop tick
         // (and every activation, see applicationDidBecomeActive) re-asserts it.
@@ -372,5 +383,27 @@ extension CherminalAppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === groupsMenu else { return }
         MainActor.assumeIsolated { rebuildGroupsMenu() }
+    }
+}
+
+extension CherminalAppDelegate: UNUserNotificationCenterDelegate {
+    /// Show the banner + play the sound even while Cherminal is frontmost —
+    /// "agent finished in another tab" is exactly when the app is active but you
+    /// aren't looking at that pane. (awaitingTurnIDs already excludes the pane you
+    /// ARE viewing, so we never banner the one on screen.)
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .sound])
+    }
+
+    /// Tapping a finish banner jumps to that pane.
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if let id = response.notification.request.content.userInfo["conversationID"] as? String {
+            Task { @MainActor in AppEnvironment.shared.coordinator.revealConversation(id: id) }
+        }
+        completionHandler()
     }
 }
