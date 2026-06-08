@@ -648,15 +648,18 @@ extension Ghostty {
                   event.window != nil,
                   window == event.window else { return event }
 
-            // The clicked location in this window should be this view.
-            guard
-                let location = window.contentView?.convert(event.locationInWindow, from: nil)
-            else {
-                return event
-            }
-            // We should use window to perform hitTest here,
-            // because there could be some other overlays on top, like search bar
-            guard window.contentView?.hitTest(location) == self else { return event }
+            // Is the click on THIS surface? hitTest takes a point in the receiver's
+            // *superview* coordinate system; for the window's contentView that's the
+            // window base system — i.e. `event.locationInWindow` as-is. (We hit-test
+            // via contentView, not self, so overlays on top — search bar, etc. — can
+            // intercept.) The original code first converted the point into the
+            // contentView's OWN space, which is wrong when that contentView is a
+            // flipped SwiftUI NSHostingView (Cherminal's case — stock Ghostty uses a
+            // plain non-flipped container): the convert inverts Y, so the hit-test
+            // resolved to the vertically mirrored pane — the "click top-right, focus
+            // bottom-right" bug. Pass the window point straight through; hitTest
+            // handles the receiver's own flip.
+            guard window.contentView?.hitTest(event.locationInWindow) == self else { return event }
 
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
@@ -907,20 +910,17 @@ extension Ghostty {
         override func mouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return }
 
-            // Pixel-accurate click-to-focus. AppKit dispatches this mouseDown to
-            // the surface actually under the cursor, so taking first responder
-            // here is the authoritative signal for which pane was clicked.
-            // becomeFirstResponder posts .chmSurfaceDidBecomeFirstResponder, and
-            // the coordinator flips the active pane to match — so typing always
-            // lands in the pane you clicked.
-            //
-            // We do this instead of the SwiftUI per-cell DragGesture that used to
-            // drive focus: that gesture intermittently mis-attributed a click to
-            // a sibling cell ("clicked bottom-left, typed into top-left"). The
-            // window-level local monitor's own focus transfer (localEventLeftMouseDown)
-            // can't help in our grid either — the SwiftUI overlays win the
-            // contentView hitTest, so it never sees `== self`. mouseDown does,
-            // because the event is still dispatched down to this NSView.
+            // Click-to-focus, belt-and-suspenders. The window's local mouse-down
+            // monitor (localEventLeftMouseDown, now coordinate-correct) is the
+            // primary path and usually focuses + consumes the focus-transfer click
+            // before this runs. This complements it: AppKit dispatches mouseDown to
+            // the surface actually under the cursor, so taking first responder here
+            // is always the right pane (it also catches any case the monitor returns
+            // the event instead of consuming it). becomeFirstResponder posts
+            // .chmSurfaceDidBecomeFirstResponder and the coordinator flips the active
+            // pane to match. (Focus deliberately does NOT run through the SwiftUI
+            // per-cell gesture anymore — it intermittently mis-attributed clicks to
+            // a sibling cell; see TerminalGridView.)
             if let window, window.firstResponder !== self {
                 window.makeFirstResponder(self)   // → becomeFirstResponder stamps the recency ticket
             } else {

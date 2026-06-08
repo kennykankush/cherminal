@@ -48,6 +48,17 @@ final class TabWindowCoordinator: ObservableObject {
     /// moment you focus the tab.
     @Published private(set) var awaitingTurnIDs: Set<String> = []
 
+    /// Open panes whose agent is waiting on you *right now* — a live status set
+    /// for the quick-look minimap, recomputed fresh each pass. Unlike
+    /// `awaitingTurnIDs` (an unread badge: cleared once you view a pane, only
+    /// re-lit by a turn newer than you've seen), this has NO view-suppression and
+    /// NO seen-size gating: it reflects the raw "agent finished its turn" state of
+    /// every open agent pane, including the one you're focused on. That's what the
+    /// minimap wants — a glanceable picture of which panes are done, not which
+    /// have unread output. Clears when you send input (the agent writes a user
+    /// record → no longer awaiting).
+    @Published private(set) var awaitingPaneIDs: Set<String> = []
+
     /// Per-conversation byte offset of the turn you've already seen (the session
     /// file's size when you last focused its tab). A completed turn only lights
     /// up when the file has grown past this — so re-focusing a tab you've
@@ -172,6 +183,7 @@ final class TabWindowCoordinator: ObservableObject {
     /// cadence), so the light follows turn completion without any bell.
     private func updateAwaiting(live: Set<String>) {
         var awaiting = awaitingTurnIDs
+        var panesAwaiting: Set<String> = []   // minimap: raw "waiting now", rebuilt each pass
         for controller in controllers {
             let isKey = controller.window?.isKeyWindow == true
             for pane in controller.workspace.panes {
@@ -179,7 +191,11 @@ final class TabWindowCoordinator: ObservableObject {
                 let id = convo.id
                 guard live.contains(id), convo.agent == .claudeCode || convo.agent == .codex else { continue }
                 let reading = TurnState.read(sessionFile: convo.sessionFile, agent: convo.agent)
-                // "Viewed" = its window is key AND it's the active pane.
+                // Minimap signal: lit whenever the agent is awaiting you, no
+                // matter which pane you're looking at (a live status, not a badge).
+                if reading.awaitingUser { panesAwaiting.insert(id) }
+                // Sidebar "your turn" badge (unread semantics): "viewed" = its
+                // window is key AND it's the active pane.
                 if isKey && controller.workspace.activePaneID == pane.id {
                     seenTurnSize[id] = reading.size
                     awaiting.remove(id)
@@ -193,6 +209,7 @@ final class TabWindowCoordinator: ObservableObject {
         // A pane that closed or whose agent exited is no longer awaiting.
         awaiting = awaiting.filter { live.contains($0) }
         if awaitingTurnIDs != awaiting { awaitingTurnIDs = awaiting }
+        if awaitingPaneIDs != panesAwaiting { awaitingPaneIDs = panesAwaiting }
     }
 
     private static func fileSize(_ url: URL) -> UInt64 {
@@ -391,13 +408,13 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// Activate a pane programmatically (⌘`, spawn, tab select, rail reattach).
     /// Sets the active-pane border AND moves the AppKit first responder to the
-    /// pane's surface — these must stay in lockstep. Plain mouse clicks no longer
-    /// come through here: the surface takes first responder in its own mouseDown
-    /// (pixel-accurate, see SurfaceView.mouseDown) and the active pane follows via
-    /// .chmSurfaceDidBecomeFirstResponder → syncActivePane. (The window-level
-    /// click-to-focus monitor is defeated in a grid — our SwiftUI overlays win the
-    /// contentView hitTest so it never sees the surface — which is why mouseDown,
-    /// not that monitor, is the click path.)
+    /// pane's surface — these must stay in lockstep. Plain mouse clicks don't come
+    /// through here: the surface takes first responder on click (via the window's
+    /// local mouse-down monitor, and its own mouseDown as a fallback — both
+    /// pixel-accurate), and the active pane follows via
+    /// .chmSurfaceDidBecomeFirstResponder → syncActivePane. For that hit-test to
+    /// reach the surface, the cell's SwiftUI overlays are non-interactive and the
+    /// per-cell focus gesture is disabled on live panes (see TerminalGridView).
     func focusPane(_ pane: Pane, in workspace: Workspace) {
         // Keep the @Published activePaneID write idempotent — the click
         // recognizer (mouse-down DragGesture) fires on every drag-change, and we
@@ -1160,6 +1177,7 @@ final class TabWindowCoordinator: ObservableObject {
             awaitWatcher = nil
             if !liveConversationIDs.isEmpty { liveConversationIDs = [] }
             if !awaitingTurnIDs.isEmpty { awaitingTurnIDs = [] }
+            if !awaitingPaneIDs.isEmpty { awaitingPaneIDs = [] }
         } else if linkTimer == nil {
             Task { await reconcileLiveSessions() }
             // 8s matches the Context/Port poll cadence — finer than the live

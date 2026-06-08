@@ -12,12 +12,12 @@ struct InspectorPane: View {
 
     enum Tab: String { case context, sessions }
 
-    /// Open panes whose agent just finished a turn and are waiting on you — the
-    /// glance count on the Sessions segment.
-    private var awaitingCount: Int { coordinator.awaitingTurnIDs.count }
+    /// Open panes whose agent is waiting on you right now — the glance count on
+    /// the Sessions segment (matches what the minimap lights).
+    private var awaitingCount: Int { coordinator.awaitingPaneIDs.count }
     /// Anything that wants you: a done pane, or a parked agent flagged attention.
     private var needsYou: Bool {
-        !coordinator.awaitingTurnIDs.isEmpty
+        !coordinator.awaitingPaneIDs.isEmpty
         || coordinator.detachedAgents.contains { $0.state == .attention }
     }
 
@@ -204,7 +204,7 @@ private struct MiniPaneCell: View {
     let isActive: Bool
     @State private var hovering = false
 
-    private var isAwaiting: Bool { coordinator.awaitingTurnIDs.contains(pane.conversation.id) }
+    private var isAwaiting: Bool { coordinator.awaitingPaneIDs.contains(pane.conversation.id) }
     private var isLive: Bool { coordinator.liveConversationIDs.contains(pane.conversation.id) }
 
     var body: some View {
