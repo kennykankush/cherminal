@@ -24,6 +24,11 @@ struct ContextWatchPane: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: CHM.Space.lg) {
                         headerRow(convo)
+                        // Loud red burst banner when THIS conversation's agent has
+                        // hit its account usage limit (the limit is account-wide).
+                        if coordinator.burstingAgents.contains(convo.agent) {
+                            BurstBanner(agents: [convo.agent])
+                        }
                         if let usage {
                             // 5H / Weekly account windows sit ABOVE the context
                             // window — glanceable rate-limit headroom first.
@@ -50,7 +55,6 @@ struct ContextWatchPane: View {
             showTokenDetails = false   // per-conversation; don't carry across switches
             guard let convo = conversation,
                   convo.agent == .claudeCode || convo.agent == .codex else { return }
-            let file = convo.sessionFile
             let agent = convo.agent
             let accumulator = ClaudeUsageAccumulator()
             while !Task.isCancelled {
@@ -59,6 +63,11 @@ struct ContextWatchPane: View {
                 // call — and this loop runs per-tab, so it's multiplied across
                 // every open tab. Catches up within 8s of coming back.
                 if NSApp.isActive {
+                    // Codex `resume` forks a new rollout file, so read the live one
+                    // the agent is actually writing (else the gauge/tokens/limits go
+                    // stale and the Usage limits section vanishes). Claude appends to
+                    // its tracked file, so liveFile is nil there — no change.
+                    let file = (agent == .codex ? coordinator.liveFile(for: convo.id) : nil) ?? convo.sessionFile
                     var parsed = await Task.detached(priority: .utility) {
                         agent == .codex
                             ? ConversationUsageParser.parseCodex(sessionFile: file)
@@ -69,6 +78,12 @@ struct ContextWatchPane: View {
                     if agent == .claudeCode {
                         let windows = await ClaudeRateLimits.shared.windows()
                         if !windows.isEmpty { parsed?.rateWindows = windows }
+                    }
+                    // Carry forward the last-known rate windows when a refresh comes
+                    // back with none (a transient stale tail / API hiccup) so the
+                    // Usage limits section stays put instead of flickering away.
+                    if parsed?.rateWindows.isEmpty == true, let prev = usage?.rateWindows, !prev.isEmpty {
+                        parsed?.rateWindows = prev
                     }
                     if Task.isCancelled { break }
                     if let parsed { usage = parsed }
@@ -374,6 +389,39 @@ struct ContextWatchPane: View {
         if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
         if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
         return "\(n)"
+    }
+}
+
+/// Loud red banner shown in the Details tab when the conversation's agent has
+/// hit its account usage limit ("CODEX BURST"). The limit is account-wide.
+private struct BurstBanner: View {
+    let agents: Set<AgentKind>
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ForEach(agents.sorted { $0.rawValue < $1.rawValue }, id: \.self) { agent in
+                HStack(spacing: 7) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .font(.system(size: 13))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(BurstDetector.label(for: agent)) BURST")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("usage limit reached")
+                            .font(CHM.Font.caption)
+                            .opacity(0.9)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, CHM.Space.sm)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                        .fill(CHM.Color.alert)
+                )
+            }
+        }
     }
 }
 

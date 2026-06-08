@@ -507,6 +507,12 @@ final class TabWindowCoordinator: ObservableObject {
         focusExistingPane(conversationID: id)
     }
 
+    /// The file the live agent is actually writing for `id`, when it differs from
+    /// the tracked one (codex forks a new rollout on resume). nil → use the
+    /// conversation's own sessionFile. Lets the inspector's usage readout follow
+    /// codex's live rollout instead of a frozen file.
+    func liveFile(for id: String) -> URL? { liveSessionFile[id] }
+
     /// Cycle focus to the next agent pane waiting on you (the cells lit in the
     /// minimap), across all tabs and panes, wrapping. No-op when none are waiting.
     /// Lets you clear a fleet of finished agents with one repeated keystroke.

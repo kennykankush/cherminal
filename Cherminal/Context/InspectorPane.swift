@@ -91,9 +91,6 @@ struct SessionsPane: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: CHM.Space.lg) {
-                    if !coordinator.burstingAgents.isEmpty {
-                        BurstBanner(agents: coordinator.burstingAgents)
-                    }
                     if !tabs.isEmpty {
                         VStack(alignment: .leading, spacing: CHM.Space.md) {
                             ForEach(tabs) { tab in
@@ -310,39 +307,6 @@ private struct PulsingFill: View {
             .opacity(on ? 0.9 : 0.4)
             .animation(reduceMotion ? nil : CHM.Motion.breathe, value: on)
             .onAppear { on = true }
-    }
-}
-
-/// Loud red banner at the top of the Sessions pane when an agent type has hit
-/// its account usage limit ("CODEX BURST"). One row per bursting agent.
-private struct BurstBanner: View {
-    let agents: Set<AgentKind>
-
-    var body: some View {
-        VStack(spacing: 6) {
-            ForEach(agents.sorted { $0.rawValue < $1.rawValue }, id: \.self) { agent in
-                HStack(spacing: 7) {
-                    Image(systemName: "exclamationmark.octagon.fill")
-                        .font(.system(size: 13))
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("\(BurstDetector.label(for: agent)) BURST")
-                            .font(.system(size: 12, weight: .heavy))
-                        Text("usage limit reached")
-                            .font(CHM.Font.caption)
-                            .opacity(0.9)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, CHM.Space.sm)
-                .padding(.vertical, 7)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
-                        .fill(CHM.Color.alert)
-                )
-            }
-        }
     }
 }
 
