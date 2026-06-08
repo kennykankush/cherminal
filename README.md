@@ -2,7 +2,7 @@
 
 > **chat + terminal** — the room you enter to see every AI conversation across your `~/dev` rooms, and jump back into any one.
 
-Cherminal is a personal macOS app: a calm, room-driven manager for living with CLI AI agents (Claude Code, Codex). It's the ChatGPT/Claude three-pane layout retargeted at the terminal — a **conversations rail** on the left, a real **Ghostty terminal** in the middle, a **context watch** on the right.
+Cherminal is a personal macOS app: a calm, room-driven manager for living with CLI AI agents (Claude Code, Codex). It's the ChatGPT/Claude three-pane layout retargeted at the terminal — a **conversations rail** on the left, a real **Ghostty terminal grid** in the middle, and a **context + live-fleet inspector** on the right (usage, git, and a status minimap).
 
 It's built for one user and one workflow. See **[VISION.md](VISION.md)** for the *why*, the primitives, and the non-goals.
 
@@ -11,6 +11,15 @@ It's built for one user and one workflow. See **[VISION.md](VISION.md)** for the
 > **Observe externally. Never inject.**
 
 Cherminal watches agents the way a window manager watches windows — by reading the OS, never by injecting into the agent. **No hooks, no wrapper binary, no env injection.** It reads Claude/Codex session files and matches running processes by PID → cwd. If a feature requires injecting into the agent, it doesn't ship.
+
+## What it does
+
+- **Three-pane room.** Conversations sidebar (rooms, full-text search, pins, saved tab groups) · a real Ghostty **terminal grid** (split a tab into up to 16 panes) · a right inspector with **Details** and **Sessions** tabs.
+- **Live agent state, observed externally.** By tailing the session JSONL (no hooks), Cherminal knows whether each agent is *working*, *waiting on you* ("your turn"), or idle — surfaced as a calm blue light in the sidebar and a **quick-look minimap** (Sessions tab) that mirrors every tab's pane grid and pulses each cell by state: **blue = done**, **sweeping bar = working**, ring = active pane. Click a cell to jump there.
+- **Finish alerts.** A macOS notification + Dock badge the moment an agent finishes in a pane you're *not* watching (tap to jump). **⌘⇧J** cycles focus to the next agent waiting on you.
+- **Burst detection.** When an agent hits its account usage limit, its panes go red (**"CODEX BURST"**) and the Details tab shows the limit banner.
+- **Details readout.** Context-window fill, token breakdown, 5h/Weekly usage-limit meters, dev-server ports — plus **live git state** for the room (branch, ahead/behind, ±diff, changed files), read-only.
+- **Persistent sessions.** Agents run under `dtach`, so they survive quit/relaunch and pane-close (parked + reattachable); the full pane-grid layout restores on launch.
 
 ## Requirements
 
@@ -61,14 +70,17 @@ A SwiftUI app embedding **libghostty** (vendored as `GhosttyKit.xcframework`). W
 Cherminal/
 ├── CherminalApp.swift        @main · lifecycle · ghostty_init · GHOSTTY_RESOURCES_DIR · tab shortcuts
 ├── Terminal/
-│   ├── NativeTabs/           TabWindowCoordinator (tab group + lifecycle), window controller, root view
+│   ├── NativeTabs/           TabWindowCoordinator (tab group, lifecycle, live-state reconcile)
 │   ├── Grid/                 Workspace / Pane model + the split-pane grid view
-│   ├── Dtach.swift           persistent-session wrapper (the detach tray)
+│   ├── Dtach.swift           persistent-session wrapper (master via lsof on the socket)
+│   ├── TurnState.swift       working / "your turn" detection from the session JSONL
+│   ├── LiveSessionLinker.swift  lsof: PID → open session file / cwd (see through dtach)
+│   ├── FleetAlerts.swift     finish notification + Dock badge + burst detection
 │   ├── TerminalCommand.swift builds the resume command + surface config per conversation
 │   └── BinaryResolver.swift  captures the login-shell PATH/env so bare commands resolve
-├── Discovery/                read-only session discovery: ConversationRegistry, Claude/Codex scanners,
-│                             SessionCache, port scanner, filesystem watcher
-├── Context/                  right pane: context/usage watch, inspector, clawd pets
+├── Discovery/                read-only discovery: ConversationRegistry, Claude/Codex scanners,
+│                             SessionCache, GitStatusReader, ClaudeRateLimits, ports, FS watcher
+├── Context/                  right pane: Details (usage / limits / ports / git) + Sessions (minimap)
 ├── Sidebar/                  left pane: conversation list
 ├── Vendor/Ghostty/           vendored Ghostty Swift hosting layer (Surface View, App, Config, Input)
 ├── Diagnostics.swift         crash/fault capture
@@ -77,10 +89,12 @@ Resources/ghostty/terminfo    bundled xterm-ghostty terminfo (see Gotchas)
 vendor/GhosttyKit.xcframework libghostty
 ```
 
-### Sessions & the detach tray
+### Sessions, live state & the detach tray
 
-- **Discovery is read-only:** it scans `~/.claude/projects/` and `~/.codex/sessions/`, and links running `claude`/`codex` processes by foreground PID → cwd. No hooks.
-- **Resumed agents run under `dtach`** so they survive the surface being torn down (app quit, pane close). Closing an agent pane *parks* it in the right-edge tray — its `dtach` master stays alive — and reopening reattaches the same master. Sockets live in `~/.cherminal/dtach/<bundle-id>/`.
+- **Discovery is read-only:** it scans `~/.claude/projects/` and `~/.codex/sessions/`, and links running `claude`/`codex` processes via `lsof`/cwd. No hooks.
+- **Seeing through `dtach`:** a resumed agent runs under a daemonized `dtach` master, so the surface's foreground process is the `login`/dtach-client wrapper, not the agent. Liveness resolves the real process by `lsof`-ing the **socket file** (macOS `pgrep` can't see the daemonized master). Codex forks a new rollout on resume, so usage/turn detection follows the file it's actually writing.
+- **Turn state, no hooks:** `TurnState` tails the session JSONL — Claude's `stop_reason`, Codex's `task_complete` — to decide *working / your turn / idle*, driven by FSEvents (~0.3s). `ClaudeRateLimits` adds the 5h/Weekly meters from the OAuth usage API (the one deliberate network call); `BurstDetector` reads the pane's visible terminal text for an account usage-limit banner.
+- **Resumed agents survive teardown** (app quit, pane close). Closing an agent pane *parks* it — its `dtach` master stays alive — and reopening reattaches it; parked agents show in the **Sessions** tab for one-click reattach. Sockets live in `~/.cherminal/dtach/<bundle-id>/`.
 
 ## Gotchas worth knowing
 
