@@ -11,6 +11,31 @@ struct PersistedTab: Codable, Hashable, Sendable, Identifiable {
     let roomPath: String
 }
 
+/// One slot in a saved grid — the grid analog of `PersistedTab`. Same
+/// agent/shell fallback rules: `agentRaw == AgentKind.shell.rawValue` means a
+/// synthetic shell reopened at `roomPath`, otherwise the agent session resumes.
+struct PersistedPane: Codable, Hashable, Sendable, Identifiable {
+    var id = UUID()
+    let conversationID: String
+    let agentRaw: String
+    let roomPath: String
+    var role: PaneRole?
+    var gridPosition: GridPosition
+    /// Reserved for the dtach-all phase: the stable dtach socket key (= the
+    /// conversation id for agents today). Optional so older saved data decodes.
+    var socketID: String?
+}
+
+/// A saved tab's full grid: ordered panes + their layout. Supersedes the
+/// single-active-pane `[PersistedTab]` lastSession blob — restoring rebuilds the
+/// whole arrangement, not just the focused pane. `Persisted*` = on-disk
+/// snapshot; the live runtime grid is the `Workspace` ObservableObject.
+struct PersistedWorkspace: Codable, Hashable, Sendable, Identifiable {
+    var id = UUID()
+    var layout: GridLayout
+    var panes: [PersistedPane]
+}
+
 /// A user-named bundle of tabs the user explicitly bookmarked. Chrome's
 /// tab-group / saved-tabs pattern.
 struct Bookmark: Codable, Hashable, Sendable, Identifiable {

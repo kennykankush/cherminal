@@ -113,8 +113,8 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // sockets, and — per above — dont-reopen sessions) before restoring.
         env.coordinator.sweepDtachSockets()
 
-        let saved = env.coordinator.savedSessionTabs()
-        let needsCache = saved.contains { $0.agentRaw != AgentKind.shell.rawValue }
+        let saved = env.coordinator.savedWorkspaces()
+        let needsCache = saved.contains { ws in ws.panes.contains { $0.agentRaw != AgentKind.shell.rawValue } }
         if env.coordinator.isEmpty && !needsCache {
             if !env.coordinator.restoreSession() {
                 env.coordinator.openFreshShell()
@@ -153,7 +153,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // snapshot if we're quitting from the placeholder (nothing open), so the
         // prompt still offers to reopen the tabs you last had.
         coordinator.persistSession()
-        let count = coordinator.savedSessionTabs().count
+        let count = coordinator.savedWorkspaces().count
 
         // "Save windows"-style reopen decision. Nothing to reopen → just quit.
         let reply: NSApplication.TerminateReply

@@ -177,12 +177,23 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// Open `conversation` in a new native tab, or select its existing tab.
     @discardableResult
-    func openOrFocus(_ conversation: Conversation) -> TerminalTabWindowController? {
+    func openOrFocus(_ conversation: Conversation, forceNew: Bool = false) -> TerminalTabWindowController? {
         clog("tabs", "openOrFocus id=\(conversation.id) agent=\(conversation.agent.rawValue) room=\(conversation.roomName) path=\(conversation.roomPath.path)")
-        if let existing = controllers.first(where: { $0.conversation.id == conversation.id }) {
-            clog("tabs", "→ focus existing tab")
-            select(existing)
-            return existing
+        // Focus an existing tab/pane already running this conversation — searching
+        // ALL panes (by effective OR opened identity), not just each tab's active
+        // pane, so a restored grid holding it in a non-active slot is found
+        // instead of spawning a duplicate tab on the same dtach socket.
+        if !forceNew {
+            for controller in controllers {
+                if let pane = controller.workspace.panes.first(where: {
+                    $0.conversation.id == conversation.id || $0.base.id == conversation.id
+                }) {
+                    clog("tabs", "→ focus existing pane")
+                    select(controller)
+                    focusPane(pane, in: controller.workspace)
+                    return controller
+                }
+            }
         }
 
         guard ghostty.app != nil else {
@@ -308,9 +319,9 @@ final class TabWindowCoordinator: ObservableObject {
         return false
     }
 
-    private func addPane(_ conversation: Conversation, to controller: TerminalTabWindowController) {
+    private func addPane(_ conversation: Conversation, to controller: TerminalTabWindowController, role: PaneRole? = nil) {
         guard controller.workspace.panes.count < 16 else { return }
-        let pane = Pane(conversation: conversation)
+        let pane = Pane(conversation: conversation, role: role)
         controller.workspace.addPane(pane)
         controller.window?.contentView?.layoutSubtreeIfNeeded()
         spawnSurface(for: pane, in: controller)
@@ -519,6 +530,7 @@ final class TabWindowCoordinator: ObservableObject {
     // MARK: - Persisted tabs (bookmarks + session restore)
 
     private static let lastSessionKey = "cherminal.lastSession"
+    private static let lastWorkspacesKey = "cherminal.lastWorkspaces"   // V2: full per-tab grid
 
     /// Open a saved list of tabs in order, resolving each to its live
     /// conversation when the session still exists, else a shell in the same
@@ -548,25 +560,152 @@ final class TabWindowCoordinator: ObservableObject {
         }
     }
 
-    /// Snapshot the open tabs to disk so the next launch can reopen them. Uses
-    /// the precise live detect (via `snapshot()`) so a hand-launched agent is
-    /// saved as that agent, not the bare shell it started as. Called on quit.
+    // MARK: - Persisted workspaces (full per-tab grid — supersedes single-pane PersistedTab)
+
+    /// Snapshot every open tab's full grid (all panes + layout) so restore
+    /// rebuilds the exact arrangement, not just the active pane. Uses each pane's
+    /// *effective* conversation (already adopted by the live-session reconcile),
+    /// so a hand-launched agent is saved as that agent.
+    func currentWorkspaces(detected: [ObjectIdentifier: Conversation] = [:]) -> [PersistedWorkspace] {
+        // A conversation may be serialized into ONE pane only — two panes can't
+        // resume the same agent (they'd share a dtach socket), and restore's
+        // dedup would otherwise silently drop a pane. Resolve each pane's
+        // identity in two passes so a duplicate yields a *unique* fallback.
+        let allPanes = controllers.flatMap { $0.workspace.panes }
+        var identity: [ObjectIdentifier: Conversation] = [:]
+        var claimed = Set<String>()
+
+        // Pass 1: fixed-identity (agent) panes own their conversation id — they
+        // were deliberately opened as that agent, so they win any collision with
+        // a shell that merely hand-launched the same agent.
+        for pane in allPanes where pane.base.agent != .shell {
+            if claimed.insert(pane.conversation.id).inserted {
+                identity[ObjectIdentifier(pane)] = pane.conversation
+            } else {
+                // Two fixed panes for one agent shouldn't occur (open/restore
+                // dedup), but be safe: demote the duplicate to a fresh shell.
+                let shell = Conversation.shellConversation(cwd: pane.conversation.roomPath)
+                identity[ObjectIdentifier(pane)] = shell
+                claimed.insert(shell.id)
+            }
+        }
+        // Pass 2: shell panes — a freshly hand-launched agent (quit detection) or
+        // the pane's adopted conversation, unless that id is already claimed, in
+        // which case fall back to the pane's unique base shell identity.
+        for pane in allPanes where pane.base.agent == .shell {
+            var convo = detected[ObjectIdentifier(pane)] ?? pane.conversation
+            if !claimed.insert(convo.id).inserted {
+                convo = pane.base
+                claimed.insert(convo.id)
+            }
+            identity[ObjectIdentifier(pane)] = convo
+        }
+
+        return controllers.map { controller in
+            PersistedWorkspace(
+                layout: controller.workspace.layout,
+                panes: controller.workspace.panes.map { pane in
+                    let convo = identity[ObjectIdentifier(pane)] ?? pane.conversation
+                    return PersistedPane(
+                        conversationID: convo.id,
+                        agentRaw: convo.agent.rawValue,
+                        roomPath: convo.roomPath.path,
+                        role: pane.role,
+                        gridPosition: pane.gridPosition,
+                        socketID: convo.id)
+                })
+        }
+    }
+
+    /// Synchronous per-pane live detection for the quit snapshot: a shell pane
+    /// that just hand-launched `claude`/`codex` is captured as that agent even if
+    /// the periodic reconcile hasn't adopted it yet (preserves the pre-grid
+    /// snapshot() guarantee). One blocking lsof of the open panes' pids — fine on
+    /// quit, same cost as the old snapshot().
+    private func detectLivePaneConversations() -> [ObjectIdentifier: Conversation] {
+        let pidToPane = foregroundPIDs()
+        guard !pidToPane.isEmpty else { return [:] }
+        let info = LiveSessionLinker.inspect(pids: Array(pidToPane.keys))
+        var out: [ObjectIdentifier: Conversation] = [:]
+        var adopted = Set<String>()   // mirror reconcileLiveSessions: one pane per convo
+        for (pid, pane) in pidToPane where pane.base.agent == .shell {
+            guard let detected = detectConversation(for: info[pid]),
+                  adopted.insert(detected.id).inserted else { continue }
+            out[ObjectIdentifier(pane)] = detected
+        }
+        return out
+    }
+
+    /// Resolve a persisted pane to a live conversation: a shell reopens in its
+    /// room (reusing its id so it maps to the same pane); an agent resumes if its
+    /// session still exists, else falls back to a shell there. Mirrors
+    /// openPersistedTabs' rules.
+    private func conversation(forPersistedPane pane: PersistedPane) -> Conversation {
+        if pane.agentRaw == AgentKind.shell.rawValue {
+            return Conversation.shellConversation(
+                cwd: URL(fileURLWithPath: pane.roomPath), id: pane.conversationID)
+        }
+        if let real = registry.conversation(id: pane.conversationID) { return real }
+        return Conversation.shellConversation(cwd: URL(fileURLWithPath: pane.roomPath))
+    }
+
+    /// Open saved full-grid workspaces: one tab per workspace, its first pane
+    /// opening the tab and the rest filling the grid in order.
+    func openPersistedWorkspaces(_ workspaces: [PersistedWorkspace]) {
+        var seen = Set<String>()   // conversation ids already restored
+        for workspace in workspaces {
+            // Drop any pane whose conversation id already appeared: two panes must
+            // never resume the same agent (they'd share one dtach socket and
+            // mirror I/O). Shell ids are unique per pane, so only genuine dups get
+            // dropped. forceNew gives each workspace its OWN tab — openOrFocus's
+            // dedup would otherwise merge two workspaces sharing a first-pane id.
+            let panes = workspace.panes.filter { seen.insert($0.conversationID).inserted }
+            guard let first = panes.first,
+                  let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
+            else { continue }
+            for pane in panes.dropFirst() {
+                addPane(conversation(forPersistedPane: pane), to: controller, role: pane.role)
+            }
+        }
+    }
+
+    /// The workspaces persisted by the last run (V2), migrating the older
+    /// single-pane [PersistedTab] blob (V1) when no V2 snapshot exists yet.
+    func savedWorkspaces() -> [PersistedWorkspace] {
+        if let data = UserDefaults.standard.data(forKey: Self.lastWorkspacesKey),
+           let workspaces = try? JSONDecoder().decode([PersistedWorkspace].self, from: data) {
+            return workspaces
+        }
+        return savedSessionTabs().map { tab in
+            PersistedWorkspace(layout: .single, panes: [
+                PersistedPane(conversationID: tab.conversationID,
+                              agentRaw: tab.agentRaw,
+                              roomPath: tab.roomPath,
+                              role: nil,
+                              gridPosition: GridPosition(row: 0, col: 0),
+                              socketID: tab.conversationID)
+            ])
+        }
+    }
+
+    /// Snapshot the open tabs to disk so the next launch can reopen them (V2
+    /// full grid). Uses each pane's *effective* conversation (the live-session
+    /// reconcile already adopts a hand-launched agent into the pane), so we
+    /// capture the right identity without a fresh lsof. Called on quit.
     func persistSession() {
-        let tabs = snapshot()
-        // Never clobber the continuous save with an empty set. An empty result
-        // at terminate is almost always teardown — macOS sends SIGTERM on
-        // restart/logout and AppKit can close the windows (emptying controllers)
-        // *before* this runs, which previously wiped the saved session and lost
-        // every tab on a Mac restart. The debounced persistSessionLight already
-        // writes [] correctly the moment you genuinely close everything, so
-        // skipping here only protects a good snapshot from a teardown race.
-        guard !tabs.isEmpty else {
+        // Never clobber the continuous save with an empty set: an empty result at
+        // terminate is almost always teardown — macOS closes the windows
+        // (emptying controllers) before this runs — so skipping protects a good
+        // snapshot from that race. The debounced persistSessionLight already
+        // writes the real set the moment you genuinely close everything.
+        let workspaces = currentWorkspaces(detected: detectLivePaneConversations())
+        guard !workspaces.isEmpty else {
             clog("tabs", "terminate snapshot empty — keeping the continuous save")
             return
         }
-        guard let data = try? JSONEncoder().encode(tabs) else { return }
-        UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
-        clog("tabs", "persisted \(tabs.count) tab(s) for next launch")
+        guard let data = try? JSONEncoder().encode(workspaces) else { return }
+        UserDefaults.standard.set(data, forKey: Self.lastWorkspacesKey)
+        clog("tabs", "persisted \(workspaces.count) workspace(s) for next launch")
     }
 
     /// Continuous, debounced persistence — the robustness fix. `persistSession()`
@@ -585,28 +724,29 @@ final class TabWindowCoordinator: ObservableObject {
     }
 
     private func persistSessionLight() {
-        var seen = Set<String>()
-        let tabs: [PersistedTab] = controllers.compactMap { controller in
-            let convo = controller.conversation
-            guard seen.insert(convo.id).inserted else { return nil }
-            return PersistedTab(conversationID: convo.id,
-                                agentRaw: convo.agent.rawValue,
-                                roomPath: convo.roomPath.path)
-        }
-        // Do NOT clobber the saved set with [] just because every tab closed.
-        // Closing the last tab (→ placeholder) used to wipe the session, so a
-        // later quit restored nothing. We keep the last non-empty snapshot; the
-        // quit path is the only thing that *clears* it, and only when the user
-        // chooses "Don't Reopen" (see CherminalAppDelegate / reopenChoice).
-        guard !tabs.isEmpty else { return }
-        guard let data = try? JSONEncoder().encode(tabs) else { return }
-        UserDefaults.standard.set(data, forKey: Self.lastSessionKey)
+        // V2: persist every tab's full grid. Do NOT clobber the saved set with []
+        // just because every tab closed — closing the last tab (→ placeholder)
+        // used to wipe the session so a later quit restored nothing. We keep the
+        // last non-empty snapshot; only "Don't Reopen" clears it (see
+        // clearSavedSession / reopenChoice).
+        persistWorkspaces()
+    }
+
+    /// Encode the current full-grid workspaces to disk (V2). Shared by the
+    /// debounced continuous save and the quit snapshot. Empty-guarded so a
+    /// teardown race can't wipe a good snapshot.
+    private func persistWorkspaces() {
+        let workspaces = currentWorkspaces()
+        guard !workspaces.isEmpty else { return }
+        guard let data = try? JSONEncoder().encode(workspaces) else { return }
+        UserDefaults.standard.set(data, forKey: Self.lastWorkspacesKey)
     }
 
     /// Forget the saved session so the next launch starts fresh. Called when the
     /// user answers "Don't Reopen" at quit.
     func clearSavedSession() {
         UserDefaults.standard.removeObject(forKey: Self.lastSessionKey)
+        UserDefaults.standard.removeObject(forKey: Self.lastWorkspacesKey)
     }
 
     // MARK: - Reopen-on-launch preference ("save windows"-style)
@@ -637,10 +777,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// fresh shell.
     @discardableResult
     func restoreSession() -> Bool {
-        let tabs = savedSessionTabs()
-        guard !tabs.isEmpty else { return false }
-        clog("tabs", "restoring \(tabs.count) tab(s) from last session")
-        openPersistedTabs(tabs)
+        let workspaces = savedWorkspaces()
+        guard !workspaces.isEmpty else { return false }
+        let paneCount = workspaces.reduce(0) { $0 + $1.panes.count }
+        clog("tabs", "restoring \(workspaces.count) tab(s), \(paneCount) pane(s) from last session")
+        openPersistedWorkspaces(workspaces)
         return !controllers.isEmpty
     }
 
@@ -691,7 +832,9 @@ final class TabWindowCoordinator: ObservableObject {
     /// forgotten), and any dead socket is stale — both get killed (socket
     /// removed). Run once, before restore, so nothing lingers invisibly.
     func sweepDtachSockets() {
-        let keep = Set(savedSessionTabs().map { $0.conversationID })
+        let savedPanes = savedWorkspaces().flatMap { $0.panes }
+        let keep = Set(savedPanes.map { $0.conversationID })
+            .union(savedPanes.compactMap { $0.socketID })
             .union(savedDetached().map { $0.conversationID })
         for id in Dtach.knownSocketIDs() where !keep.contains(id) {
             Dtach.kill(id: id)
