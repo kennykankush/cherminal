@@ -570,16 +570,19 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Ports
 
-    /// Maps each open tab's foreground process pid → its conversation id, so
-    /// the port watcher can attribute a dev server (a descendant of that
-    /// process) to the conversation that spawned it.
-    func tabForegroundPIDs() -> [Int32: String] {
-        var out: [Int32: String] = [:]
+    /// Cheap per-pane refs (NO subprocess, main-actor safe) for the port watcher
+    /// to resolve OFF the main actor: the dtach socket key (base.id), the
+    /// conversation id, and the surface's foreground pid. PortsManager resolves a
+    /// wrapped pane's master pid — where a dev server descends from, vs the surface
+    /// client relay — off-main inside its scan task (see PortsManager.scan).
+    func paneSocketRefs() -> [(socketID: String, conversationID: String, fgPID: Int32)] {
+        var out: [(socketID: String, conversationID: String, fgPID: Int32)] = []
         for c in controllers {
             for pane in c.workspace.panes {
                 guard let surface = pane.surfaceView?.surface else { continue }
-                let pid = ghostty_surface_foreground_pid(surface)
-                if pid > 0 { out[Int32(pid)] = pane.conversation.id }
+                out.append((socketID: pane.base.id,
+                            conversationID: pane.conversation.id,
+                            fgPID: Int32(ghostty_surface_foreground_pid(surface))))
             }
         }
         return out
@@ -1168,28 +1171,51 @@ final class TabWindowCoordinator: ObservableObject {
         reconciling = true
         defer { reconciling = false }
 
-        // Foreground pid → pane for every pane whose surface is up.
-        let pidToPane = foregroundPIDs()
-        let pids = Array(pidToPane.keys)
+        // Snapshot panes cheaply on the main actor (no subprocess): base.id is the
+        // dtach socket key; the real inner pid is resolved off-main below.
+        var paneByID: [String: Pane] = [:]
+        var refs: [(socketID: String, fg: Int32, isShell: Bool)] = []
+        for c in controllers {
+            for pane in c.workspace.panes {
+                guard let surface = pane.surfaceView?.surface else { continue }
+                paneByID[pane.base.id] = pane
+                refs.append((socketID: pane.base.id,
+                             fg: Int32(ghostty_surface_foreground_pid(surface)),
+                             isShell: pane.base.agent == .shell))
+            }
+        }
 
-        let info = await Task.detached(priority: .utility) {
-            LiveSessionLinker.inspect(pids: pids)
+        // Off the main actor: resolve each pane's effective pid (a wrapped shell's
+        // inner foreground process — seeing THROUGH dtach — else the surface pid)
+        // and lsof them. ALL the pgrep/ps/lsof subprocess work happens here, never
+        // on @MainActor (keeps this 8s reconcile off the main thread).
+        let (resolved, info) = await Task.detached(priority: .utility) {
+            () -> ([(socketID: String, pid: Int32)], [Int32: LiveSessionLinker.ProcessInfo]) in
+            var resolved: [(socketID: String, pid: Int32)] = []
+            for r in refs {
+                if r.isShell, let inner = Dtach.innerForegroundPID(id: r.socketID) {
+                    resolved.append((socketID: r.socketID, pid: Int32(inner)))
+                } else if r.fg > 0 {
+                    resolved.append((socketID: r.socketID, pid: r.fg))
+                }
+            }
+            return (resolved, LiveSessionLinker.inspect(pids: resolved.map { $0.pid }))
         }.value
 
-        // Re-validate after the await: a pane may have closed or its foreground
-        // process changed during the lsof. Iterate the CURRENT foreground map
-        // (not the pre-await snapshot) so we never apply to a closed pane or a
-        // reused pid.
+        // Back on main: map each effective pid to its still-open pane, then adopt.
+        // Keying by the stable socket id (base.id) sidesteps the pid-reuse hazard
+        // the old re-snapshot guarded against; we just re-check the pane is open.
         var live: Set<String> = []
         var adopted: Set<String> = []   // conversations already claimed this pass
-        for (pid, pane) in foregroundPIDs() {
-            // Only trust `info` for a pid that still maps to the SAME pane.
-            guard pidToPane[pid] === pane else { continue }
+        for (socketID, pid) in resolved {
+            guard let pane = paneByID[socketID], pane.surfaceView != nil,
+                  controllers.contains(where: { $0.workspace.panes.contains { $0 === pane } })
+            else { continue }
             if pane.base.agent == .shell {
                 // A bare shell pane: adopt the agent it hand-launched (or revert
-                // to shell when none runs). If another pane in the same room
-                // already claimed this conversation this pass, keep this one a
-                // shell — two panes must not share one identity.
+                // to shell when none runs). If another pane already claimed this
+                // conversation this pass, keep this one a shell — two panes must
+                // not share one identity.
                 var detected = detectConversation(for: info[pid])
                 if let d = detected, adopted.contains(d.id) { detected = nil }
                 pane.applyDetectedSession(detected)
@@ -1236,8 +1262,20 @@ final class TabWindowCoordinator: ObservableObject {
         for c in controllers {
             for pane in c.workspace.panes {
                 guard let surface = pane.surfaceView?.surface else { continue }
-                let pid = ghostty_surface_foreground_pid(surface)
-                if pid > 0 { out[Int32(pid)] = pane }
+                // A wrapped SHELL pane's surface foreground is the dtach client;
+                // the hand-launched agent (if any) runs under the master, so look
+                // through dtach to the inner foreground for adoption. Agent panes
+                // keep the surface pid — their live signal already handles the
+                // dtach client (agentRunning matches the "dtach" command).
+                let pid: Int32
+                if pane.base.agent == .shell, let inner = Dtach.innerForegroundPID(id: pane.base.id) {
+                    pid = Int32(inner)
+                } else {
+                    let fg = ghostty_surface_foreground_pid(surface)
+                    guard fg > 0 else { continue }
+                    pid = Int32(fg)
+                }
+                out[pid] = pane
             }
         }
         return out
@@ -1255,9 +1293,19 @@ final class TabWindowCoordinator: ObservableObject {
         // from each window's active pane.
         var pidToController: [Int32: TerminalTabWindowController] = [:]
         for c in controllers {
-            guard let surface = c.holder.surfaceView?.surface else { continue }
-            let pid = ghostty_surface_foreground_pid(surface)
-            if pid > 0 { pidToController[Int32(pid)] = c }
+            let pane = c.holder
+            guard let surface = pane.surfaceView?.surface else { continue }
+            // Look through dtach for a wrapped shell (the hand-launched agent runs
+            // under the master); else use the surface foreground pid.
+            let pid: Int32
+            if pane.base.agent == .shell, let inner = Dtach.innerForegroundPID(id: pane.base.id) {
+                pid = Int32(inner)
+            } else {
+                let fg = ghostty_surface_foreground_pid(surface)
+                guard fg > 0 else { continue }
+                pid = Int32(fg)
+            }
+            pidToController[pid] = c
         }
         guard !pidToController.isEmpty else { return [:] }
         let info = LiveSessionLinker.inspect(pids: Array(pidToController.keys))

@@ -93,11 +93,24 @@ final class PortsManager: ObservableObject {
         defer { scanning = false }
 
         let roomPaths = registry?.rooms.map { $0.path.path } ?? []
-        let tabPIDs = coordinator?.tabForegroundPIDs() ?? [:]
-        let context = PortScanner.Context(roomPaths: roomPaths, tabPIDs: tabPIDs, devRoots: devRoots)
+        // Cheap on the main actor (no subprocess). The wrapped-pane master-pid
+        // resolution (pgrep/ps) runs OFF the main actor inside the scan task below
+        // — a dev server descends from the daemonized dtach master, not the
+        // surface's client relay. (Resumed agents are always dtach-wrapped, so
+        // doing this on @MainActor would spawn pgrep per agent pane every cycle.)
+        let refs = coordinator?.paneSocketRefs() ?? []
+        let devRoots = self.devRoots
 
-        let scanned = await Task.detached(priority: .utility) {
-            PortScanner.scan(context)
+        let scanned = await Task.detached(priority: .utility) { () -> [DevPort] in
+            var tabPIDs: [Int32: String] = [:]
+            for r in refs {
+                if let master = Dtach.masterPID(id: r.socketID) {
+                    tabPIDs[Int32(master)] = r.conversationID
+                } else if r.fgPID > 0 {
+                    tabPIDs[r.fgPID] = r.conversationID
+                }
+            }
+            return PortScanner.scan(.init(roomPaths: roomPaths, tabPIDs: tabPIDs, devRoots: devRoots))
         }.value
 
         if scanned != ports { ports = scanned }

@@ -100,6 +100,90 @@ enum Dtach {
         return names.compactMap { $0.hasSuffix(".sock") ? String($0.dropLast(5)) : nil }
     }
 
+    // MARK: - Seeing through dtach (the master/child tree)
+
+    /// The `dtach` master holding a wrapped pane's socket. The surface's
+    /// foreground process is the dtach CLIENT (a childless relay); the master —
+    /// which actually runs the inner shell/agent on its own pty — is the
+    /// socket-matching process that HAS a child. Returns nil WITHOUT shelling out
+    /// when the pane isn't wrapped (socket file absent), so the off-by-default
+    /// path adds no per-pane subprocess.
+    static func masterPID(id: String) -> pid_t? {
+        let sock = socketPath(for: id)
+        guard FileManager.default.fileExists(atPath: sock) else { return nil }
+        let matches = pgrepSocket(sock)
+        guard !matches.isEmpty else { return nil }
+        if matches.count == 1 { return matches[0] }
+        // Master = the socket holder with a child (the inner shell). The client
+        // is a leaf relay. (ppid is unreliable: with a client attached the master's
+        // parent is the client, not launchd.)
+        return matches.first(where: { !childPIDs(of: $0).isEmpty }) ?? matches[0]
+    }
+
+    /// The real inner foreground process under a wrapped pane's master: the inner
+    /// shell's current job (a hand-launched agent) if any, else the inner shell.
+    /// nil when the pane isn't wrapped. Lets live detection / adoption see THROUGH
+    /// dtach, since the surface's own foreground pid is just the client relay.
+    static func innerForegroundPID(id: String) -> pid_t? {
+        let sock = socketPath(for: id)
+        guard FileManager.default.fileExists(atPath: sock) else { return nil }
+        let matches = pgrepSocket(sock)
+        guard !matches.isEmpty else { return nil }
+        // Find the master AND its inner-shell child in one pass over the socket
+        // matches (master = the one WITH a child; the client is a childless relay),
+        // so we don't re-run the pgrep -P that the separate masterPID already does.
+        var master = matches[0]
+        var shell: pid_t?
+        if matches.count == 1 {
+            shell = childPIDs(of: master).first
+        } else {
+            for m in matches where shell == nil {
+                if let kid = childPIDs(of: m).first { master = m; shell = kid }
+            }
+        }
+        guard let shell else { return master }
+        // The inner pty's foreground process group (tpgid) — its leader pid is the
+        // ACTIVE foreground process (a hand-launched agent), or the shell's own pid
+        // when it's at a prompt. Foreground-aware, unlike "first child" which could
+        // be a background job (e.g. `npm run dev &`).
+        if let fg = terminalForegroundPID(of: shell), fg > 0 { return fg }
+        return shell
+    }
+
+    /// The foreground process group id of `pid`'s controlling terminal (ps tpgid).
+    /// That id is the foreground group leader's pid — the active foreground process
+    /// on the pty. nil if it has no controlling tty / no foreground group.
+    private static func terminalForegroundPID(of pid: pid_t) -> pid_t? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/ps")
+        p.arguments = ["-o", "tpgid=", "-p", String(pid)]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let tpgid = pid_t(raw), tpgid > 0 else { return nil }
+        return tpgid
+    }
+
+    /// Direct child pids of `pid` (pgrep -P).
+    static func childPIDs(of pid: pid_t) -> [pid_t] {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-P", String(pid)]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return [] }
+        return out.split(whereSeparator: \.isNewline)
+            .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
     // MARK: - Internals
 
     /// pid of the `dtach` master owning `socket`, via `pgrep -f` on the socket
