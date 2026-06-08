@@ -463,6 +463,7 @@ final class TabWindowCoordinator: ObservableObject {
         detachedAgents.append(DetachedAgent(conversation: convo))
         clog("tabs", "detached \(convo.agent.rawValue) \(convo.id) → tray")
         refreshDetachedStates()
+        enforceShellTrayLimits()
     }
 
     /// Pull a parked agent back onto the screen. Opening its conversation
@@ -530,6 +531,41 @@ final class TabWindowCoordinator: ObservableObject {
                 if updated != self.detachedAgents { self.detachedAgents = updated }
             }
         }
+    }
+
+    // MARK: - Tray lifecycle (anti-leak: bound parked SHELL sessions)
+
+    /// Max parked SHELL masters kept alive before the oldest are reaped. Agents
+    /// are never auto-reaped (the user manages those via the tray's Kill).
+    private static let maxParkedShells = 16
+    /// A parked shell left un-reattached longer than this is treated as forgotten
+    /// and reaped — its dtach master would otherwise run indefinitely.
+    private static let parkedShellMaxAge: TimeInterval = 24 * 60 * 60   // 24h
+
+    /// Honor the "no dtach forever" rule for SHELLS: reap parked shell masters
+    /// that are stale (parked > maxAge) or beyond the cap (oldest first). Parked
+    /// AGENTS are left untouched. Naturally inert when persistent sessions are off
+    /// (no shell has a master to park). Reattaching a shell removes its cell and
+    /// resets its age, so this only ever hits genuinely-forgotten shells.
+    private func enforceShellTrayLimits() {
+        let now = Date()
+        let shells = detachedAgents.filter { $0.conversation.agent == .shell }
+        guard !shells.isEmpty else { return }
+        var reap = Set<String>()
+        // Age: shells parked longer than the max age are forgotten.
+        for s in shells where now.timeIntervalSince(s.detachedAt) > Self.parkedShellMaxAge {
+            reap.insert(s.id)
+        }
+        // Cap: among the rest, keep the most-recently parked and reap the oldest
+        // beyond the cap.
+        let fresh = shells.filter { !reap.contains($0.id) }.sorted { $0.detachedAt > $1.detachedAt }
+        if fresh.count > Self.maxParkedShells {
+            for s in fresh[Self.maxParkedShells...] { reap.insert(s.id) }
+        }
+        guard !reap.isEmpty else { return }
+        for id in reap { Dtach.kill(id: id) }
+        detachedAgents.removeAll { reap.contains($0.id) }
+        clog("tabs", "tray: reaped \(reap.count) stale/over-cap shell session(s)")
     }
 
     // MARK: - Ports
@@ -852,7 +888,8 @@ final class TabWindowCoordinator: ObservableObject {
         let items = detachedAgents.map {
             PersistedTab(conversationID: $0.id,
                          agentRaw: $0.conversation.agent.rawValue,
-                         roomPath: $0.conversation.roomPath.path)
+                         roomPath: $0.conversation.roomPath.path,
+                         detachedAt: $0.detachedAt)
         }
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: Self.detachedKey)
@@ -891,7 +928,9 @@ final class TabWindowCoordinator: ObservableObject {
             } else {
                 continue
             }
-            restored.append(DetachedAgent(conversation: convo))
+            // Preserve the original park time so the shell age-reap survives
+            // relaunch (a long-forgotten shell isn't treated as freshly parked).
+            restored.append(DetachedAgent(conversation: convo, detachedAt: it.detachedAt ?? Date()))
         }
         // Always assign (even when empty) so the persisted tray reflects the
         // FILTERED set — dead masters and already-open (skipped) ids are dropped
@@ -900,6 +939,7 @@ final class TabWindowCoordinator: ObservableObject {
         // the Don't-Reopen reap. (Reads savedDetached() above first, so no self-clobber.)
         detachedAgents = restored
         refreshDetachedStates()
+        enforceShellTrayLimits()
     }
 
     /// Reap dtach masters that nothing will reattach. At launch, the only
@@ -1168,6 +1208,7 @@ final class TabWindowCoordinator: ObservableObject {
         // live agent tab's session file, and the parked agents' rail cells.
         updateAwaiting(live: live)
         refreshDetachedStates()
+        enforceShellTrayLimits()
 
         // A tab may have just adopted a hand-launched agent (its effective
         // conversation changed without controllers changing) — re-persist so the

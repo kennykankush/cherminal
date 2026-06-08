@@ -9,6 +9,11 @@ struct PersistedTab: Codable, Hashable, Sendable, Identifiable {
     let conversationID: String
     let agentRaw: String
     let roomPath: String
+    /// When this was parked in the tray — persisted so the shell age-reap policy
+    /// survives quit/relaunch (a shell parked days ago must still be reaped, not
+    /// treated as freshly parked). Only the detached-tray encoding sets it; the
+    /// session/bookmark encodings leave it nil. Optional so older data decodes.
+    var detachedAt: Date? = nil
 }
 
 /// One slot in a saved grid — the grid analog of `PersistedTab`. Same
