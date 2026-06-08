@@ -82,12 +82,18 @@ extension Ghostty {
         // Whether the mouse is currently over this surface
         @Published private(set) var mouseOverSurface: Bool = false
 
-        // The last known mouse location in the surface's local coordinate space,
-        // used by overlays such as the split drag handle reveal region.
-        @Published private(set) var mouseLocationInSurface: CGPoint?
-
-        // Whether the cursor is currently visible (not hidden by typing, etc.)
-        @Published private(set) var cursorVisible: Bool = true
+        // High-frequency pointer/cursor state, split onto its own observable so
+        // mouse-move (≈60–120 Hz) and cursor-blink updates invalidate only the
+        // tiny grab-handle overlay that reads them — not the whole SurfaceWrapper
+        // body, which observes the SurfaceView. (These were two `@Published` on
+        // SurfaceView, so every pointer event re-rendered every overlay.)
+        final class PointerState: ObservableObject {
+            // Last pointer location in the surface's local space (overlay reveal).
+            @Published var locationInSurface: CGPoint?
+            // Whether the cursor is visible (not hidden by typing, etc.).
+            @Published var cursorVisible: Bool = true
+        }
+        let pointer = PointerState()
 
         /// Whether the belonging window is visible
         ///
@@ -181,7 +187,17 @@ extension Ghostty {
         var notificationIdentifiers: Set<String> = []
 
         private var markedText: NSMutableAttributedString
-        private(set) var focused: Bool = true
+        // A surface is not focused until AppKit makes it first responder. (Was
+        // `true`, which let every just-spawned pane believe it had focus — so the
+        // first real focusDidChange(true) no-op'd on the `!=` guard in
+        // focusDidChange and libghostty never got the focus assertion, and
+        // multiple panes could hold focused == true at once.)
+        private(set) var focused: Bool = false
+        // The focus-request ticket that last made this surface first responder
+        // (see Ghostty.moveFocus). A pending spawn/tab retry compares against the
+        // window's current first responder's value, so it won't steal focus the
+        // user has since moved to another pane while the retry was waiting.
+        var focusAppliedSeq: UInt64 = 0
         private var prevPressureStage: Int = 0
         private var appearanceObserver: NSKeyValueObservation?
 
@@ -425,7 +441,7 @@ extension Ghostty {
                 focusInstant = ContinuousClock.now
 
                 // We unset our bell state if we gained focus
-                bell = false
+                if bell { bell = false }
 
                 // Remove any notifications for this surface once we gain focus.
                 if !notificationIdentifiers.isEmpty {
@@ -518,7 +534,12 @@ extension Ghostty {
         }
 
         func setCursorVisibility(_ visible: Bool) {
-            cursorVisible = visible
+            // Guard ONLY the @Published publish (avoids a per-keystroke re-render
+            // of the overlay). The AppKit hide must still run every time:
+            // setHiddenUntilMouseMoves is one-shot — any mouse move reveals the
+            // cursor without changing our flag — so each repeated hide request
+            // (typing) must re-assert it, or the cursor reappears mid-typing.
+            if pointer.cursorVisible != visible { pointer.cursorVisible = visible }
             // Technically this action could be called anytime we want to
             // change the mouse visibility but at the time of writing this
             // mouse-hide-while-typing is the only use case so this is the
@@ -798,7 +819,19 @@ extension Ghostty {
 
         override func becomeFirstResponder() -> Bool {
             let result = super.becomeFirstResponder()
-            if result { focusDidChange(true) }
+            if result {
+                // Stamp the focus-recency ticket for EVERY first-responder
+                // acquisition (native tab selection, AppKit restoration, direct
+                // makeFirstResponder, or Ghostty.moveFocus) so a pending stale
+                // spawn/tab retry sees this surface is now focused and yields.
+                focusAppliedSeq = Ghostty.nextFocusSeq()
+                focusDidChange(true)
+                // Make the AppKit responder authoritative for the active pane:
+                // the coordinator flips activePaneID to match (see
+                // TabWindowCoordinator.syncActivePane), so the focused pane's
+                // border/dim can never disagree with where typing lands.
+                NotificationCenter.default.post(name: .chmSurfaceDidBecomeFirstResponder, object: self)
+            }
             return result
         }
 
@@ -952,7 +985,7 @@ extension Ghostty {
             super.mouseEntered(with: event)
 
             let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
+            pointer.locationInSurface = pos
 
             guard let surfaceModel else { return }
 
@@ -970,7 +1003,7 @@ extension Ghostty {
 
         override func mouseExited(with event: NSEvent) {
             mouseOverSurface = false
-            mouseLocationInSurface = nil
+            pointer.locationInSurface = nil
             guard let surfaceModel else { return }
 
             // If the mouse is being dragged then we don't have to emit
@@ -991,7 +1024,7 @@ extension Ghostty {
 
         override func mouseMoved(with event: NSEvent) {
             let pos = self.convert(event.locationInWindow, from: nil)
-            mouseLocationInSurface = pos
+            pointer.locationInSurface = pos
 
             guard let surfaceModel else { return }
 
@@ -1075,8 +1108,10 @@ extension Ghostty {
                 return
             }
 
-            // On any keyDown event we unset our bell state
-            bell = false
+            // On any keyDown event we unset our bell state. Guard the no-op so a
+            // keystroke with the bell already clear doesn't publish (which would
+            // re-render the whole SurfaceWrapper on every key).
+            if bell { bell = false }
 
             // We need to translate the mods (maybe) to handle configs such as option-as-alt
             let translationModsGhostty = Ghostty.eventModifierFlags(

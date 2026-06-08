@@ -56,8 +56,25 @@ struct PaneCellView: View {
                     .strokeBorder(CHM.Color.accent.opacity(0.8), lineWidth: 2)
             }
         }
+        // Dim inactive panes so the focused one is unmistakable. Driven by the
+        // same activePaneID as the border (not SwiftUI @FocusState, which lagged
+        // and left focus ambiguous); non-interactive so it never eats a click.
+        .overlay {
+            if !isActive && workspace.panes.count > 1 {
+                Color.black.opacity(0.18).allowsHitTesting(false)
+            }
+        }
         .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture().onEnded { coordinator.focusPane(pane, in: workspace) })
+        // Activate on mouse-DOWN, not via a TapGesture that only resolves on
+        // mouse-up after drag arbitration — that deferral was the "click feels a
+        // touch slow", and a mis-classified tap used to leave keystrokes going to
+        // the previously-focused pane. minimumDistance 0 fires on first contact;
+        // simultaneousGesture so the terminal still gets the click for selection.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0).onChanged { _ in
+                coordinator.focusPane(pane, in: workspace)
+            }
+        )
     }
 
     @ViewBuilder private var roleBadge: some View {

@@ -1138,10 +1138,23 @@ extension Ghostty {
     /// will lose focus. There has to be some nice SwiftUI-native way to fix this but I can't
     /// figure it out so we're going to do this hacky thing to bring focus back to the terminal
     /// that should have it.
+    // Monotonic focus ticket dispenser. Used ONLY to order focus events in time;
+    // it is never compared globally (a global comparison would let a background
+    // tab's focus cancel an unrelated window's pending retry — the over-cancel
+    // bug). The "am I a stale retry?" decision is made per-window against the
+    // current first responder's applied ticket, in the retry guard below. Every
+    // first-responder acquisition stamps the surface via nextFocusSeq(): in
+    // becomeFirstResponder (covers native tab selection / AppKit restoration /
+    // direct makeFirstResponder / moveFocus that changes FR) and on an
+    // already-first-responder re-assert in moveFocus, so recency is never stale.
+    private static var focusSeq: UInt64 = 0
+    static func nextFocusSeq() -> UInt64 { focusSeq &+= 1; return focusSeq }
+
     static func moveFocus(
         to: SurfaceView,
         from: SurfaceView? = nil,
-        delay: TimeInterval? = nil
+        delay: TimeInterval? = nil,
+        seq requestSeq: UInt64? = nil
     ) {
         // The whole delay machinery is a bit of a hack to work around a
         // situation where the window is destroyed and the surface view
@@ -1161,11 +1174,27 @@ extension Ghostty {
             0.05
         }
 
+        // A fresh request takes the next ticket; retries carry theirs so the
+        // ordering survives across reschedules.
+        let mySeq: UInt64 = requestSeq ?? nextFocusSeq()
+
         let work: DispatchWorkItem = .init {
             // If the callback runs before the surface is attached to a view
             // then the window will be nil. We just reschedule in that case.
             guard let window = to.window else {
-                moveFocus(to: to, from: from, delay: nextDelay)
+                moveFocus(to: to, from: from, delay: nextDelay, seq: mySeq)
+                return
+            }
+
+            // Don't let a stale spawn/tab retry override a focus the user made
+            // while we were waiting to attach: if this window's first responder
+            // is a *different* surface that a *newer* request focused, yield.
+            // Scoped to this window via the responder, so a concurrent spawn in
+            // another window never cancels us; an explicit synchronous focus
+            // always carries the newest ticket, so it is never blocked here.
+            if let current = window.firstResponder as? SurfaceView,
+               current !== to,
+               current.focusAppliedSeq > mySeq {
                 return
             }
 
@@ -1177,12 +1206,25 @@ extension Ghostty {
                 _ = from.resignFirstResponder()
             }
 
-            window.makeFirstResponder(to)
+            // becomeFirstResponder stamps the recency ticket when first responder
+            // actually changes; for an already-first-responder re-assert (a click
+            // on the focused pane) it doesn't fire, so stamp here to record that
+            // the user just re-selected this pane.
+            let wasAlreadyFirstResponder = window.firstResponder === to
+            if window.makeFirstResponder(to), wasAlreadyFirstResponder {
+                to.focusAppliedSeq = nextFocusSeq()
+            }
         }
 
         let queue = DispatchQueue.main
         if let delay {
             queue.asyncAfter(deadline: .now() + delay, execute: work)
+        } else if to.window != nil {
+            // Already attached (the common case — any visible pane you click):
+            // focus synchronously so there's no extra runloop tick before the
+            // click takes. The async reschedule below is only for the not-yet-
+            // attached case (a pane whose surface was just spawned).
+            work.perform()
         } else {
             queue.async(execute: work)
         }

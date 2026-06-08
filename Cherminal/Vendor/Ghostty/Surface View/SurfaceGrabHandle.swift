@@ -10,9 +10,17 @@ extension Ghostty {
         private static let hoverHeightFactor: CGFloat = 0.2
 
         @ObservedObject var surfaceView: SurfaceView
+        // Observe the surface's pointer state directly so cursor-move / blink
+        // updates re-render only this tiny handle, not the whole SurfaceWrapper.
+        @ObservedObject var pointer: SurfaceView.PointerState
 
         @State private var isHovering: Bool = false
         @State private var isDragging: Bool = false
+
+        init(surfaceView: SurfaceView) {
+            _surfaceView = ObservedObject(wrappedValue: surfaceView)
+            _pointer = ObservedObject(wrappedValue: surfaceView.pointer)
+        }
 
         private var handleVisible: Bool {
             // Handle should always be visible in non-fullscreen
@@ -26,13 +34,13 @@ extension Ghostty {
 
         private var ellipsisVisible: Bool {
             // If the cursor isn't visible, never show the handle
-            guard surfaceView.cursorVisible else { return false }
+            guard pointer.cursorVisible else { return false }
             // If we're hovering or actively dragging, always visible
             if isHovering || isDragging { return true }
 
             // Require our mouse location to be within the top area of the
             // surface.
-            guard let mouseLocation = surfaceView.mouseLocationInSurface else { return false }
+            guard let mouseLocation = pointer.locationInSurface else { return false }
             return Self.isInHoverRegion(mouseLocation, in: surfaceView.bounds)
         }
 

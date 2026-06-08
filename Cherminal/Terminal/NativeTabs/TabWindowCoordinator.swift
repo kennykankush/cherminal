@@ -3,6 +3,13 @@ import SwiftUI
 import GhosttyKit
 import os
 
+extension Notification.Name {
+    /// Posted by a Ghostty surface the moment it becomes its window's first
+    /// responder, so the coordinator can keep `activePaneID` (the visual focus)
+    /// locked to the surface that actually has the keyboard.
+    static let chmSurfaceDidBecomeFirstResponder = Notification.Name("chm.surfaceDidBecomeFirstResponder")
+}
+
 /// Owns the native macOS tab group: one `NSWindow` per conversation, joined
 /// via `addTabbedWindow`, each hosting the full 3-pane SwiftUI. Replaces the
 /// single-window custom tab bar + surface deck. Surfaces live for the
@@ -95,6 +102,25 @@ final class TabWindowCoordinator: ObservableObject {
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
         ) { [weak self] note in
             MainActor.assumeIsolated { self?.clearAwaiting(forWindow: note.object as? NSWindow) }
+        })
+
+        // Keep the active-pane highlight locked to the surface that actually holds
+        // the keyboard: whenever any surface becomes first responder (click, ⌘`,
+        // tab switch, spawn) reflect it into its workspace's activePaneID. This is
+        // the source of truth that prevents "clicked one pane, typing into another".
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .chmSurfaceDidBecomeFirstResponder, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated { self?.syncActivePane(toFocused: note.object as? Ghostty.SurfaceView) }
+        })
+
+        // The 8s live-session reconcile is paused while the app is backgrounded
+        // (energy); refresh once the moment it comes forward so live badges /
+        // "your turn" lights are current when you look.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in await self?.reconcileLiveSessions() }
         })
     }
 
@@ -322,15 +348,40 @@ final class TabWindowCoordinator: ObservableObject {
     /// hit-test returns a SwiftUI layer and the surface never takes focus. Moving
     /// the responder here is what keeps typing going to the pane you clicked.
     func focusPane(_ pane: Pane, in workspace: Workspace) {
-        workspace.activePaneID = pane.id
-        pane.lastActiveAt = Date()
-        // Route through moveFocus, not a bare makeFirstResponder: it retries
-        // (backoff up to 0.5s) until the surface's NSView is attached to a
-        // window, so this also works for a pane whose surface was just spawned
-        // and isn't in the view hierarchy yet — the bare call silently no-op'd
-        // when `surface.window` was nil, leaving the pane unfocusable.
+        // Keep the @Published activePaneID write idempotent — the click
+        // recognizer (mouse-down DragGesture) fires on every drag-change, and we
+        // don't want to re-publish (re-render) on each one.
+        if workspace.activePaneID != pane.id {
+            workspace.activePaneID = pane.id
+            pane.lastActiveAt = Date()
+        }
+        // Always route through moveFocus, even when this surface is ALREADY first
+        // responder: a click must refresh the surface's focus "recency ticket"
+        // (focusAppliedSeq) so a still-pending spawn/tab retry for another
+        // just-opened pane (with a newer ticket) can't later steal focus from the
+        // pane you deliberately clicked. Cheap when already focused —
+        // makeFirstResponder is a no-op but still returns true (so the ticket
+        // updates), and the ticket fields aren't @Published (no re-render). It
+        // also retries with backoff until a just-spawned surface attaches.
         if let surface = pane.surfaceView {
             Ghostty.moveFocus(to: surface)
+        }
+    }
+
+    /// Reflect an AppKit focus change into the owning workspace's activePaneID,
+    /// so the visual active pane (border/dim) stays locked to the surface that
+    /// holds the keyboard. Posted by SurfaceView.becomeFirstResponder — the
+    /// single source of truth that prevents "clicked one pane, typing into another".
+    private func syncActivePane(toFocused surface: Ghostty.SurfaceView?) {
+        guard let surface else { return }
+        for controller in controllers {
+            guard let pane = controller.workspace.panes.first(where: { $0.surfaceView === surface })
+            else { continue }
+            if controller.workspace.activePaneID != pane.id {
+                controller.workspace.activePaneID = pane.id
+                pane.lastActiveAt = Date()
+            }
+            return
         }
     }
 
@@ -812,7 +863,12 @@ final class TabWindowCoordinator: ObservableObject {
             // badge needs, and lsof-per-tab is one of the heavier polls, so
             // this is pure standing-cost reduction.
             linkTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
-                Task { @MainActor in await self?.reconcileLiveSessions() }
+                Task { @MainActor in
+                    // Skip the lsof reconcile while backgrounded — nothing on
+                    // screen needs it; didBecomeActive runs one on return.
+                    guard NSApp.isActive else { return }
+                    await self?.reconcileLiveSessions()
+                }
             }
             startAwaitWatcher()
         }

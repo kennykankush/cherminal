@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 
@@ -20,7 +21,10 @@ final class PortsManager: ObservableObject {
     }()
 
     private var cancellables = Set<AnyCancellable>()
-    private let interval: TimeInterval = 4
+    // The scan spawns 3 subprocesses (lsof, lsof, ps -axo) each fire, so this is
+    // the heaviest standing poll. 12s (was 4s) is plenty for an ambient footer,
+    // and it's paused entirely while the app is backgrounded (see shouldPoll).
+    private let interval: TimeInterval = 12
 
     init(registry: ConversationRegistry, coordinator: TabWindowCoordinator) {
         self.registry = registry
@@ -36,6 +40,13 @@ final class PortsManager: ObservableObject {
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .sink { [weak self] _ in self?.refreshPolling() }
             .store(in: &cancellables)
+        // Pause/resume the lsof+ps scan as the app loses/gains focus (energy).
+        NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)
+            .sink { [weak self] _ in self?.refreshPolling() }
+            .store(in: &cancellables)
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in self?.refreshPolling() }
+            .store(in: &cancellables)
         refreshPolling()
     }
 
@@ -43,7 +54,10 @@ final class PortsManager: ObservableObject {
         let hasTabs = (coordinator?.tabCount ?? 0) > 0
         // Mirrors @AppStorage("cherminal.showContext"), default true.
         let inspectorShown = UserDefaults.standard.object(forKey: "cherminal.showContext") as? Bool ?? true
-        return hasTabs && inspectorShown
+        // Don't fire the lsof+ps scan while the app is in the background — the
+        // ports footer isn't on screen, so it's pure battery drain. Resumes on
+        // reactivation (we re-evaluate on the active/resign notifications above).
+        return hasTabs && inspectorShown && NSApp.isActive
     }
 
     private func refreshPolling() {

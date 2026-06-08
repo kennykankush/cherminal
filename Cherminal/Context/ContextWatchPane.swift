@@ -54,19 +54,25 @@ struct ContextWatchPane: View {
             let agent = convo.agent
             let accumulator = ClaudeUsageAccumulator()
             while !Task.isCancelled {
-                var parsed = await Task.detached(priority: .utility) {
-                    agent == .codex
-                        ? ConversationUsageParser.parseCodex(sessionFile: file)
-                        : accumulator.ingest(file: file)
-                }.value
-                // Codex carries its 5H/Weekly windows in-file; Claude's only come
-                // from the OAuth usage API (cached/throttled). Merge them in.
-                if agent == .claudeCode {
-                    let windows = await ClaudeRateLimits.shared.windows()
-                    if !windows.isEmpty { parsed?.rateWindows = windows }
+                // Only refresh while the app is active. A backgrounded app's
+                // inspector isn't on screen, so skip the file parse + usage API
+                // call — and this loop runs per-tab, so it's multiplied across
+                // every open tab. Catches up within 8s of coming back.
+                if NSApp.isActive {
+                    var parsed = await Task.detached(priority: .utility) {
+                        agent == .codex
+                            ? ConversationUsageParser.parseCodex(sessionFile: file)
+                            : accumulator.ingest(file: file)
+                    }.value
+                    // Codex carries its 5H/Weekly windows in-file; Claude's only come
+                    // from the OAuth usage API (cached/throttled). Merge them in.
+                    if agent == .claudeCode {
+                        let windows = await ClaudeRateLimits.shared.windows()
+                        if !windows.isEmpty { parsed?.rateWindows = windows }
+                    }
+                    if Task.isCancelled { break }
+                    if let parsed { usage = parsed }
                 }
-                if Task.isCancelled { break }
-                if let parsed { usage = parsed }
                 try? await Task.sleep(for: .seconds(8))
             }
         }

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// The right-hand inspector, now two-up: **Context** (the per-conversation
 /// gauge/limits readout) and **Sessions** (detached agents kept alive under
@@ -38,12 +39,17 @@ struct InspectorPane: View {
             spawnedAgents = []
             guard let convo = conversation, convo.agent == .claudeCode else { return }
             while !Task.isCancelled {
-                let scanned = await Task.detached(priority: .utility) {
-                    SpawnedAgentScanner.scan(for: convo)
-                }.value
-                if Task.isCancelled { break }
-                if scanned != spawnedAgents { spawnedAgents = scanned }
-                try? await Task.sleep(for: .seconds(3))
+                // Skip the directory scan while backgrounded (per-tab, runs in
+                // every open tab); refreshes on return. Interval relaxed 3s → 8s
+                // — sub-agent lists don't need second-level latency.
+                if NSApp.isActive {
+                    let scanned = await Task.detached(priority: .utility) {
+                        SpawnedAgentScanner.scan(for: convo)
+                    }.value
+                    if Task.isCancelled { break }
+                    if scanned != spawnedAgents { spawnedAgents = scanned }
+                }
+                try? await Task.sleep(for: .seconds(8))
             }
         }
     }
