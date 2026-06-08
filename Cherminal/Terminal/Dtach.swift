@@ -41,7 +41,9 @@ enum Dtach {
     /// The `dtach` executable: the binary bundled in the app (daily driver)
     /// wins; otherwise the user's PATH (dev against Homebrew's dtach).
     static func binaryPath() -> String {
-        if let bundled = Bundle.main.url(forResource: "dtach", withExtension: nil)?.path,
+        // Bundled at Contents/MacOS/dtach (the helper-executable location) — see
+        // project.yml's "Bundle dtach" step.
+        if let bundled = Bundle.main.url(forAuxiliaryExecutable: "dtach")?.path,
            FileManager.default.isExecutableFile(atPath: bundled) {
             return bundled
         }

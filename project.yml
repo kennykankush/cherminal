@@ -42,6 +42,31 @@ targets:
         embed: false
         codeSign: false
       - sdk: Carbon.framework
+    postBuildScripts:
+      # Bundle the vendored dtach binary into Contents/MacOS — the Apple-blessed
+      # home for a standalone helper executable (notarization/Gatekeeper-safe,
+      # unlike a Mach-O under Resources) — so persistent sessions work without a
+      # Homebrew install. Dtach.binaryPath finds it via
+      # Bundle.main.url(forAuxiliaryExecutable:) and falls back to PATH. dtach is
+      # GPL-2.0-or-later, invoked as a separate executable (not linked) — see
+      # vendor/dtach.NOTICE.md.
+      - name: Bundle dtach
+        inputFiles:
+          - $(SRCROOT)/vendor/dtach
+        outputFiles:
+          - $(BUILT_PRODUCTS_DIR)/$(EXECUTABLE_FOLDER_PATH)/dtach
+        script: |
+          set -euo pipefail
+          dst="$BUILT_PRODUCTS_DIR/$EXECUTABLE_FOLDER_PATH/dtach"
+          /bin/mkdir -p "$(/usr/bin/dirname "$dst")"
+          /bin/cp -f "$SRCROOT/vendor/dtach" "$dst"
+          /bin/chmod +x "$dst"
+          # --options runtime matches the app's hardened runtime (and works with
+          # the current ad-hoc "-" identity). Notarization additionally needs
+          # --timestamp + a real Developer ID identity, and this step would need to
+          # re-run when that identity changes (its up-to-date check keys on
+          # vendor/dtach) — both deferred with the rest of distribution.
+          /usr/bin/codesign --force --options runtime --sign "${EXPANDED_CODE_SIGN_IDENTITY:--}" "$dst"
     info:
       path: Cherminal/Info.plist
       properties:
