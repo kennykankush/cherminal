@@ -62,11 +62,24 @@ final class TabWindowCoordinator: ObservableObject {
     /// record → no longer awaiting).
     @Published private(set) var awaitingPaneIDs: Set<String> = []
 
+    /// Agent types that have hit their account usage/plan limit ("burst"). Detected
+    /// from any one pane's visible terminal banner (BurstDetector) and applied to
+    /// the WHOLE agent type — the limit is account-wide, so all its panes go red.
+    @Published private(set) var burstingAgents: Set<AgentKind> = []
+
     /// Per-conversation byte offset of the turn you've already seen (the session
     /// file's size when you last focused its tab). A completed turn only lights
     /// up when the file has grown past this — so re-focusing a tab you've
     /// already read doesn't re-trigger, and only a genuinely *new* turn does.
     private var seenTurnSize: [String: UInt64] = [:]
+
+    /// Conversation id → the session file the live agent is ACTUALLY writing,
+    /// discovered from `lsof` (the open file) each reconcile. Codex `resume` forks
+    /// a brand-new rollout file instead of appending to the registry's one, so its
+    /// tracked `sessionFile` goes stale — turn detection (done/working) must read
+    /// this live file instead. Empty for claude (it doesn't hold the file open;
+    /// its `--resume` appends to the same file, so `sessionFile` stays correct).
+    private var liveSessionFile: [String: URL] = [:]
 
     /// Agents detached into the side rail: their pane was closed but their
     /// `dtach` master is still alive, so they keep running off-screen for ≈0
@@ -194,7 +207,11 @@ final class TabWindowCoordinator: ObservableObject {
                 let convo = pane.conversation
                 let id = convo.id
                 guard live.contains(id), convo.agent == .claudeCode || convo.agent == .codex else { continue }
-                let reading = TurnState.read(sessionFile: convo.sessionFile, agent: convo.agent)
+                // Codex writes to a forked rollout file on resume; read the live
+                // one lsof found, falling back to the tracked file (claude's stays
+                // correct, so this is a no-op there).
+                let file = liveSessionFile[id] ?? convo.sessionFile
+                let reading = TurnState.read(sessionFile: file, agent: convo.agent)
                 // Minimap signal: lit whenever the agent is awaiting you, no
                 // matter which pane you're looking at (a live status, not a badge).
                 if reading.awaitingUser { panesAwaiting.insert(id) }
@@ -1319,10 +1336,12 @@ final class TabWindowCoordinator: ObservableObject {
         // the old re-snapshot guarded against; we just re-check the pane is open.
         var live: Set<String> = []
         var adopted: Set<String> = []   // conversations already claimed this pass
+        var liveFiles: [String: URL] = [:]   // id → the file lsof says it's writing (codex)
         for (socketID, pid) in resolved {
             guard let pane = paneByID[socketID], pane.surfaceView != nil,
                   controllers.contains(where: { $0.workspace.panes.contains { $0 === pane } })
             else { continue }
+            let openFile = info[pid]?.openSessionFile.map { URL(fileURLWithPath: $0) }
             if pane.base.agent == .shell {
                 // A bare shell pane: adopt the agent it hand-launched (or revert
                 // to shell when none runs). If another pane already claimed this
@@ -1331,14 +1350,37 @@ final class TabWindowCoordinator: ObservableObject {
                 var detected = detectConversation(for: info[pid])
                 if let d = detected, adopted.contains(d.id) { detected = nil }
                 pane.applyDetectedSession(detected)
-                if let detected { adopted.insert(detected.id); live.insert(detected.id) }
+                if let detected {
+                    adopted.insert(detected.id); live.insert(detected.id)
+                    if let openFile { liveFiles[detected.id] = openFile }
+                }
             } else {
                 // Opened as a concrete agent (resume): identity is FIXED. Live
                 // while an agent process runs in it.
-                if agentRunning(info[pid]) { live.insert(pane.base.id) }
+                if agentRunning(info[pid]) {
+                    live.insert(pane.base.id)
+                    if let openFile { liveFiles[pane.base.id] = openFile }
+                }
             }
         }
         if liveConversationIDs != live { liveConversationIDs = live }
+        liveSessionFile = liveFiles   // codex's live rollout, for done/working detection
+
+        // Burst scan: read each agent pane's visible terminal banner (cheap —
+        // 500ms-cached viewport text) and flag the whole agent type if any pane
+        // has hit its usage limit. Stops scanning an agent once it's flagged.
+        var bursting: Set<AgentKind> = []
+        for c in controllers {
+            for pane in c.workspace.panes {
+                let agent = pane.conversation.agent
+                guard agent == .codex || agent == .claudeCode, !bursting.contains(agent),
+                      let surface = pane.surfaceView else { continue }
+                if BurstDetector.isBursting(agent: agent, visibleText: surface.cachedVisibleContents.get()) {
+                    bursting.insert(agent)
+                }
+            }
+        }
+        if burstingAgents != bursting { burstingAgents = bursting }
         // Keep each window's title on its active pane (adoption may have flipped it).
         for c in controllers { c.window?.title = c.holder.conversation.roomName }
 

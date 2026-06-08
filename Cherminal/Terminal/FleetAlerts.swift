@@ -38,3 +38,38 @@ enum FleetAlerts {
 
     private static func id(for conversationID: String) -> String { "chm.done.\(conversationID)" }
 }
+
+/// Detects a "burst" — an agent that has hit its account usage/plan limit and is
+/// stuck until it resets. The limit banner shows in the terminal (codex doesn't
+/// log it), so we match against the pane's VISIBLE text (what you see). The
+/// markers are deliberately distinctive CLI phrasings so a chat that merely
+/// *mentions* usage limits doesn't trip them. A burst is account-wide, so one
+/// detected pane flags the whole agent type (see TabWindowCoordinator).
+enum BurstDetector {
+    /// Short red-banner label for an agent ("CODEX" / "CLAUDE").
+    static func label(for agent: AgentKind) -> String {
+        switch agent {
+        case .codex:      return "CODEX"
+        case .claudeCode: return "CLAUDE"
+        default:          return agent.rawValue.uppercased()
+        }
+    }
+
+    static func isBursting(agent: AgentKind, visibleText: String) -> Bool {
+        let t = visibleText.lowercased()
+        switch agent {
+        case .codex:
+            // "You've hit your usage limit. Visit …/usage to purchase more
+            // credits or try again at <date>." — distinctive enough to be safe.
+            return t.contains("hit your usage limit")
+        case .claudeCode:
+            // TODO: Claude Code's exact plan-limit wording isn't confirmed yet
+            // (its logged "Rate limited" is the transient case, not a burst).
+            // Disabled until we have the literal banner text — guessing here
+            // would risk flagging a chat that just discusses usage limits.
+            return false
+        default:
+            return false
+        }
+    }
+}

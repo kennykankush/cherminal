@@ -91,6 +91,9 @@ struct SessionsPane: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: CHM.Space.lg) {
+                    if !coordinator.burstingAgents.isEmpty {
+                        BurstBanner(agents: coordinator.burstingAgents)
+                    }
                     if !tabs.isEmpty {
                         VStack(alignment: .leading, spacing: CHM.Space.md) {
                             ForEach(tabs) { tab in
@@ -208,21 +211,34 @@ private struct MiniPaneCell: View {
     private var isLive: Bool { coordinator.liveConversationIDs.contains(pane.conversation.id) }
     /// Agent running and mid-turn (live, not waiting on you) → show the loading bar.
     private var isWorking: Bool { isLive && !isAwaiting }
+    /// This pane's agent type has hit its usage limit (account-wide) → red BURST.
+    private var isBursting: Bool { coordinator.burstingAgents.contains(pane.conversation.agent) }
 
     var body: some View {
         RoundedRectangle(cornerRadius: 3, style: .continuous)
-            .fill(baseFill)
-            // The "done" pulse, layered over the base so non-awaiting cells stay
-            // solid. Conditionally inserted → its @State resets each awaiting
-            // cycle, so the repeatForever breathe re-arms every time (same trick
-            // as the sidebar status dot).
-            .overlay { if isAwaiting { PulsingFill() } }
+            // Burst overrides every other state — it's the loudest signal.
+            .fill(isBursting ? CHM.Color.alert.opacity(0.92) : baseFill)
+            .overlay {
+                if isBursting {
+                    Text("BURST")
+                        .font(.system(size: 8, weight: .heavy))
+                        .foregroundStyle(.white)
+                        .lineLimit(1).minimumScaleFactor(0.5)
+                        .padding(.horizontal, 2)
+                } else if isAwaiting {
+                    // The "done" pulse, layered over the base. Conditionally inserted
+                    // → its @State resets each cycle, so the breathe re-arms (same
+                    // trick as the sidebar status dot).
+                    PulsingFill()
+                }
+            }
             // The "working" loading bar along the bottom edge while the agent is
             // mid-turn. Conditionally inserted so its sweep re-arms each time.
-            .overlay(alignment: .bottom) { if isWorking { WorkingBar() } }
+            .overlay(alignment: .bottom) { if isWorking && !isBursting { WorkingBar() } }
             .overlay(
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .strokeBorder(stroke, lineWidth: isActive ? 1.6 : 1)
+                    .strokeBorder(isBursting ? CHM.Color.alert : stroke,
+                                  lineWidth: (isBursting || isActive) ? 1.6 : 1)
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -246,7 +262,8 @@ private struct MiniPaneCell: View {
     private var tooltip: String {
         let name = pane.conversation.agent.displayName
         let room = pane.conversation.roomName
-        let state = isAwaiting ? "waiting for you" : (isWorking ? "working…" : "idle")
+        let state = isBursting ? "usage limit reached (burst)"
+            : (isAwaiting ? "waiting for you" : (isWorking ? "working…" : "idle"))
         return "\(name) · \(room) — \(state)\nClick to jump here"
     }
 }
@@ -293,6 +310,39 @@ private struct PulsingFill: View {
             .opacity(on ? 0.9 : 0.4)
             .animation(reduceMotion ? nil : CHM.Motion.breathe, value: on)
             .onAppear { on = true }
+    }
+}
+
+/// Loud red banner at the top of the Sessions pane when an agent type has hit
+/// its account usage limit ("CODEX BURST"). One row per bursting agent.
+private struct BurstBanner: View {
+    let agents: Set<AgentKind>
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ForEach(agents.sorted { $0.rawValue < $1.rawValue }, id: \.self) { agent in
+                HStack(spacing: 7) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .font(.system(size: 13))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("\(BurstDetector.label(for: agent)) BURST")
+                            .font(.system(size: 12, weight: .heavy))
+                        Text("usage limit reached")
+                            .font(CHM.Font.caption)
+                            .opacity(0.9)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, CHM.Space.sm)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                        .fill(CHM.Color.alert)
+                )
+            }
+        }
     }
 }
 
