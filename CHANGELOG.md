@@ -2,6 +2,70 @@
 
 All notable changes to Cherminal. Newest first.
 
+## [Unreleased] — "Persistent sessions & live fleet awareness" (2026-06-09)
+
+Agents now survive across launches, and Cherminal surfaces what every one of
+them is doing at a glance — a status minimap, finish alerts, and per-room git —
+all observe-externally (no hooks, no injection).
+
+### Added
+- **Persistent sessions (`dtach`).** Agents run under a bundled `dtach`, so they
+  survive app quit/relaunch and pane close: closing an agent pane *parks* it
+  (its master stays alive) and reopening reattaches the same master. The full
+  pane-grid layout restores on launch. The `dtach` binary is bundled into the app
+  (no Homebrew dependency; GPL source vendored). Live 1:1 *dtach-everything*
+  (wrap shells too) is behind `cherminal.persistentSessions` (default off).
+- **Pane grid.** Split a tab into an N-pane grid (up to 16), equal-split, re-fit
+  as panes are added/removed.
+- **Quick-look minimap (Sessions inspector tab).** Every open tab rendered as a
+  small grid mirroring its real pane layout; each cell pulses by live state —
+  **blue = done / your turn**, **sweeping bar = working**, ring = active pane —
+  click a cell to jump there. A compact **Parked** strip reattaches closed agents.
+- **Finish alerts.** macOS notification + Dock badge the moment an agent finishes
+  in a pane you're *not* watching (tap to jump); shown even while the app is
+  frontmost, suppressed for the pane on screen.
+- **⌘⇧J — Jump to Next Waiting Agent**, cycling focus across all tabs/panes.
+- **Agent "burst" detection.** When an agent hits its account usage limit, its
+  panes go red (**"CODEX BURST"**) and the Details tab shows the limit banner —
+  read from the pane's visible terminal text (codex; claude pending its exact
+  wording).
+- **Live git state per room** in the Details tab — branch (or short SHA), ahead/
+  behind vs upstream, ±diff vs HEAD, and a changed-files list. Read-only `git`
+  with `--no-optional-locks`; shows for any conversation (agent or shell).
+- **Usage-limit meters (5h / Weekly)** in the Details tab from the OAuth usage
+  endpoint, with reset countdowns.
+
+### Fixed
+- **Pane clicks landed on the wrong pane** ("click top-right, focus bottom-right").
+  The surface's window-level mouse-down monitor hit-tested in the contentView's
+  own (flipped SwiftUI hosting) coordinate space, inverting Y. Pass the window
+  point straight to `hitTest`; focus now resolves on mouse-down via the surface's
+  own pixel-accurate AppKit hit-test.
+- **Resumed agents were never detected as live** — so the minimap / your-turn
+  lights / alerts didn't fire for them. macOS `pgrep` can't see the daemonized
+  `dtach` master, and the surface's foreground pid is the `login`/dtach-client
+  wrapper (uninspectable). Resolve the master via `lsof` on the socket → the real
+  agent process.
+- **Codex usage/turn detection read a dead file.** Codex `resume` forks a new
+  rollout; the Details gauge/tokens/limits and done/working state now follow the
+  file codex is actually writing (found via `lsof`), not the frozen registry one.
+- **Usage-limit section no longer flickers out** on a transient empty read
+  (carries forward the last-known windows).
+- **Multi-line paste into agent TUIs** — bundle the `xterm-ghostty` terminfo and
+  set `GHOSTTY_RESOURCES_DIR`, restoring bracketed paste (was falling back to
+  `TERM=xterm-256color`).
+
+### Changed — UI
+- **Right inspector is now Details | Sessions.** Details = context gauge / tokens
+  / 5h+Weekly limits / ports footer / git + pin glyph; Sessions = the quick-look
+  minimap + parked-agent reattach strip. (Replaces the single Context surface.)
+- Removed the spawned sub-agent ("Clawd pets") tiles.
+
+### Performance
+- Instant pane focus — resolves on mouse-down (no drag-arbitration deferral).
+- Ambient polls (ports, context/usage, live-session reconcile, sub-agent scan)
+  pause while the app is backgrounded and catch up on return.
+
 ## [Unreleased] — "Complete Overhaul" (2026-05-30)
 
 A deep audit + bug-hunt + UI pass: two multi-agent audits and a bug-swarm,
