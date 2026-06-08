@@ -17,6 +17,8 @@ struct ContextWatchPane: View {
     @State private var usage: ConversationUsage?
     @State private var showTokenDetails = false
     @State private var portsExpanded = false
+    @State private var gitStatus: GitStatus?
+    @State private var showGitDetails = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,6 +38,7 @@ struct ContextWatchPane: View {
                             gaugeSection(usage)
                             tokensSection(usage)
                         }
+                        if let gitStatus { gitSection(gitStatus) }
                         sessionSection(convo)
                     }
                     .padding(CHM.Space.xl)
@@ -89,6 +92,24 @@ struct ContextWatchPane: View {
                     if let parsed { usage = parsed }
                 }
                 try? await Task.sleep(for: .seconds(8))
+            }
+        }
+        // Live git state for the room (any conversation — agent or shell). Keyed
+        // on the room path so it doesn't re-fetch when switching conversations
+        // within the same room. Read-only `git`, paused while backgrounded.
+        .task(id: conversation?.roomPath.path) {
+            gitStatus = nil
+            showGitDetails = false
+            guard let room = conversation?.roomPath else { return }
+            while !Task.isCancelled {
+                if NSApp.isActive {
+                    let status = await Task.detached(priority: .utility) {
+                        GitStatusReader.read(roomPath: room)
+                    }.value
+                    if Task.isCancelled { break }
+                    gitStatus = status
+                }
+                try? await Task.sleep(for: .seconds(6))
             }
         }
     }
@@ -252,6 +273,80 @@ struct ContextWatchPane: View {
             Text(formatTokens(value)).font(CHM.Font.monoSmall).foregroundStyle(.primary)
         }
     }
+
+    // MARK: - Working tree (live git state per room)
+
+    @ViewBuilder private func gitSection(_ g: GitStatus) -> some View {
+        section("Working tree") {
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                HStack(spacing: 6) {
+                    Image(systemName: g.detached ? "point.3.connected.trianglepath.dotted" : "arrow.triangle.branch")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Text(g.branch.isEmpty ? "—" : g.branch)
+                        .font(CHM.Font.captionEmphasis)
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if g.hasUpstream {
+                        if g.ahead > 0 { aheadBehind("arrow.up", g.ahead) }
+                        if g.behind > 0 { aheadBehind("arrow.down", g.behind) }
+                    }
+                    Spacer(minLength: 0)
+                }
+                if g.isClean {
+                    Text("clean").font(CHM.Font.caption).foregroundStyle(.tertiary)
+                } else {
+                    HStack(spacing: 8) {
+                        Text("\(g.changedCount) file\(g.changedCount == 1 ? "" : "s")")
+                            .foregroundStyle(.secondary)
+                        if g.insertions > 0 {
+                            Text("+\(g.insertions)").foregroundStyle(Self.gitAdd)
+                        }
+                        if g.deletions > 0 {
+                            Text("−\(g.deletions)").foregroundStyle(CHM.Color.alert)
+                        }
+                    }
+                    .font(CHM.Font.caption)
+                    .monospacedDigit()
+                    if !g.changedPaths.isEmpty {
+                        DisclosureGroup(isExpanded: $showGitDetails) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(g.changedPaths, id: \.self) { path in
+                                    Text(path)
+                                        .font(CHM.Font.monoSmall)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                if g.changedCount > g.changedPaths.count {
+                                    Text("+\(g.changedCount - g.changedPaths.count) more")
+                                        .font(CHM.Font.caption)
+                                        .foregroundStyle(.tertiary)
+                                }
+                            }
+                            .padding(.top, CHM.Space.xs)
+                        } label: {
+                            Text("Changed files").font(CHM.Font.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func aheadBehind(_ icon: String, _ n: Int) -> some View {
+        HStack(spacing: 1) {
+            Image(systemName: icon).font(.system(size: 8, weight: .bold))
+            Text("\(n)").font(CHM.Font.caption).monospacedDigit()
+        }
+        .foregroundStyle(.tertiary)
+    }
+
+    /// Muted green for added lines (the design system has no green; +/− reads
+    /// best in conventional colors, kept desaturated to match the calm palette).
+    private static let gitAdd = Color(red: 0.38, green: 0.72, blue: 0.47)
 
     // MARK: - Session (identity + room, merged)
 
