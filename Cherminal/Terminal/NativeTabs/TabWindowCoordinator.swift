@@ -28,7 +28,8 @@ final class TabWindowCoordinator: ObservableObject {
     private var controllers: [TerminalTabWindowController] = [] {
         didSet {
             tabCount = controllers.count
-            schedulePersist()   // keep the restore snapshot current on every open/close
+            rebuildTabOverviews()   // keep the quick-look minimap's tab list current
+            schedulePersist()       // keep the restore snapshot current on every open/close
         }
     }
 
@@ -62,6 +63,23 @@ final class TabWindowCoordinator: ObservableObject {
             persistDetached()     // survive relaunch (reconciled against live masters)
         }
     }
+
+    /// One open tab, surfaced to the quick-look minimap (Sessions inspector tab).
+    /// `workspace` is the live ObservableObject — the minimap observes it directly
+    /// for pane/layout/activePaneID changes, so this list only needs rebuilding
+    /// when a tab opens or closes (see `controllers.didSet`). Order = tab order.
+    struct TabOverview: Identifiable {
+        let id: ObjectIdentifier      // the owning controller's identity
+        let title: String
+        let workspace: Workspace
+    }
+
+    /// Published snapshot of the open tabs, for the quick-look minimap.
+    @Published private(set) var tabOverviews: [TabOverview] = []
+
+    /// The frontmost tab — drives the "you are here" mark in the minimap. Updated
+    /// as windows become key; nil until the first tab takes key.
+    @Published private(set) var frontmostTabID: ObjectIdentifier?
 
     /// Set the instant the app starts quitting. Closing a window during normal
     /// use detaches its agents to the tray; closing windows during *termination*
@@ -142,6 +160,8 @@ final class TabWindowCoordinator: ObservableObject {
     private func clearAwaiting(forWindow window: NSWindow?) {
         guard let window,
               let controller = controllers.first(where: { $0.window === window }) else { return }
+        let oid = ObjectIdentifier(controller)
+        if frontmostTabID != oid { frontmostTabID = oid }   // "you are here" in the minimap
         let id = controller.conversation.id
         awaitingTurnIDs.remove(id)
         seenTurnSize[id] = Self.fileSize(controller.conversation.sessionFile)
@@ -369,13 +389,15 @@ final class TabWindowCoordinator: ObservableObject {
         if let pane = ws.activePane { focusPane(pane, in: ws) }
     }
 
-    /// Activate a pane (on click or ⌘`). Sets the active-pane border AND moves
-    /// the AppKit first responder to the pane's surface — these must stay in
-    /// lockstep. The surface's own click-to-focus transfer is defeated in a grid:
-    /// it only fires when `window.contentView.hitTest` returns the surface, but
-    /// our SwiftUI overlays (contentShape/border/badge) sit above it, so the
-    /// hit-test returns a SwiftUI layer and the surface never takes focus. Moving
-    /// the responder here is what keeps typing going to the pane you clicked.
+    /// Activate a pane programmatically (⌘`, spawn, tab select, rail reattach).
+    /// Sets the active-pane border AND moves the AppKit first responder to the
+    /// pane's surface — these must stay in lockstep. Plain mouse clicks no longer
+    /// come through here: the surface takes first responder in its own mouseDown
+    /// (pixel-accurate, see SurfaceView.mouseDown) and the active pane follows via
+    /// .chmSurfaceDidBecomeFirstResponder → syncActivePane. (The window-level
+    /// click-to-focus monitor is defeated in a grid — our SwiftUI overlays win the
+    /// contentView hitTest so it never sees the surface — which is why mouseDown,
+    /// not that monitor, is the click path.)
     func focusPane(_ pane: Pane, in workspace: Workspace) {
         // Keep the @Published activePaneID write idempotent — the click
         // recognizer (mouse-down DragGesture) fires on every drag-change, and we
@@ -412,6 +434,25 @@ final class TabWindowCoordinator: ObservableObject {
             }
             return
         }
+    }
+
+    /// Rebuild the quick-look minimap's tab snapshot from the live controllers.
+    /// Cheap; runs on every tab open/close. Per-tab pane/layout/active changes are
+    /// observed directly off each Workspace, so they don't trigger a rebuild.
+    private func rebuildTabOverviews() {
+        tabOverviews = controllers.map {
+            TabOverview(id: ObjectIdentifier($0), title: $0.conversation.roomName, workspace: $0.workspace)
+        }
+    }
+
+    /// Jump to a pane from the quick-look minimap: select its tab window and move
+    /// keyboard focus to the pane.
+    func reveal(_ pane: Pane) {
+        guard let controller = controllers.first(where: { c in
+            c.workspace.panes.contains { $0.id == pane.id }
+        }) else { return }
+        select(controller)
+        focusPane(pane, in: controller.workspace)
     }
 
     /// Open a bare shell tab. cwd defaults to the active tab's room, else $HOME.

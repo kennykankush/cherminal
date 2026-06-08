@@ -54,6 +54,7 @@ struct PaneCellView: View {
             if showBorder {
                 RoundedRectangle(cornerRadius: 4)
                     .strokeBorder(CHM.Color.accent.opacity(0.8), lineWidth: 2)
+                    .allowsHitTesting(false)   // decorative — never eat a focus click
             }
         }
         // Dim inactive panes so the focused one is unmistakable. Driven by the
@@ -65,15 +66,20 @@ struct PaneCellView: View {
             }
         }
         .contentShape(Rectangle())
-        // Activate on mouse-DOWN, not via a TapGesture that only resolves on
-        // mouse-up after drag arbitration — that deferral was the "click feels a
-        // touch slow", and a mis-classified tap used to leave keystrokes going to
-        // the previously-focused pane. minimumDistance 0 fires on first contact;
-        // simultaneousGesture so the terminal still gets the click for selection.
+        // Live panes focus via the surface's own AppKit mouseDown (pixel-accurate;
+        // see SurfaceView.mouseDown) — AppKit routes the click to the pane actually
+        // under the cursor, so it can't be mis-attributed to a sibling the way the
+        // SwiftUI per-cell DragGesture sometimes was ("clicked bottom-left, typed
+        // into top-left"). Only surface-less cells (spawning / suspended placeholder)
+        // still need this gesture, since there's no NSView to receive the click;
+        // `including: .subviews` disables it once a surface exists. We keep the
+        // modifier attached unconditionally (toggling only the mask) so the view's
+        // SwiftUI identity stays stable.
         .simultaneousGesture(
             DragGesture(minimumDistance: 0).onChanged { _ in
                 coordinator.focusPane(pane, in: workspace)
-            }
+            },
+            including: pane.surfaceView == nil ? .all : .subviews
         )
     }
 
@@ -85,6 +91,8 @@ struct PaneCellView: View {
                 .background(Capsule().fill((role.tint?.color ?? .secondary).opacity(0.16)))
                 .foregroundStyle(role.tint?.color ?? .secondary)
                 .padding(6)
+                .allowsHitTesting(false)   // label only — let the click reach the surface
+
         }
     }
 

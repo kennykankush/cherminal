@@ -1,22 +1,25 @@
 import SwiftUI
-import AppKit
 
-/// The right-hand inspector, now two-up: **Context** (the per-conversation
-/// gauge/limits readout) and **Sessions** (detached agents kept alive under
-/// their `dtach` masters — formerly the edge rail). A slim segmented header
-/// switches between them; the Sessions segment carries a count and a breathing
-/// dot when a parked agent needs you, so it's glanceable even from the Context
-/// tab.
+/// The right-hand inspector, two-up: **Details** (the per-conversation
+/// gauge/limits readout) and **Sessions** (a quick-look minimap of every open
+/// tab's pane grid). A slim segmented header switches between them; the Sessions
+/// segment carries a count + breathing dot when a pane needs you, so it stays
+/// glanceable even from the Details tab.
 struct InspectorPane: View {
     let conversation: Conversation?
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @AppStorage("cherminal.inspectorTab") private var tab: Tab = .context
-    @State private var spawnedAgents: [SpawnedAgent] = []
 
     enum Tab: String { case context, sessions }
 
-    private var parkedCount: Int { coordinator.detachedAgents.count }
-    private var needsYou: Bool { coordinator.detachedAgents.contains { $0.state == .attention } }
+    /// Open panes whose agent just finished a turn and are waiting on you — the
+    /// glance count on the Sessions segment.
+    private var awaitingCount: Int { coordinator.awaitingTurnIDs.count }
+    /// Anything that wants you: a done pane, or a parked agent flagged attention.
+    private var needsYou: Bool {
+        !coordinator.awaitingTurnIDs.isEmpty
+        || coordinator.detachedAgents.contains { $0.state == .attention }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,7 +27,7 @@ struct InspectorPane: View {
             Divider()
             switch tab {
             case .context:  ContextWatchPane(conversation: conversation)
-            case .sessions: SessionsPane(spawnedAgents: spawnedAgents)
+            case .sessions: SessionsPane()
             }
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
@@ -32,32 +35,12 @@ struct InspectorPane: View {
         // withAnimation transaction (so the swap would just snap). Scope the
         // animation to the value instead — same workaround as SidebarView/ModeToggle.
         .animation(CHM.Motion.appear, value: tab)
-        // Scan the active Claude session's spawned sub-agents here (always-present
-        // root, fires for both tabs) and hand them to SessionsPane. Hosting the
-        // scan on the conditionally-empty pets view never fired its .task.
-        .task(id: conversation?.id) {
-            spawnedAgents = []
-            guard let convo = conversation, convo.agent == .claudeCode else { return }
-            while !Task.isCancelled {
-                // Skip the directory scan while backgrounded (per-tab, runs in
-                // every open tab); refreshes on return. Interval relaxed 3s → 8s
-                // — sub-agent lists don't need second-level latency.
-                if NSApp.isActive {
-                    let scanned = await Task.detached(priority: .utility) {
-                        SpawnedAgentScanner.scan(for: convo)
-                    }.value
-                    if Task.isCancelled { break }
-                    if scanned != spawnedAgents { spawnedAgents = scanned }
-                }
-                try? await Task.sleep(for: .seconds(8))
-            }
-        }
     }
 
     private var header: some View {
         HStack(spacing: CHM.Space.xs) {
             segment("Details", .context, count: 0, alert: false)
-            segment("Sessions", .sessions, count: parkedCount, alert: needsYou)
+            segment("Sessions", .sessions, count: awaitingCount, alert: needsYou)
         }
         .padding(.horizontal, CHM.Space.md)
         .padding(.vertical, CHM.Space.sm)
@@ -92,33 +75,31 @@ struct InspectorPane: View {
     }
 }
 
-/// The Sessions tab: parked agents as a "minefield" — a wrapping grid of small
-/// tiles, each lit by state (breathing blue = needs you, amber = working, red =
-/// ended). Click a tile to reattach; right-click for more. Calm empty state
-/// when nothing's parked.
+/// The Sessions tab: a **quick-look minimap** of every open tab's pane grid.
+/// Each tab renders as a small grid mirroring its real layout; a cell pulses
+/// blue when that pane's agent finished a turn and is waiting on you ("done"),
+/// so you can watch many panes at once without switching tabs — click a cell to
+/// jump straight to it. A compact "Parked" strip sits below for reattaching
+/// agents you've closed (their dtach master is still alive).
 struct SessionsPane: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
-    /// Sub-agents the active Claude session has spawned (scanned by InspectorPane).
-    var spawnedAgents: [SpawnedAgent] = []
-
-    private let columns = [GridItem(.adaptive(minimum: 132, maximum: 220), spacing: CHM.Space.sm)]
 
     var body: some View {
-        if coordinator.detachedAgents.isEmpty && spawnedAgents.isEmpty {
+        let tabs = coordinator.tabOverviews
+        if tabs.isEmpty && coordinator.detachedAgents.isEmpty {
             emptyState
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: CHM.Space.lg) {
-                    if !coordinator.detachedAgents.isEmpty {
-                        LazyVGrid(columns: columns, spacing: CHM.Space.sm) {
-                            ForEach(coordinator.detachedAgents) { agent in
-                                MineCell(agent: agent)
+                    if !tabs.isEmpty {
+                        VStack(alignment: .leading, spacing: CHM.Space.md) {
+                            ForEach(tabs) { tab in
+                                TabMiniMap(tab: tab, isFrontmost: tab.id == coordinator.frontmostTabID)
                             }
                         }
                     }
-                    // The spawned-agent Clawd field, below the parked sessions.
-                    if !spawnedAgents.isEmpty {
-                        ClawdPetsView(agents: spawnedAgents)
+                    if !coordinator.detachedAgents.isEmpty {
+                        ParkedStrip()
                     }
                 }
                 .padding(CHM.Space.md)
@@ -128,12 +109,12 @@ struct SessionsPane: View {
 
     private var emptyState: some View {
         VStack(spacing: CHM.Space.sm) {
-            Image(systemName: "square.grid.3x3")
+            Image(systemName: "rectangle.grid.2x2")
                 .font(.system(size: CHM.Icon.emptyState, weight: .light))
                 .foregroundStyle(.tertiary)
-            Text("No parked sessions")
+            Text("No open panes")
                 .font(CHM.Font.bodyEmphasis).foregroundStyle(.secondary)
-            Text("Close an agent (⌘⇧W) to keep it running here in the background.")
+            Text("Open a conversation to see it light up here when it finishes.")
                 .font(CHM.Font.caption).foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
         }
@@ -142,44 +123,190 @@ struct SessionsPane: View {
     }
 }
 
-/// One tile in the minefield: a small card with the agent's logo (Claude /
-/// Codex), the room title, and a status dot. Click reattaches; right-click for
-/// reattach-as-tab / kill. Tooltip carries the agent + state + preview.
-private struct MineCell: View {
+/// One tab in the quick-look: its title + a mini grid that mirrors the tab's
+/// pane layout. Observes the live `Workspace`, so it tracks splits and the
+/// active pane in real time.
+private struct TabMiniMap: View {
+    @EnvironmentObject private var coordinator: TabWindowCoordinator
+    let tab: TabWindowCoordinator.TabOverview
+    let isFrontmost: Bool
+    @ObservedObject private var workspace: Workspace
+
+    init(tab: TabWindowCoordinator.TabOverview, isFrontmost: Bool) {
+        self.tab = tab
+        self.isFrontmost = isFrontmost
+        self._workspace = ObservedObject(wrappedValue: tab.workspace)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                if isFrontmost {
+                    Circle().fill(CHM.Color.accent).frame(width: 5, height: 5)
+                        .help("Current tab")
+                }
+                Text(tab.title.isEmpty ? "Untitled" : tab.title)
+                    .font(CHM.Font.captionEmphasis)
+                    .foregroundStyle(isFrontmost ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture { if let p = workspace.activePane { coordinator.reveal(p) } }
+            grid
+        }
+    }
+
+    private var grid: some View {
+        let layout = workspace.layout
+        let rows = max(1, layout.rows)
+        let cols = max(1, layout.cols)
+        // Index mapping mirrors TerminalGridView exactly: pane = row*cols + col.
+        return VStack(spacing: 3) {
+            ForEach(0..<rows, id: \.self) { row in
+                HStack(spacing: 3) {
+                    ForEach(0..<cols, id: \.self) { col in
+                        let index = row * cols + col
+                        if index < workspace.panes.count {
+                            MiniPaneCell(
+                                pane: workspace.panes[index],
+                                isActive: workspace.panes[index].id == workspace.activePaneID
+                            )
+                        } else {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(Color.clear)
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+                .frame(height: rowHeight(rows))
+            }
+        }
+    }
+
+    /// Shrink rows as the grid grows so a 4×4 doesn't dominate the inspector.
+    private func rowHeight(_ rows: Int) -> CGFloat {
+        switch rows {
+        case 1:  return 34
+        case 2:  return 28
+        case 3:  return 22
+        default: return 18
+        }
+    }
+}
+
+/// One pane in the minimap. Pulses blue when its agent finished a turn and is
+/// waiting on you ("done"); an accent ring marks the tab's active pane; a faint
+/// accent fill = live and working; a bare outline = idle. Click to jump there.
+private struct MiniPaneCell: View {
+    @EnvironmentObject private var coordinator: TabWindowCoordinator
+    @ObservedObject var pane: Pane
+    let isActive: Bool
+    @State private var hovering = false
+
+    private var isAwaiting: Bool { coordinator.awaitingTurnIDs.contains(pane.conversation.id) }
+    private var isLive: Bool { coordinator.liveConversationIDs.contains(pane.conversation.id) }
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(baseFill)
+            // The "done" pulse, layered over the base so non-awaiting cells stay
+            // solid. Conditionally inserted → its @State resets each awaiting
+            // cycle, so the repeatForever breathe re-arms every time (same trick
+            // as the sidebar status dot).
+            .overlay { if isAwaiting { PulsingFill() } }
+            .overlay(
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .strokeBorder(stroke, lineWidth: isActive ? 1.6 : 1)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .onTapGesture { coordinator.reveal(pane) }
+            .help(tooltip)
+    }
+
+    private var baseFill: SwiftUI.Color {
+        if hovering { return CHM.Color.hoverFill }
+        if isLive   { return CHM.Color.accent.opacity(0.14) }
+        return CHM.Color.fillSubtle
+    }
+
+    private var stroke: SwiftUI.Color {
+        if isActive   { return CHM.Color.accent.opacity(0.9) }
+        if isAwaiting { return CHM.Color.attention }
+        return CHM.Color.hairline
+    }
+
+    private var tooltip: String {
+        let name = pane.conversation.agent.displayName
+        let room = pane.conversation.roomName
+        let state = isAwaiting ? "waiting for you" : (isLive ? "running" : "idle")
+        return "\(name) · \(room) — \(state)\nClick to jump here"
+    }
+}
+
+/// The breathing blue fill for a "done" pane. Self-contained so its animation
+/// state resets cleanly each time it appears (see MiniPaneCell).
+private struct PulsingFill: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var on = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3, style: .continuous)
+            .fill(CHM.Color.attention)
+            .opacity(on ? 0.9 : 0.4)
+            .animation(reduceMotion ? nil : CHM.Motion.breathe, value: on)
+            .onAppear { on = true }
+    }
+}
+
+/// Compact strip of parked (detached) agents — panes you closed whose `dtach`
+/// master is still alive off-screen. Click a chip to reattach; right-click for
+/// reattach-as-tab / kill.
+private struct ParkedStrip: View {
+    @EnvironmentObject private var coordinator: TabWindowCoordinator
+    private let columns = [GridItem(.adaptive(minimum: 96, maximum: 180), spacing: CHM.Space.xs)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: CHM.Space.sm) {
+            Text("Parked")
+                .font(CHM.Font.eyebrow)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .tracking(0.6)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: CHM.Space.xs) {
+                ForEach(coordinator.detachedAgents) { agent in
+                    ParkedChip(agent: agent)
+                }
+            }
+        }
+    }
+}
+
+private struct ParkedChip: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     let agent: DetachedAgent
-    @State private var breathing = false
     @State private var hovering = false
 
     var body: some View {
-        Button {
-            coordinator.reattach(agent)
-        } label: {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    AgentBadge(agent: agent.conversation.agent, size: 18)
-                    Text(agent.conversation.agent.displayName)
-                        .font(CHM.Font.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 2)
-                    statusDot
-                }
+        Button { coordinator.reattach(agent) } label: {
+            HStack(spacing: 5) {
+                AgentBadge(agent: agent.conversation.agent, size: 14)
                 Text(title)
-                    .font(CHM.Font.captionEmphasis)
-                    .foregroundStyle(agent.state == .dead ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .font(CHM.Font.caption)
+                    .foregroundStyle(agent.state == .dead ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.secondary))
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+                dot
             }
-            .padding(CHM.Space.sm)
-            .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                Capsule()
                     .fill(hovering ? CHM.Color.hoverFill : CHM.Color.fillSubtle)
                     .overlay(
-                        RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
-                            .strokeBorder(tint.opacity(agent.state == .dead ? 0.22 : 0.45), lineWidth: 1)
+                        Capsule().strokeBorder(tint.opacity(agent.state == .dead ? 0.25 : 0.5), lineWidth: 1)
                     )
             )
             .opacity(agent.state == .dead ? 0.6 : 1)
@@ -195,24 +322,11 @@ private struct MineCell: View {
         }
     }
 
-    @ViewBuilder private var statusDot: some View {
+    @ViewBuilder private var dot: some View {
         switch agent.state {
-        case .attention:
-            ZStack {
-                Circle().fill(CHM.Color.attentionHalo).frame(width: 12, height: 12).blur(radius: 2.5)
-                Circle().fill(CHM.Color.attention).frame(width: 6, height: 6)
-            }
-            .opacity(breathing ? 1.0 : 0.8)
-            .animation(CHM.Motion.breathe, value: breathing)
-            .onAppear { breathing = true }
-        case .working:
-            Circle().fill(CHM.Color.accent)
-                .frame(width: 6, height: 6)
-                .opacity(breathing ? 1.0 : 0.5)
-                .animation(CHM.Motion.breathe, value: breathing)
-                .onAppear { breathing = true }
-        case .dead:
-            Circle().fill(CHM.Color.alert.opacity(0.55)).frame(width: 5, height: 5)
+        case .attention: Circle().fill(CHM.Color.attention).frame(width: 6, height: 6)
+        case .working:   Circle().fill(CHM.Color.accent).frame(width: 5, height: 5)
+        case .dead:      Circle().fill(CHM.Color.alert.opacity(0.55)).frame(width: 5, height: 5)
         }
     }
 
@@ -224,15 +338,9 @@ private struct MineCell: View {
         }
     }
 
-    /// The room is the clearest label for "what is this". Fall back to a preview
-    /// snippet, then the agent name, so a tile is never blank.
     private var title: String {
         let room = agent.conversation.roomName.trimmingCharacters(in: .whitespaces)
-        if !room.isEmpty { return room }
-        if let p = agent.conversation.previewText?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
-            return String(p.prefix(48))
-        }
-        return agent.conversation.agent.displayName
+        return room.isEmpty ? agent.conversation.agent.displayName : room
     }
 
     private var tooltip: String {
@@ -244,11 +352,7 @@ private struct MineCell: View {
         case .working:   stateWord = "working…"
         case .dead:      stateWord = "ended"
         }
-        var t = "\(name) · \(room) — \(stateWord)"
-        if let p = agent.conversation.previewText?.trimmingCharacters(in: .whitespacesAndNewlines), !p.isEmpty {
-            t += "\n\(String(p.prefix(120)))"
-        }
-        t += agent.state == .dead ? "\nClick to resume · right-click to clear" : "\nClick to reattach"
-        return t
+        return "\(name) · \(room) — \(stateWord)\n"
+            + (agent.state == .dead ? "Click to resume · right-click to clear" : "Click to reattach")
     }
 }

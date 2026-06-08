@@ -906,6 +906,32 @@ extension Ghostty {
 
         override func mouseDown(with event: NSEvent) {
             guard let surface = self.surface else { return }
+
+            // Pixel-accurate click-to-focus. AppKit dispatches this mouseDown to
+            // the surface actually under the cursor, so taking first responder
+            // here is the authoritative signal for which pane was clicked.
+            // becomeFirstResponder posts .chmSurfaceDidBecomeFirstResponder, and
+            // the coordinator flips the active pane to match — so typing always
+            // lands in the pane you clicked.
+            //
+            // We do this instead of the SwiftUI per-cell DragGesture that used to
+            // drive focus: that gesture intermittently mis-attributed a click to
+            // a sibling cell ("clicked bottom-left, typed into top-left"). The
+            // window-level local monitor's own focus transfer (localEventLeftMouseDown)
+            // can't help in our grid either — the SwiftUI overlays win the
+            // contentView hitTest, so it never sees `== self`. mouseDown does,
+            // because the event is still dispatched down to this NSView.
+            if let window, window.firstResponder !== self {
+                window.makeFirstResponder(self)   // → becomeFirstResponder stamps the recency ticket
+            } else {
+                // Already first responder: becomeFirstResponder won't fire, so
+                // stamp the recency ticket here. This records the deliberate
+                // re-click as the newest focus, so a pending spawn/tab retry
+                // (which yields to a newer ticket) can't steal focus from the
+                // pane the user just clicked.
+                focusAppliedSeq = Ghostty.nextFocusSeq()
+            }
+
             let mods = Ghostty.ghosttyMods(event.modifierFlags)
             ghostty_surface_mouse_button(surface, GHOSTTY_MOUSE_PRESS, GHOSTTY_MOUSE_LEFT, mods)
         }
