@@ -206,6 +206,8 @@ private struct MiniPaneCell: View {
 
     private var isAwaiting: Bool { coordinator.awaitingPaneIDs.contains(pane.conversation.id) }
     private var isLive: Bool { coordinator.liveConversationIDs.contains(pane.conversation.id) }
+    /// Agent running and mid-turn (live, not waiting on you) → show the loading bar.
+    private var isWorking: Bool { isLive && !isAwaiting }
 
     var body: some View {
         RoundedRectangle(cornerRadius: 3, style: .continuous)
@@ -215,6 +217,9 @@ private struct MiniPaneCell: View {
             // cycle, so the repeatForever breathe re-arms every time (same trick
             // as the sidebar status dot).
             .overlay { if isAwaiting { PulsingFill() } }
+            // The "working" loading bar along the bottom edge while the agent is
+            // mid-turn. Conditionally inserted so its sweep re-arms each time.
+            .overlay(alignment: .bottom) { if isWorking { WorkingBar() } }
             .overlay(
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .strokeBorder(stroke, lineWidth: isActive ? 1.6 : 1)
@@ -241,8 +246,38 @@ private struct MiniPaneCell: View {
     private var tooltip: String {
         let name = pane.conversation.agent.displayName
         let room = pane.conversation.roomName
-        let state = isAwaiting ? "waiting for you" : (isLive ? "running" : "idle")
+        let state = isAwaiting ? "waiting for you" : (isWorking ? "working…" : "idle")
         return "\(name) · \(room) — \(state)\nClick to jump here"
+    }
+}
+
+/// An indeterminate "working" sweep along a cell's bottom edge — shown while a
+/// pane's agent is mid-turn (live but not awaiting you). Self-contained so the
+/// sweep re-arms each time the cell enters the working state.
+private struct WorkingBar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animate = false
+
+    var body: some View {
+        if reduceMotion {
+            // No motion: a steady faint bar still reads as "working".
+            Capsule().fill(CHM.Color.accent.opacity(0.5))
+                .frame(height: 2.5)
+                .padding(.horizontal, 2)
+        } else {
+            GeometryReader { geo in
+                let w = geo.size.width
+                let seg = max(10, w * 0.4)
+                Capsule()
+                    .fill(CHM.Color.accent)
+                    .frame(width: seg, height: 2.5)
+                    .position(x: animate ? w - seg / 2 : seg / 2, y: 1.5)
+                    .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: animate)
+            }
+            .frame(height: 3)
+            .padding(.horizontal, 2)
+            .onAppear { animate = true }
+        }
     }
 }
 

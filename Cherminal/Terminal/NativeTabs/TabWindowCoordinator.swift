@@ -1244,15 +1244,19 @@ final class TabWindowCoordinator: ObservableObject {
             }
         }
 
-        // Off the main actor: resolve each pane's effective pid (a wrapped shell's
-        // inner foreground process — seeing THROUGH dtach — else the surface pid)
-        // and lsof them. ALL the pgrep/ps/lsof subprocess work happens here, never
-        // on @MainActor (keeps this 8s reconcile off the main thread).
+        // Off the main actor: resolve each pane's effective pid by seeing THROUGH
+        // dtach to the inner foreground process (the running agent), for AGENTS as
+        // well as shells — both are dtach-wrapped, and the surface's own foreground
+        // pid is the `login`/dtach-client wrapper, which lsof can't inspect (login
+        // is setuid root) so it never identifies the agent. innerForegroundPID
+        // resolves the master via lsof on the socket → its agent child. Fall back
+        // to the surface pid only for a genuinely unwrapped pane. ALL the
+        // ps/lsof subprocess work happens here, never on @MainActor.
         let (resolved, info) = await Task.detached(priority: .utility) {
             () -> ([(socketID: String, pid: Int32)], [Int32: LiveSessionLinker.ProcessInfo]) in
             var resolved: [(socketID: String, pid: Int32)] = []
             for r in refs {
-                if r.isShell, let inner = Dtach.innerForegroundPID(id: r.socketID) {
+                if let inner = Dtach.innerForegroundPID(id: r.socketID) {
                     resolved.append((socketID: r.socketID, pid: Int32(inner)))
                 } else if r.fg > 0 {
                     resolved.append((socketID: r.socketID, pid: r.fg))

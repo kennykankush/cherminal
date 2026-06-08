@@ -75,7 +75,7 @@ enum Dtach {
     static func isMasterAlive(id: String) -> Bool {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return false }
-        return !pgrepSocket(sock).isEmpty
+        return !socketHolderPIDs(sock).isEmpty
     }
 
     /// End a detached session for good: SIGTERM the master (its child exits,
@@ -84,11 +84,11 @@ enum Dtach {
     @discardableResult
     static func kill(id: String) -> Bool {
         let sock = socketPath(for: id)
-        // SIGTERM every process holding this socket — the master AND any attached
-        // client. `pgrep -f` matches both; killing only the first could hit the
-        // client and leave the master (and its child) running, orphaned once we
-        // unlink the socket below. Killing the master makes it SIGHUP its child.
-        let pids = pgrepSocket(sock)
+        // SIGTERM the process holding this socket open — the master. lsof reports
+        // the listener (the master), not connected clients; killing the master
+        // makes it SIGHUP its child (the agent), and any attached client follows
+        // when the master goes. Then we unlink the (now stale) socket below.
+        let pids = socketHolderPIDs(sock)
         for pid in pids { _ = Foundation.kill(pid, SIGTERM) }
         try? FileManager.default.removeItem(atPath: sock)
         return !pids.isEmpty
@@ -113,7 +113,7 @@ enum Dtach {
     static func masterPID(id: String) -> pid_t? {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return nil }
-        let matches = pgrepSocket(sock)
+        let matches = socketHolderPIDs(sock)
         guard !matches.isEmpty else { return nil }
         if matches.count == 1 { return matches[0] }
         // Master = the socket holder with a child (the inner shell). The client
@@ -129,7 +129,7 @@ enum Dtach {
     static func innerForegroundPID(id: String) -> pid_t? {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return nil }
-        let matches = pgrepSocket(sock)
+        let matches = socketHolderPIDs(sock)
         guard !matches.isEmpty else { return nil }
         // Find the master AND its inner-shell child in one pass over the socket
         // matches (master = the one WITH a child; the client is a childless relay),
@@ -188,14 +188,20 @@ enum Dtach {
 
     // MARK: - Internals
 
-    /// pid of the `dtach` master owning `socket`, via `pgrep -f` on the socket
-    /// path (unique per conversation, so no false matches). nil if none.
-    /// pids of every process with `socket` in argv — the `dtach` master plus any
-    /// attached client(s). Returns [] if pgrep finds none.
-    private static func pgrepSocket(_ socket: String) -> [pid_t] {
+    /// pid(s) of the `dtach` process(es) holding `socket` OPEN — the master.
+    ///
+    /// We use `lsof` on the socket FILE, NOT `pgrep -f <socketpath>`. A daemonized
+    /// dtach master (the one that actually runs the agent, reparented to launchd)
+    /// is INVISIBLE to pgrep on macOS — `pgrep -f` returns nothing for it on any
+    /// substring, and even `pgrep -x dtach` misses it — while `ps` and `lsof` both
+    /// see it fine. That blindness silently broke all see-through-dtach detection
+    /// (agents never marked live → "your turn" / minimap never lit). lsof reports
+    /// the listener (the master); connected clients don't hold the *named* socket
+    /// path open, so this returns the master cleanly. [] if none (stale socket).
+    private static func socketHolderPIDs(_ socket: String) -> [pid_t] {
         let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-f", socket]
+        p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        p.arguments = ["-t", socket]   // -t: terse, pids only
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
@@ -203,8 +209,6 @@ enum Dtach {
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         guard let out = String(data: data, encoding: .utf8) else { return [] }
-        // pgrep -f would match our own process only if Cherminal's argv contained
-        // the socket path — it doesn't — so every match is a dtach process.
         return out.split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
     }
