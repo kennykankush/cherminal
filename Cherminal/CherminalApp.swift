@@ -148,6 +148,10 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isRunningTests else { return .terminateNow }
         let coordinator = AppEnvironment.shared.coordinator
+        // Mark the decision in progress so a close-last-window deferred park
+        // doesn't race into the tray while the reopen prompt is up (cleared below
+        // on Cancel; beginTermination supersedes it on a real quit).
+        coordinator.terminationDecisionPending = true
 
         // Capture what's open now. persistSession keeps the last non-empty
         // snapshot if we're quitting from the placeholder (nothing open), so the
@@ -174,11 +178,14 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         if reply == .terminateNow {
             coordinator.beginTermination()
             clog("app", "clean termination (reopen=\(count) tabs, choice=\(coordinator.reopenChoice.rawValue))")
-        } else if coordinator.isEmpty {
-            // Quit cancelled, but this was a close-the-last-window quit so the
-            // window is already gone — reopen the tabs so we're not left running
-            // with no window (and nothing to click).
-            coordinator.restoreSession()
+        } else {
+            // Quit cancelled — allow close-time parking again (suppressed while
+            // the decision was pending), and if this was a close-the-last-window
+            // quit, reopen the tabs so we're not left running with no window.
+            coordinator.terminationDecisionPending = false
+            if coordinator.isEmpty {
+                coordinator.restoreSession()
+            }
         }
         return reply
     }

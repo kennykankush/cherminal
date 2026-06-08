@@ -48,6 +48,14 @@ enum Dtach {
         return BinaryResolver.shared.path(for: "dtach")
     }
 
+    /// Opt-in (`cherminal.persistentSessions`, default off): wrap EVERY pane —
+    /// plain shells/tmux/vim, not just resumed agents — under a dtach master, so
+    /// any process survives close/quit and reattaches live on reopen. Off keeps
+    /// today's behavior (only agents wrapped).
+    static var wrapAllPanes: Bool {
+        UserDefaults.standard.bool(forKey: "cherminal.persistentSessions")
+    }
+
     /// Wrap an inner shell command so it runs under a persistent master keyed
     /// to `id`. The inner line runs via `/bin/sh -c` *inside* the master so its
     /// `; exec $SHELL` fallback and any `${VAR}` expand there — keeping the
@@ -65,7 +73,7 @@ enum Dtach {
     static func isMasterAlive(id: String) -> Bool {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return false }
-        return pgrepSocket(sock) != nil
+        return !pgrepSocket(sock).isEmpty
     }
 
     /// End a detached session for good: SIGTERM the master (its child exits,
@@ -74,14 +82,14 @@ enum Dtach {
     @discardableResult
     static func kill(id: String) -> Bool {
         let sock = socketPath(for: id)
-        let killed: Bool
-        if let pid = pgrepSocket(sock) {
-            killed = Foundation.kill(pid, SIGTERM) == 0
-        } else {
-            killed = false
-        }
+        // SIGTERM every process holding this socket — the master AND any attached
+        // client. `pgrep -f` matches both; killing only the first could hit the
+        // client and leave the master (and its child) running, orphaned once we
+        // unlink the socket below. Killing the master makes it SIGHUP its child.
+        let pids = pgrepSocket(sock)
+        for pid in pids { _ = Foundation.kill(pid, SIGTERM) }
         try? FileManager.default.removeItem(atPath: sock)
-        return killed
+        return !pids.isEmpty
     }
 
     /// All conversation ids that currently have a socket file on disk (alive or
@@ -96,22 +104,23 @@ enum Dtach {
 
     /// pid of the `dtach` master owning `socket`, via `pgrep -f` on the socket
     /// path (unique per conversation, so no false matches). nil if none.
-    private static func pgrepSocket(_ socket: String) -> pid_t? {
+    /// pids of every process with `socket` in argv — the `dtach` master plus any
+    /// attached client(s). Returns [] if pgrep finds none.
+    private static func pgrepSocket(_ socket: String) -> [pid_t] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         p.arguments = ["-f", socket]
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
+        do { try p.run() } catch { return [] }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        guard let out = String(data: data, encoding: .utf8) else { return nil }
-        // pgrep -f matches our own helper too is not a concern here: this
-        // process is Cherminal, whose argv doesn't contain the socket path.
+        guard let out = String(data: data, encoding: .utf8) else { return [] }
+        // pgrep -f would match our own process only if Cherminal's argv contained
+        // the socket path — it doesn't — so every match is a dtach process.
         return out.split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
-            .first
     }
 
     /// POSIX single-quote: wrap in '…' and escape embedded quotes. Used for the

@@ -32,9 +32,24 @@ enum TerminalCommand {
             guard let id = safeSessionID(conversation.id) else { return nil }
             let bin = BinaryResolver.shared.path(for: "codex")
             return Dtach.wrap("\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)", id: id)
-        case .shell, .unknown:
-            // No command override → Ghostty spawns the user's default shell
-            // in `cfg.workingDirectory`.
+        case .shell:
+            // Default: no command override → Ghostty spawns the user's login
+            // shell in `cfg.workingDirectory`. Wrap it under dtach (socket keyed on
+            // the pane's stable conversation id) when persistent sessions are on
+            // (cold-start a survivable shell) OR when a master already exists for
+            // this id — so a shell wrapped while the pref was on still REATTACHES
+            // live (`dtach -A` is reattach-or-create) after the pref is toggled
+            // off, and on launch restore, instead of cold-starting a raw shell and
+            // orphaning the live master.
+            guard let id = safeSessionID(conversation.id),
+                  Dtach.wrapAllPanes || Dtach.isMasterAlive(id: id) else { return nil }
+            return Dtach.wrap("exec ${SHELL:-/bin/zsh} -il", id: id)
+        case .unknown:
+            // Unclassified fallback — keep it a plain raw shell (no override).
+            // Deliberately NOT dtach-wrapped/persisted: we can't classify or
+            // reliably reconstruct it on restore, so an ephemeral shell avoids a
+            // parked master with no tray cell or reattach path. (It therefore has
+            // no master, so detachToTray's liveness check never parks it.)
             return nil
         }
     }

@@ -70,6 +70,13 @@ final class TabWindowCoordinator: ObservableObject {
     private var isTerminating = false
     func beginTermination() { isTerminating = true }
 
+    /// Set while `applicationShouldTerminate` is deciding (the reopen prompt may
+    /// be up). Suppresses close-time parking so a just-closed last window's panes
+    /// aren't parked mid-decision — the quit flow owns them (restore on
+    /// cancel/reopen, reap on Don't-Reopen). Cleared on Cancel; superseded by
+    /// `isTerminating` on a real quit.
+    var terminationDecisionPending = false
+
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
     /// Drives the "your turn" light off FSEvents — the OS tells us the instant
@@ -240,6 +247,12 @@ final class TabWindowCoordinator: ObservableObject {
         // build; lifecycleState is the value actually set to mark it in-flight.
         guard pane.surfaceView == nil, pane.lifecycleState != .spawning else { return }
         pane.lifecycleState = .spawning
+        // NOTE: we do NOT clear the tray cell here synchronously — at launch a
+        // surface can spawn (restoreSession) BEFORE restoreDetachedAgents() loads
+        // the saved tray, and detachedAgents' didSet persists, so mutating the
+        // (still-empty) in-memory tray would clobber the saved parked sessions.
+        // The async block below clears it (guarded so an empty tray never
+        // persists), and parking is suppressed during a quit decision anyway.
         let conversation = pane.conversation
         Task.detached(priority: .userInitiated) {
             let config = TerminalCommand.surfaceConfig(for: conversation)
@@ -266,8 +279,13 @@ final class TabWindowCoordinator: ObservableObject {
                 // This conversation is back on screen — drop any rail cell for it
                 // (covers reattach from the sidebar / "Open as Pane", not just the
                 // rail's own click). The dtach socket is shared, so the surface
-                // reattaches the same master.
-                self.detachedAgents.removeAll { $0.id == conversation.id }
+                // reattaches the same master. Guard the mutation so a no-op never
+                // fires detachedAgents' persist didSet — at launch this can run
+                // before restoreDetachedAgents() loads the saved tray, and an empty
+                // persist would clobber the saved parked sessions.
+                if self.detachedAgents.contains(where: { $0.id == conversation.id }) {
+                    self.detachedAgents.removeAll { $0.id == conversation.id }
+                }
                 clog("tabs", "spawn surface ok id=\(conversation.id) pane=\(pane.id)")
                 // No cap: panes you open stay live (you split to *see* them).
                 // Each surface is mostly the shared GPU baseline; marginal cost
@@ -416,11 +434,34 @@ final class TabWindowCoordinator: ObservableObject {
     /// defer this off the surface-teardown runloop — see callers. Mutating the
     /// `@Published` tray + spawning tasks *during* a window/pane close (i.e.
     /// mid Metal-surface dealloc) is a libghostty fault risk; deferring avoids it.
+    /// Park a closed pane in the tray (master kept alive for one-click reattach).
+    /// Agents always park; a plain shell parks only when it's dtach-wrapped
+    /// (persistent sessions on) — an unwrapped shell has no surviving master, so
+    /// there's nothing to park (it just died on surface teardown, as today).
+    /// Parking is reversible and race-free: reattach (or restore, on a canceled
+    /// quit) removes the tray cell and reattaches the same live master — which is
+    /// why we park rather than reap on close.
     private func detachToTray(_ convo: Conversation) {
-        guard convo.agent == .claudeCode || convo.agent == .codex else { return }
+        // Don't park while a quit decision is pending (the close-last-window
+        // reopen prompt is up) or during termination — the quit flow owns these
+        // panes (restore on cancel/reopen, reap on Don't-Reopen). Parking here
+        // would race that decision and could spare a pane from the Don't-Reopen reap.
+        guard !isTerminating, !terminationDecisionPending else { return }
+        let isAgent = convo.agent == .claudeCode || convo.agent == .codex
+        // Park only if there's a live dtach master to keep. Agents always have
+        // one; a shell does only if it was dtach-wrapped at spawn — decided by
+        // ACTUAL socket liveness, not the current preference (the user may have
+        // toggled persistentSessions off after the pane spawned).
+        guard isAgent || Dtach.isMasterAlive(id: convo.id) else { return }
+        // Don't park a pane that's currently open — e.g. restored after a canceled
+        // quit before this deferred park ran. It would duplicate the live session
+        // as a tray cell while the open pane owns the master.
+        guard !controllers.contains(where: { c in
+            c.workspace.panes.contains { $0.base.id == convo.id || $0.conversation.id == convo.id }
+        }) else { return }
         guard !detachedAgents.contains(where: { $0.id == convo.id }) else { return }
         detachedAgents.append(DetachedAgent(conversation: convo))
-        clog("tabs", "detached agent \(convo.id) → tray")
+        clog("tabs", "detached \(convo.agent.rawValue) \(convo.id) → tray")
         refreshDetachedStates()
     }
 
@@ -466,6 +507,11 @@ final class TabWindowCoordinator: ObservableObject {
             var next: [String: DetachState] = [:]
             for a in agents {
                 if checkLiveness && !Dtach.isMasterAlive(id: a.id) { next[a.id] = .dead; continue }
+                // A parked shell has no agent session file to read — its state is
+                // purely master liveness (alive → working).
+                guard a.conversation.agent == .claudeCode || a.conversation.agent == .codex else {
+                    next[a.id] = .working; continue
+                }
                 let reading = TurnState.read(sessionFile: a.conversation.sessionFile, agent: a.conversation.agent)
                 next[a.id] = reading.awaitingUser ? .attention : .working
             }
@@ -747,6 +793,16 @@ final class TabWindowCoordinator: ObservableObject {
     func clearSavedSession() {
         UserDefaults.standard.removeObject(forKey: Self.lastSessionKey)
         UserDefaults.standard.removeObject(forKey: Self.lastWorkspacesKey)
+        // "Don't Reopen" abandons the whole session, so reap every dtach master
+        // EXCEPT those the tray intentionally keeps alive (parked agents survive,
+        // same as today). Sweeping by socket (not by open panes) covers both
+        // still-attached panes AND a just-closed last window whose controller is
+        // already gone by the time this runs on the close-last-window quit path.
+        // At launch this is harmlessly redundant with the launch sweep that follows.
+        let keep = Set(savedDetached().map { $0.conversationID })
+        for id in Dtach.knownSocketIDs() where !keep.contains(id) {
+            Dtach.kill(id: id)
+        }
     }
 
     // MARK: - Reopen-on-launch preference ("save windows"-style)
@@ -817,12 +873,32 @@ final class TabWindowCoordinator: ObservableObject {
         let saved = savedDetached()
         guard !saved.isEmpty else { return }
         var restored: [DetachedAgent] = []
-        for it in saved where it.agentRaw != AgentKind.shell.rawValue {
-            guard Dtach.isMasterAlive(id: it.conversationID),
-                  let convo = registry.conversation(id: it.conversationID) else { continue }
+        for it in saved {
+            guard Dtach.isMasterAlive(id: it.conversationID) else { continue }
+            // Skip ids already open as a pane (restoreSession ran first): one
+            // master must not be both a tab and a tray cell.
+            if controllers.contains(where: { c in
+                c.workspace.panes.contains { $0.base.id == it.conversationID || $0.conversation.id == it.conversationID }
+            }) { continue }
+            let convo: Conversation
+            if it.agentRaw == AgentKind.shell.rawValue {
+                // Synthetic shell — reconstruct from the persisted room + id (no
+                // registry entry exists for a shell).
+                convo = Conversation.shellConversation(
+                    cwd: URL(fileURLWithPath: it.roomPath), id: it.conversationID)
+            } else if let real = registry.conversation(id: it.conversationID) {
+                convo = real
+            } else {
+                continue
+            }
             restored.append(DetachedAgent(conversation: convo))
         }
-        if !restored.isEmpty { detachedAgents = restored }
+        // Always assign (even when empty) so the persisted tray reflects the
+        // FILTERED set — dead masters and already-open (skipped) ids are dropped
+        // from cherminal.detachedAgents. Otherwise a stale on-disk entry could
+        // later let clearSavedSession's keep-set spare an open pane's master from
+        // the Don't-Reopen reap. (Reads savedDetached() above first, so no self-clobber.)
+        detachedAgents = restored
         refreshDetachedStates()
     }
 
