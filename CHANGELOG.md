@@ -4,6 +4,20 @@ All notable changes to Cherminal. Newest first.
 
 ## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
 
+### Changed
+- **Sessions pane matured.** The minimap now follows the user's VISIBLE tab
+  order (drag-reordering tabs reorders it; it used to follow open order), each
+  tab row shows its ⌘n index + a proper frontmost/hover treatment, and both
+  the minimap and the parked strip sit under consistent section headers.
+  Right-click menus arrive: Jump Here / Close Pane on cells, Jump / Rename /
+  Close Tab on rows. The state indicators were rebuilt on deterministic
+  wall-clock phases (`CHM.Phase` + TimelineView): the working sweep is now a
+  calm one-directional linear shimmer and the "done" glow a slow luminance
+  breathe — the old `@State` + `repeatForever` versions restarted on every
+  reconcile re-render, which is exactly the darting back-and-forth glitch.
+  State flips crossfade (200ms) instead of popping. The sidebar's "your turn"
+  light got the same deterministic fix.
+
 ### Added
 - **Rename tabs.** Double-click a tab to edit its title inline (the vendored
   Ghostty tab-title editor, now wired up), or Tabs → Rename Tab (⌘⇧R; falls

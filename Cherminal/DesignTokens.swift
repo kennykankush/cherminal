@@ -98,6 +98,26 @@ enum CHM {
         static let pillSlide: Animation = .spring(response: 0.3, dampingFraction: 0.64)
         /// Slow, autoreversing "alive" pulse for the attention light — sub-blink,
         /// never an alert. Honor Reduce Motion at call sites.
+        /// PREFER `CHM.Phase` + TimelineView for ambient/looping indicators:
+        /// repeatForever animations restart whenever a re-render touches their
+        /// view (the minimap glitch), while wall-clock phases can't.
         static let breathe: Animation = .easeInOut(duration: 2.4).repeatForever(autoreverses: true)
+    }
+
+    /// Deterministic wall-clock phases for ambient looping motion (breathing
+    /// lights, sweeps). Drive these from a `TimelineView` — the phase derives
+    /// from the clock, so view re-renders can never reset, jump, or desync the
+    /// animation the way `@State` + `repeatForever` does.
+    enum Phase {
+        /// 0→1 sawtooth over `period` seconds (linear time, for sweeps — time
+        /// should feel linear; easing makes progress feel inconsistent).
+        static func ramp(_ date: Date, period: Double) -> Double {
+            let t = date.timeIntervalSinceReferenceDate
+            return (t.truncatingRemainder(dividingBy: period)) / period
+        }
+        /// Smooth 0→1→0 sine over `period` seconds (for breathing opacity).
+        static func breathe(_ date: Date, period: Double) -> Double {
+            0.5 + 0.5 * sin(ramp(date, period: period) * 2 * .pi)
+        }
     }
 }
