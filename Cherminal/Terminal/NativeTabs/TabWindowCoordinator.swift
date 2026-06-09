@@ -636,17 +636,24 @@ final class TabWindowCoordinator: ObservableObject {
     private var lastLivenessCheck = Date.distantPast
 
     /// Recompute each parked agent's cell state off the main thread — a cheap
-    /// JSONL tail read every time, master liveness (pgrep) at most every ~4s —
-    /// then publish any changes. Driven by the FSEvents callback + 8s reconcile.
+    /// JSONL tail read every time, master liveness (one shared ProcTable
+    /// snapshot, previously an lsof per agent) at most every ~4s — then publish
+    /// any changes. Driven by the FSEvents callback + 8s reconcile.
     private func refreshDetachedStates() {
         guard !detachedAgents.isEmpty, !detachedRefreshing else { return }
         detachedRefreshing = true
         let agents = detachedAgents
-        let checkLiveness = Date().timeIntervalSince(lastLivenessCheck) > 4
+        let wantLiveness = Date().timeIntervalSince(lastLivenessCheck) > 4
         Task.detached(priority: .utility) {
+            // A failed snapshot means "liveness unknown", never "dead" — a
+            // wedged lsof must not flip every parked agent's cell to dead.
+            let table = wantLiveness ? ProcTable.cached(socketDir: Dtach.directory) : nil
+            let checkedLiveness = table != nil
             var next: [String: DetachState] = [:]
             for a in agents {
-                if checkLiveness && !Dtach.isMasterAlive(id: a.id) { next[a.id] = .dead; continue }
+                if let table, !Dtach.isMasterAlive(id: a.id, table: table) {
+                    next[a.id] = .dead; continue
+                }
                 // A parked shell has no agent session file to read — its state is
                 // purely master liveness (alive → working).
                 guard a.conversation.agent == .claudeCode || a.conversation.agent == .codex else {
@@ -658,12 +665,12 @@ final class TabWindowCoordinator: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.detachedRefreshing = false
-                if checkLiveness { self.lastLivenessCheck = Date() }
+                if checkedLiveness { self.lastLivenessCheck = Date() }
                 let updated = self.detachedAgents.map { agent -> DetachedAgent in
                     guard let s = next[agent.id] else { return agent }
                     // Don't resurrect a known-dead cell from a stale file read on
-                    // a tick where we skipped the liveness check.
-                    let resolved: DetachState = (!checkLiveness && agent.state == .dead) ? .dead : s
+                    // a tick where liveness wasn't (successfully) checked.
+                    let resolved: DetachState = (!checkedLiveness && agent.state == .dead) ? .dead : s
                     guard resolved != agent.state else { return agent }
                     var copy = agent; copy.state = resolved; return copy
                 }
@@ -844,12 +851,14 @@ final class TabWindowCoordinator: ObservableObject {
     /// Synchronous per-pane live detection for the quit snapshot: a shell pane
     /// that just hand-launched `claude`/`codex` is captured as that agent even if
     /// the periodic reconcile hasn't adopted it yet (preserves the pre-grid
-    /// snapshot() guarantee). One blocking lsof of the open panes' pids — fine on
-    /// quit, same cost as the old snapshot().
+    /// snapshot() guarantee). One ProcTable capture + one batched lsof, every
+    /// probe watchdog-bounded — a wedged lsof can no longer hang the quit.
     private func detectLivePaneConversations() -> [ObjectIdentifier: Conversation] {
-        let pidToPane = foregroundPIDs()
+        let table = ProcTable.cached(socketDir: Dtach.directory)
+        let pidToPane = foregroundPIDs(table: table)
         guard !pidToPane.isEmpty else { return [:] }
-        let info = LiveSessionLinker.inspect(pids: Array(pidToPane.keys))
+        let info = LiveSessionLinker.inspect(pids: Array(pidToPane.keys),
+                                             argvByPID: table?.argv)
         var out: [ObjectIdentifier: Conversation] = [:]
         var adopted = Set<String>()   // mirror reconcileLiveSessions: one pane per convo
         for (pid, pane) in pidToPane where pane.base.agent == .shell {
@@ -1059,9 +1068,17 @@ final class TabWindowCoordinator: ObservableObject {
     func restoreDetachedAgents() {
         let saved = savedDetached()
         guard !saved.isEmpty else { return }
+        // One snapshot answers liveness for every saved agent (was an lsof
+        // each). If the snapshot failed, fall back to per-socket probes —
+        // restore must not silently drop parked agents on a wedged lsof.
+        let table = ProcTable.cached(socketDir: Dtach.directory)
+        func alive(_ id: String) -> Bool {
+            if let table { return Dtach.isMasterAlive(id: id, table: table) }
+            return Dtach.isMasterAlive(id: id)
+        }
         var restored: [DetachedAgent] = []
         for it in saved {
-            guard Dtach.isMasterAlive(id: it.conversationID) else { continue }
+            guard alive(it.conversationID) else { continue }
             // Skip ids already open as a pane (restoreSession ran first): one
             // master must not be both a tab and a tray cell.
             if controllers.contains(where: { c in
@@ -1337,22 +1354,31 @@ final class TabWindowCoordinator: ObservableObject {
         // dtach to the inner foreground process (the running agent), for AGENTS as
         // well as shells — both are dtach-wrapped, and the surface's own foreground
         // pid is the `login`/dtach-client wrapper, which lsof can't inspect (login
-        // is setuid root) so it never identifies the agent. innerForegroundPID
-        // resolves the master via lsof on the socket → its agent child. Fall back
-        // to the surface pid only for a genuinely unwrapped pane. ALL the
-        // ps/lsof subprocess work happens here, never on @MainActor.
-        let (resolved, info) = await Task.detached(priority: .utility) {
-            () -> ([(socketID: String, pid: Int32)], [Int32: LiveSessionLinker.ProcessInfo]) in
+        // is setuid root) so it never identifies the agent. One shared ProcTable
+        // snapshot (2 bounded spawns, TTL-cached across reconcile/ports/tray)
+        // answers every per-pane question — previously this loop spawned
+        // lsof+pgrep+ps PER PANE every tick. Fall back to the surface pid only
+        // for a genuinely unwrapped pane. ALL subprocess work happens here,
+        // never on @MainActor.
+        let probed = await Task.detached(priority: .utility) {
+            () -> ([(socketID: String, pid: Int32)], [Int32: LiveSessionLinker.ProcessInfo])? in
+            // Snapshot failed (lsof/ps wedged → watchdog killed it): skip this
+            // tick and keep the previous live state — "unknown" must never be
+            // read as "everything exited".
+            guard let table = ProcTable.cached(socketDir: Dtach.directory) else { return nil }
             var resolved: [(socketID: String, pid: Int32)] = []
             for r in refs {
-                if let inner = Dtach.innerForegroundPID(id: r.socketID) {
+                if let inner = Dtach.innerForegroundPID(id: r.socketID, table: table) {
                     resolved.append((socketID: r.socketID, pid: Int32(inner)))
                 } else if r.fg > 0 {
                     resolved.append((socketID: r.socketID, pid: r.fg))
                 }
             }
-            return (resolved, LiveSessionLinker.inspect(pids: resolved.map { $0.pid }))
+            let info = LiveSessionLinker.inspect(pids: resolved.map { $0.pid },
+                                                 argvByPID: table.argv)
+            return (resolved, info)
         }.value
+        guard let (resolved, info) = probed else { return }
 
         // Back on main: map each effective pid to its still-open pane, then adopt.
         // Keying by the stable socket id (base.id) sidesteps the pid-reuse hazard
@@ -1433,8 +1459,11 @@ final class TabWindowCoordinator: ObservableObject {
         return c.hasPrefix("claude") || c.hasPrefix("codex") || c.hasPrefix("dtach")
     }
 
-    /// Every live pane across every window, keyed by foreground pid.
-    private func foregroundPIDs() -> [Int32: Pane] {
+    /// Every live pane across every window, keyed by foreground pid. Resolves
+    /// wrapped shells through dtach via the supplied snapshot (no per-pane
+    /// subprocess); when the snapshot is unavailable it falls back to the
+    /// single-socket probe (bounded by the subprocess watchdog).
+    private func foregroundPIDs(table: ProcTable?) -> [Int32: Pane] {
         var out: [Int32: Pane] = [:]
         for c in controllers {
             for pane in c.workspace.panes {
@@ -1444,8 +1473,15 @@ final class TabWindowCoordinator: ObservableObject {
                 // through dtach to the inner foreground for adoption. Agent panes
                 // keep the surface pid — their live signal already handles the
                 // dtach client (agentRunning matches the "dtach" command).
+                let inner: pid_t?
+                if pane.base.agent == .shell {
+                    inner = table.map { Dtach.innerForegroundPID(id: pane.base.id, table: $0) }
+                        ?? Dtach.innerForegroundPID(id: pane.base.id)
+                } else {
+                    inner = nil
+                }
                 let pid: Int32
-                if pane.base.agent == .shell, let inner = Dtach.innerForegroundPID(id: pane.base.id) {
+                if let inner {
                     pid = Int32(inner)
                 } else {
                     let fg = ghostty_surface_foreground_pid(surface)
