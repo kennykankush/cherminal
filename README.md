@@ -1,5 +1,7 @@
 # Cherminal
 
+[![CI](https://github.com/kennykankush/cherminal/actions/workflows/ci.yml/badge.svg)](https://github.com/kennykankush/cherminal/actions/workflows/ci.yml)
+
 > **chat + terminal** — the room you enter to see every AI conversation across your `~/dev` rooms, and jump back into any one.
 
 Cherminal is a personal macOS app: a calm, room-driven manager for living with CLI AI agents (Claude Code, Codex). It's the ChatGPT/Claude three-pane layout retargeted at the terminal — a **conversations rail** on the left, a real **Ghostty terminal grid** in the middle, and a **context + live-fleet inspector** on the right (usage, git, and a status minimap).

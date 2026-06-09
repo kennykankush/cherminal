@@ -1,0 +1,57 @@
+name: CI
+
+# Build + full test suite on every push to main and every PR. The suite is the
+# regression net: ledger/attention/merge laws, parsers over real-shaped
+# fixtures, the subprocess watchdog, and live integration probes (a real Unix
+# socket through the lsof pipeline; FSEvents through the watcher).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test (arm64)
+    # Apple Silicon image — the vendored libghostty is arm64-only, and the
+    # app's deployment target (macOS 26) needs the newest toolchain.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Build & test
+        run: |
+          set -o pipefail
+          xcodebuild -project Cherminal.xcodeproj -scheme Cherminal \
+            -configuration Debug -derivedDataPath build \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee xcodebuild.log
+
+      - name: Test summary
+        if: always()
+        run: grep -E "✔ Test run|✘|TEST (SUCCEEDED|FAILED)" xcodebuild.log | tail -20 || true
+
+      - name: Upload full log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+          retention-days: 7
