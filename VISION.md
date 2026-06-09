@@ -106,9 +106,15 @@ If a feature you're tempted to add isn't about conversations, don't add it.
 
 ---
 
-## Build Direction — Decision Pending
+## Build Direction — DECIDED: Option B (2026-05)
 
-Three options on the table. Pick before any code:
+**Cherminal is option B**: a native SwiftUI macOS app hosting libghostty
+(vendored as `GhosttyKit.xcframework`), native window tabs, three-pane shell.
+The warning attached to B below — "full discipline burden on builder to never
+let it grow" — is the live constraint; the non-goals wall above and the
+2026-06 foundation pass (ConversationLedger, AppPhase, ProcTable, the
+observe-externally probes) are how that discipline is enforced structurally.
+The original three options are preserved for the record:
 
 ### A. Pure Ghostty splits + tiny TUI daemon  *(most disciplined)*
 

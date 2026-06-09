@@ -113,7 +113,6 @@ struct ClaudeSessionScanner {
             roomPath: roomPath,
             firstTimestamp: summary.firstTimestamp,
             lastTimestamp: lastActivity,
-            messageCount: summary.userMessageCount,
             previewText: preview,
             continuedFromSessionID: detectContinuedFrom(file: candidate.file, selfID: id),
             continuationScanned: true
@@ -180,9 +179,7 @@ extension Conversation {
             sessionFile: sessionFile,
             firstMessageAt: persisted.firstTimestamp,
             lastActivityAt: persisted.lastTimestamp,
-            messageCount: persisted.messageCount,
             previewText: persisted.previewText,
-            state: .dormant,
             continuedFromID: persisted.continuedFromSessionID
         )
     }

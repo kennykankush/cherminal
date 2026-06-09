@@ -12,8 +12,7 @@ struct ConversationLedgerTests {
     private func convo(_ id: String, agent: AgentKind = .claudeCode, room: String = "/Users/x/dev/room") -> Conversation {
         Conversation(id: id, agent: agent, roomPath: URL(fileURLWithPath: room),
                      sessionFile: URL(fileURLWithPath: room),
-                     firstMessageAt: nil, lastActivityAt: .now,
-                     messageCount: 0, previewText: nil, state: .live)
+                     firstMessageAt: nil, lastActivityAt: .now, previewText: nil)
     }
 
     private func shellFacts(_ paneID: UUID, baseID: String, effective: Conversation? = nil) -> ConversationLedger.PaneFacts {
@@ -33,8 +32,7 @@ struct ConversationLedgerTests {
             n += 1
             return Conversation(id: "fresh-\(n)", agent: .shell, roomPath: url,
                                 sessionFile: url, firstMessageAt: nil,
-                                lastActivityAt: .now, messageCount: 0,
-                                previewText: nil, state: .live)
+                                lastActivityAt: .now, previewText: nil)
         }
         return (make, { n })
     }

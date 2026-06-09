@@ -22,6 +22,18 @@ struct ContextWatchPane: View {
     @State private var showGitDetails = false
     @State private var nameDraft = ""
     @State private var noteDraft = ""
+    /// Live usage accumulator per conversation id, held OUTSIDE the poll task
+    /// so a visibility restart (tab switch) resumes folding deltas instead of
+    /// re-ingesting the whole session file.
+    @State private var accumulators: [String: ClaudeUsageAccumulator] = [:]
+    /// Whether this window is actually on screen. Every native tab hosts its
+    /// own inspector, and these poll loops used to run for EVERY open tab —
+    /// the per-tab multiplication was the heaviest standing cost at high tab
+    /// counts. `.inactive` = our window is hidden (a deselected native tab);
+    /// the task ids below include this so a hidden tab's loops simply end and
+    /// restart (with an immediate refresh) when the tab is selected again.
+    @Environment(\.controlActiveState) private var controlActiveState
+    private var windowVisible: Bool { controlActiveState != .inactive }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,22 +72,35 @@ struct ContextWatchPane: View {
             nameDraft = l.name
             noteDraft = l.note
         }
-        // Live-refresh usage for the active conversation. Claude folds in
-        // append-only deltas via the accumulator (which now survives for the
-        // conversation's lifetime — no tab toggle tears it down); Codex re-reads
-        // its tail. Fully local — reads the session JSONL only.
-        .task(id: conversation?.id) {
+        // Reset per-conversation readouts when the SELECTION changes (not on a
+        // visibility flip, which would blank the gauge on every tab switch).
+        .onChange(of: conversation?.id) {
             usage = nil
-            showTokenDetails = false   // per-conversation; don't carry across switches
-            guard let convo = conversation,
+            showTokenDetails = false
+            accumulators = [:]
+        }
+        // Live-refresh usage for the active conversation. Claude folds in
+        // append-only deltas via the accumulator (held in @State so a tab
+        // switch resumes instead of re-ingesting); Codex re-reads its tail.
+        // Fully local — reads the session JSONL only. The loop exists ONLY
+        // while this window is visible (id includes windowVisible): hidden
+        // tabs cost nothing, and selecting a tab restarts the loop with an
+        // immediate refresh.
+        .task(id: "\(conversation?.id ?? "none")-\(windowVisible)") {
+            guard windowVisible,
+                  let convo = conversation,
                   convo.agent == .claudeCode || convo.agent == .codex else { return }
             let agent = convo.agent
-            let accumulator = ClaudeUsageAccumulator()
+            let accumulator: ClaudeUsageAccumulator
+            if let existing = accumulators[convo.id] {
+                accumulator = existing
+            } else {
+                accumulator = ClaudeUsageAccumulator()
+                accumulators = [convo.id: accumulator]   // keep only the active one
+            }
             while !Task.isCancelled {
-                // Only refresh while the app is active. A backgrounded app's
-                // inspector isn't on screen, so skip the file parse + usage API
-                // call — and this loop runs per-tab, so it's multiplied across
-                // every open tab. Catches up within 8s of coming back.
+                // Also pause while the whole app is backgrounded — nothing on
+                // screen needs the file parse + usage API call.
                 if NSApp.isActive {
                     // Codex `resume` forks a new rollout file, so read the live one
                     // the agent is actually writing (else the gauge/tokens/limits go
@@ -105,13 +130,15 @@ struct ContextWatchPane: View {
                 try? await Task.sleep(for: .seconds(8))
             }
         }
-        // Live git state for the room (any conversation — agent or shell). Keyed
-        // on the room path so it doesn't re-fetch when switching conversations
-        // within the same room. Read-only `git`, paused while backgrounded.
-        .task(id: conversation?.roomPath.path) {
+        // Live git state for the room (any conversation — agent or shell).
+        // Reset only when the ROOM changes; the poll loop, like the usage one,
+        // exists only while this window is visible.
+        .onChange(of: conversation?.roomPath.path) {
             gitStatus = nil
             showGitDetails = false
-            guard let room = conversation?.roomPath else { return }
+        }
+        .task(id: "\(conversation?.roomPath.path ?? "none")-\(windowVisible)") {
+            guard windowVisible, let room = conversation?.roomPath else { return }
             while !Task.isCancelled {
                 if NSApp.isActive {
                     let status = await Task.detached(priority: .utility) {

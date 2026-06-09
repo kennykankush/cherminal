@@ -32,14 +32,15 @@ final class SessionCache: @unchecked Sendable {
         let summary: PersistedSummary
     }
 
-    /// What we store in the cache for each session file.
+    /// What we store in the cache for each session file. (Older rows carry a
+    /// `messageCount` key — a head+tail lower bound nothing trusted; decode
+    /// ignores it, and it's no longer written.)
     struct PersistedSummary: Codable {
         var id: String
         var agentRaw: String
         var roomPath: String
         var firstTimestamp: Date?
         var lastTimestamp: Date
-        var messageCount: Int
         var previewText: String?
         /// Parent session id when this is a post-compaction continuation (see
         /// Conversation.continuedFromID). Optional with a default → old cache

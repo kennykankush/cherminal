@@ -138,7 +138,6 @@ struct CodexSessionScanner {
             roomPath: cwd,
             firstTimestamp: firstTimestamp,
             lastTimestamp: lastTimestamp,
-            messageCount: 0, // Codex's record types make this expensive; skip for v0.1.
             previewText: preview
         )
         cache?.put(path: candidate.file.path,

@@ -15,9 +15,7 @@ extension Conversation {
             sessionFile: cwd,
             firstMessageAt: nil,
             lastActivityAt: .now,
-            messageCount: 0,
-            previewText: nil,
-            state: .live
+            previewText: nil
         )
     }
 
@@ -45,9 +43,7 @@ extension Conversation {
             sessionFile: sessionFile,
             firstMessageAt: nil,
             lastActivityAt: .now,
-            messageCount: 0,
-            previewText: nil,
-            state: .live
+            previewText: nil
         )
     }
 }

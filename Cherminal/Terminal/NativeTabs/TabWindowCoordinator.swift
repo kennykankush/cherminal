@@ -678,12 +678,13 @@ final class TabWindowCoordinator: ObservableObject {
                 let reading = TurnState.read(sessionFile: a.conversation.sessionFile, agent: a.conversation.agent)
                 next[a.id] = reading.awaitingUser ? .attention : .working
             }
+            let resolvedStates = next   // immutable across the actor hop (Swift 6 rule)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.detachedRefreshing = false
                 if checkedLiveness { self.lastLivenessCheck = Date() }
                 let updated = self.detachedAgents.map { agent -> DetachedAgent in
-                    guard let s = next[agent.id] else { return agent }
+                    guard let s = resolvedStates[agent.id] else { return agent }
                     // Don't resurrect a known-dead cell from a stale file read on
                     // a tick where liveness wasn't (successfully) checked.
                     let resolved: DetachState = (!checkedLiveness && agent.state == .dead) ? .dead : s
@@ -1111,14 +1112,16 @@ final class TabWindowCoordinator: ObservableObject {
         clog("tabs", "window closed (surfaces freed)")
         // The attention light is insert-on-bell / remove-on-focus; a tab that
         // closes while flagged would leak its id forever (clearAwaiting only
-        // fires for still-registered windows). Clear both the effective and
-        // base identity so a shell↔agent flip can't strand it either.
-        awaitingTurnIDs.remove(controller.conversation.id)
-        awaitingTurnIDs.remove(controller.base.id)
-        // Prune the seen-offset map too, else it grows unbounded over a long
-        // session (entries are written per conversation but were never removed).
-        seenTurnSize.removeValue(forKey: controller.conversation.id)
-        seenTurnSize.removeValue(forKey: controller.base.id)
+        // fires for still-registered windows). Clear EVERY pane of the closed
+        // window (not just the active one — the old holder-only cleanup leaked
+        // the other panes' entries), by both identities so a shell↔agent flip
+        // can't strand one either.
+        for pane in controller.workspace.panes {
+            awaitingTurnIDs.remove(pane.conversation.id)
+            awaitingTurnIDs.remove(pane.base.id)
+            seenTurnSize.removeValue(forKey: pane.conversation.id)
+            seenTurnSize.removeValue(forKey: pane.base.id)
+        }
 
         // Last tab gone → let the app quit like normal software (see
         // applicationShouldTerminateAfterLastWindowClosed → true, which routes to
