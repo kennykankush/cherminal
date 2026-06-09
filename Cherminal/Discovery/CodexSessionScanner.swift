@@ -26,6 +26,30 @@ struct CodexSessionScanner {
         )
     }
 
+    // MARK: - Incremental (single changed file)
+
+    /// Parse ONE rollout file — the watcher's changed-path fast path. Serves
+    /// from cache when (mtime, size) still match; nil for non-rollout paths or
+    /// gone/empty files (caller removes the conversation).
+    static func summarizeFile(_ url: URL, titles: [String: String], cache: SessionCache?) -> Conversation? {
+        let name = url.lastPathComponent
+        guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else { return nil }
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        guard let size = values?.fileSize.map(Int64.init), size > 0 else { return nil }
+        let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        if let cache,
+           let entry = cache.get(path: url.path, mtime: mtime, size: size),
+           let convo = Conversation(persisted: entry.summary, sessionFile: url) {
+            return convo
+        }
+        return parseOne(ScanCandidate(file: url, mtime: mtime, size: size, roomHint: nil),
+                        titles: titles, cache: cache)
+    }
+
+    /// The title index, exposed for the incremental path (one read per
+    /// changed-file batch).
+    static func titleIndex() -> [String: String] { readTitleIndex() }
+
     // MARK: - Title index
 
     /// Build {session-id → thread_name} from `session_index.jsonl`. Duplicates
@@ -114,7 +138,6 @@ struct CodexSessionScanner {
             roomPath: cwd,
             firstTimestamp: firstTimestamp,
             lastTimestamp: lastTimestamp,
-            messageCount: 0, // Codex's record types make this expensive; skip for v0.1.
             previewText: preview
         )
         cache?.put(path: candidate.file.path,

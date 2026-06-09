@@ -59,6 +59,9 @@ enum PortScanner {
         let tabPIDs: [Int32: String]
         /// Roots a server cwd must fall under to count as "ours".
         let devRoots: [String]
+        /// pid → ppid ancestry from the caller's ProcTable snapshot; when nil
+        /// the scanner falls back to its own `ps` call.
+        var parentMap: [Int32: Int32]? = nil
     }
 
     static func scan(_ context: Context) -> [DevPort] {
@@ -67,7 +70,7 @@ enum PortScanner {
 
         let pids = Set(listeners.map { $0.pid })
         let cwds = cwdsFor(pids: pids)
-        let parents = parentMap()
+        let parents = context.parentMap ?? ownParentMap()
 
         var out: [DevPort] = []
         var seenPorts = Set<Int>()
@@ -162,9 +165,9 @@ enum PortScanner {
         return out
     }
 
-    // MARK: - ps: pid → ppid map for ancestry
+    // MARK: - ps: pid → ppid map for ancestry (fallback when no snapshot given)
 
-    private static func parentMap() -> [Int32: Int32] {
+    private static func ownParentMap() -> [Int32: Int32] {
         guard let raw = run("/bin/ps", ["-axo", "pid=,ppid="]) else { return [:] }
         var out: [Int32: Int32] = [:]
         for line in raw.split(separator: "\n") {
@@ -197,21 +200,6 @@ enum PortScanner {
     // MARK: - Subprocess helper
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        // Discard stderr: lsof/ps warn about fds they can't stat, and an
-        // undrained Pipe() could fill and wedge the child mid-write.
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        Subprocess.stdout(launchPath, args)
     }
 }

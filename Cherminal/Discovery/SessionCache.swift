@@ -32,14 +32,15 @@ final class SessionCache: @unchecked Sendable {
         let summary: PersistedSummary
     }
 
-    /// What we store in the cache for each session file.
+    /// What we store in the cache for each session file. (Older rows carry a
+    /// `messageCount` key — a head+tail lower bound nothing trusted; decode
+    /// ignores it, and it's no longer written.)
     struct PersistedSummary: Codable {
         var id: String
         var agentRaw: String
         var roomPath: String
         var firstTimestamp: Date?
         var lastTimestamp: Date
-        var messageCount: Int
         var previewText: String?
         /// Parent session id when this is a post-compaction continuation (see
         /// Conversation.continuedFromID). Optional with a default → old cache
@@ -321,16 +322,37 @@ final class SessionCache: @unchecked Sendable {
             let name = String(cString: sqlite3_column_text(stmt, 1))
             let json = String(cString: sqlite3_column_text(stmt, 2))
             guard let data = json.data(using: .utf8),
-                  let tabs = try? jsonDecoder.decode([PersistedTab].self, from: data) else { continue }
+                  let workspaces = Self.decodeBookmarkWorkspaces(data, decoder: jsonDecoder)
+            else { continue }
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 3))
             let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(stmt, 4))
-            out.append(Bookmark(id: id, name: name, tabs: tabs, createdAt: createdAt, updatedAt: updatedAt))
+            out.append(Bookmark(id: id, name: name, workspaces: workspaces,
+                                createdAt: createdAt, updatedAt: updatedAt))
         }
         return out
     }
 
+    /// Bookmarks store full grids ([PersistedWorkspace]); rows saved before the
+    /// unification hold the old single-pane [PersistedTab] shape and migrate on
+    /// decode to one single-pane workspace per tab. Split out (and static) so
+    /// the migration is unit-testable.
+    static func decodeBookmarkWorkspaces(_ data: Data, decoder: JSONDecoder) -> [PersistedWorkspace]? {
+        if let workspaces = try? decoder.decode([PersistedWorkspace].self, from: data) {
+            return workspaces
+        }
+        guard let tabs = try? decoder.decode([PersistedTab].self, from: data) else { return nil }
+        return tabs.map {
+            PersistedWorkspace(panes: [
+                PersistedPane(conversationID: $0.conversationID,
+                              agentRaw: $0.agentRaw,
+                              roomPath: $0.roomPath,
+                              role: nil)
+            ])
+        }
+    }
+
     func saveBookmark(_ bookmark: Bookmark) {
-        guard let data = try? jsonEncoder.encode(bookmark.tabs),
+        guard let data = try? jsonEncoder.encode(bookmark.workspaces),
               let json = String(data: data, encoding: .utf8) else { return }
         lock.lock(); defer { lock.unlock() }
         var stmt: OpaquePointer?

@@ -14,7 +14,7 @@ struct SessionCacheTests {
         SessionCache.PersistedSummary(
             id: id, agentRaw: "claudeCode", roomPath: "/Users/x/dev/\(id)",
             firstTimestamp: nil, lastTimestamp: Date(timeIntervalSince1970: 1000),
-            messageCount: 3, previewText: "hi \(id)")
+            previewText: "hi \(id)")
     }
 
     @Test func putGetRoundTripWithMtimeSizeKeying() throws {

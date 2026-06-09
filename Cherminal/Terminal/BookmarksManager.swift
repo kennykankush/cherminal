@@ -27,11 +27,11 @@ final class BookmarksManager: ObservableObject {
         bookmarks = cache.loadBookmarks()
     }
 
-    /// Persist the supplied tab snapshot under a user-given name.
-    func create(name: String, tabs: [PersistedTab]) {
+    /// Persist the supplied workspace snapshot (full grids) under a user-given name.
+    func create(name: String, workspaces: [PersistedWorkspace]) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? defaultName() : trimmed
-        let bookmark = Bookmark(name: finalName, tabs: tabs)
+        let bookmark = Bookmark(name: finalName, workspaces: workspaces)
         bookmarks.insert(bookmark, at: 0)
         // Keep the in-memory order matching loadBookmarks (updated_at DESC), so
         // it can't diverge from a reload on exact-timestamp ties.
@@ -57,16 +57,18 @@ final class BookmarksManager: ObservableObject {
         cache?.deleteBookmark(id: id)
     }
 
-    /// Open every tab in the bookmark, collapsing duplicates and focusing
-    /// existing tabs. Resolution + shell fallback live in the coordinator so
-    /// bookmark groups and session restore behave identically. `registry` is
-    /// taken there from the coordinator; kept here for callsite stability.
+    /// Open every workspace in the bookmark — full grids, through the SAME
+    /// restore path session restore uses (one law): already-open conversations
+    /// are skipped (a fully-open saved tab focuses instead of duplicating),
+    /// agent panes resume, missing sessions fall back to shells in their room.
+    /// `registry` is taken there from the coordinator; kept here for callsite
+    /// stability.
     func open(
         _ bookmark: Bookmark,
         registry: ConversationRegistry,
         coordinator: TabWindowCoordinator
     ) {
-        coordinator.openPersistedTabs(bookmark.tabs)
+        coordinator.openPersistedWorkspaces(bookmark.workspaces)
     }
 
     private func defaultName() -> String {

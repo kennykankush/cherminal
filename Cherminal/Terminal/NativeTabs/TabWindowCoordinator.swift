@@ -108,19 +108,40 @@ final class TabWindowCoordinator: ObservableObject {
     /// as windows become key; nil until the first tab takes key.
     @Published private(set) var frontmostTabID: ObjectIdentifier?
 
-    /// Set the instant the app starts quitting. Closing a window during normal
-    /// use detaches its agents to the tray; closing windows during *termination*
-    /// must not — the masters survive anyway and session restore reattaches them
-    /// into tabs on next launch, so tray-on-quit would just duplicate them.
-    private var isTerminating = false
-    func beginTermination() { isTerminating = true }
+    /// The app-lifecycle phase — ONE explicit state machine replacing the old
+    /// `isTerminating` + `terminationDecisionPending` boolean pair and the
+    /// ordering rules that lived only in comments. Every lifecycle-sensitive
+    /// behavior (parking, the continuous persist) consults the phase:
+    ///
+    ///   launching ──→ running ⇄ quitDeciding ──→ terminating
+    ///
+    /// • `.launching` — sweep/restore in flight. Parking allowed; the debounced
+    ///   persist is SUPPRESSED so a partially-restored (or user-opened-early)
+    ///   tab set can never clobber the saved snapshot mid-restore.
+    /// • `.running` — normal use. Entering it from `.launching` writes one
+    ///   post-restore persist so the snapshot reflects what actually opened.
+    /// • `.quitDeciding` — applicationShouldTerminate is deciding (the reopen
+    ///   prompt may be up). Parking suppressed: the quit flow owns the panes
+    ///   (restore on cancel/reopen, reap on Don't-Reopen).
+    /// • `.terminating` — quit confirmed. Closing windows must NOT park: the
+    ///   masters survive anyway and session restore reattaches them as tabs
+    ///   next launch, so tray-on-quit would just duplicate them.
+    enum AppPhase: String {
+        case launching, running, quitDeciding, terminating
 
-    /// Set while `applicationShouldTerminate` is deciding (the reopen prompt may
-    /// be up). Suppresses close-time parking so a just-closed last window's panes
-    /// aren't parked mid-decision — the quit flow owns them (restore on
-    /// cancel/reopen, reap on Don't-Reopen). Cleared on Cancel; superseded by
-    /// `isTerminating` on a real quit.
-    var terminationDecisionPending = false
+        var allowsParking: Bool { self == .launching || self == .running }
+    }
+
+    private(set) var phase: AppPhase = .launching
+
+    func enterPhase(_ next: AppPhase) {
+        guard phase != next else { return }
+        let prev = phase
+        phase = next
+        clog("tabs", "phase \(prev.rawValue) → \(next.rawValue)")
+        // Restore just settled — write the truth of what actually opened.
+        if prev == .launching && next == .running { schedulePersist() }
+    }
 
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
@@ -258,21 +279,23 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Open / focus
 
-    /// Find an open pane running `id`, PREFERRING a pane opened *as* that
-    /// conversation (`base.id` — the identity you actually chose) over one that
-    /// merely *adopted* it (`conversation.id` — a best-effort guess for a
-    /// hand-launched Claude, which can be wrong when a room has several Claude
-    /// conversations). Two full passes across all windows so the exact match
-    /// always wins over an adopted guess, regardless of tab order. This is what
-    /// makes "click conversation X" land on X and not a pane that guessed X.
-    private func findOpenPane(forConversationID id: String) -> (TerminalTabWindowController, Pane)? {
-        for controller in controllers {
-            if let pane = controller.workspace.panes.first(where: { $0.base.id == id }) {
-                return (controller, pane)
+    /// Identity facts for every open pane, in tab order — the snapshot the
+    /// ConversationLedger's rules run over.
+    private func paneFacts() -> [ConversationLedger.PaneFacts] {
+        controllers.flatMap { c in
+            c.workspace.panes.map {
+                ConversationLedger.PaneFacts(paneID: $0.id, base: $0.base, effective: $0.conversation)
             }
         }
+    }
+
+    /// Find an open pane running `id`. The base-over-adopted preference (what
+    /// makes "click conversation X" land on X, not a pane that guessed X) is
+    /// the ledger's law — see ConversationLedger.openPane.
+    private func findOpenPane(forConversationID id: String) -> (TerminalTabWindowController, Pane)? {
+        guard let paneID = ConversationLedger.openPane(for: id, panes: paneFacts()) else { return nil }
         for controller in controllers {
-            if let pane = controller.workspace.panes.first(where: { $0.conversation.id == id }) {
+            if let pane = controller.workspace.panes.first(where: { $0.id == paneID }) {
                 return (controller, pane)
             }
         }
@@ -581,24 +604,17 @@ final class TabWindowCoordinator: ObservableObject {
     /// quit) removes the tray cell and reattaches the same live master — which is
     /// why we park rather than reap on close.
     private func detachToTray(_ convo: Conversation) {
-        // Don't park while a quit decision is pending (the close-last-window
-        // reopen prompt is up) or during termination — the quit flow owns these
-        // panes (restore on cancel/reopen, reap on Don't-Reopen). Parking here
-        // would race that decision and could spare a pane from the Don't-Reopen reap.
-        guard !isTerminating, !terminationDecisionPending else { return }
-        let isAgent = convo.agent == .claudeCode || convo.agent == .codex
-        // Park only if there's a live dtach master to keep. Agents always have
-        // one; a shell does only if it was dtach-wrapped at spawn — decided by
-        // ACTUAL socket liveness, not the current preference (the user may have
-        // toggled persistentSessions off after the pane spawned).
-        guard isAgent || Dtach.isMasterAlive(id: convo.id) else { return }
-        // Don't park a pane that's currently open — e.g. restored after a canceled
-        // quit before this deferred park ran. It would duplicate the live session
-        // as a tray cell while the open pane owns the master.
-        guard !controllers.contains(where: { c in
-            c.workspace.panes.contains { $0.base.id == convo.id || $0.conversation.id == convo.id }
-        }) else { return }
-        guard !detachedAgents.contains(where: { $0.id == convo.id }) else { return }
+        // Parking is a normal-use behavior: during a quit decision or
+        // termination the quit flow owns the panes (restore on cancel/reopen,
+        // reap on Don't-Reopen) — parking would race it and could spare a pane
+        // from the Don't-Reopen reap. See AppPhase.
+        guard phase.allowsParking else { return }
+        // The park guards (live master to keep, not still open, not already
+        // parked) are the ledger's law — see ConversationLedger.canPark.
+        guard ConversationLedger.canPark(
+            convo, openPanes: paneFacts(), parked: detachedAgents,
+            masterAlive: { Dtach.isMasterAlive(id: $0) })
+        else { return }
         detachedAgents.append(DetachedAgent(conversation: convo))
         clog("tabs", "detached \(convo.agent.rawValue) \(convo.id) → tray")
         refreshDetachedStates()
@@ -636,17 +652,24 @@ final class TabWindowCoordinator: ObservableObject {
     private var lastLivenessCheck = Date.distantPast
 
     /// Recompute each parked agent's cell state off the main thread — a cheap
-    /// JSONL tail read every time, master liveness (pgrep) at most every ~4s —
-    /// then publish any changes. Driven by the FSEvents callback + 8s reconcile.
+    /// JSONL tail read every time, master liveness (one shared ProcTable
+    /// snapshot, previously an lsof per agent) at most every ~4s — then publish
+    /// any changes. Driven by the FSEvents callback + 8s reconcile.
     private func refreshDetachedStates() {
         guard !detachedAgents.isEmpty, !detachedRefreshing else { return }
         detachedRefreshing = true
         let agents = detachedAgents
-        let checkLiveness = Date().timeIntervalSince(lastLivenessCheck) > 4
+        let wantLiveness = Date().timeIntervalSince(lastLivenessCheck) > 4
         Task.detached(priority: .utility) {
+            // A failed snapshot means "liveness unknown", never "dead" — a
+            // wedged lsof must not flip every parked agent's cell to dead.
+            let table = wantLiveness ? ProcTable.cached(socketDir: Dtach.directory) : nil
+            let checkedLiveness = table != nil
             var next: [String: DetachState] = [:]
             for a in agents {
-                if checkLiveness && !Dtach.isMasterAlive(id: a.id) { next[a.id] = .dead; continue }
+                if let table, !Dtach.isMasterAlive(id: a.id, table: table) {
+                    next[a.id] = .dead; continue
+                }
                 // A parked shell has no agent session file to read — its state is
                 // purely master liveness (alive → working).
                 guard a.conversation.agent == .claudeCode || a.conversation.agent == .codex else {
@@ -655,15 +678,16 @@ final class TabWindowCoordinator: ObservableObject {
                 let reading = TurnState.read(sessionFile: a.conversation.sessionFile, agent: a.conversation.agent)
                 next[a.id] = reading.awaitingUser ? .attention : .working
             }
+            let resolvedStates = next   // immutable across the actor hop (Swift 6 rule)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.detachedRefreshing = false
-                if checkLiveness { self.lastLivenessCheck = Date() }
+                if checkedLiveness { self.lastLivenessCheck = Date() }
                 let updated = self.detachedAgents.map { agent -> DetachedAgent in
-                    guard let s = next[agent.id] else { return agent }
+                    guard let s = resolvedStates[agent.id] else { return agent }
                     // Don't resurrect a known-dead cell from a stale file read on
-                    // a tick where we skipped the liveness check.
-                    let resolved: DetachState = (!checkLiveness && agent.state == .dead) ? .dead : s
+                    // a tick where liveness wasn't (successfully) checked.
+                    let resolved: DetachState = (!checkedLiveness && agent.state == .dead) ? .dead : s
                     guard resolved != agent.state else { return agent }
                     var copy = agent; copy.state = resolved; return copy
                 }
@@ -729,114 +753,38 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Bookmarks
 
-    /// Snapshot of every open tab, for saving as a bookmark group. Resolves
-    /// each tab to what it's *actually running right now* (synchronous detect),
-    /// so a hand-launched `claude`/`codex` is saved as that conversation even
-    /// if the periodic adoption poll hasn't flipped the tab's identity yet —
-    /// otherwise the group would store a bare shell and reopen as one.
-    func snapshot() -> [PersistedTab] {
-        let detected = detectLiveConversations()
-        // Dedup by conversation id: two shell tabs in the same room can both
-        // resolve to the same agent session, and a group must never store two
-        // PersistedTab with the same id (their Identifiable id == conversationID).
-        var seen = Set<String>()
-        return controllers.compactMap { c in
-            let convo = detected[ObjectIdentifier(c)] ?? c.conversation
-            guard seen.insert(convo.id).inserted else { return nil }
-            return PersistedTab(
-                conversationID: convo.id,
-                agentRaw: convo.agent.rawValue,
-                roomPath: convo.roomPath.path
-            )
-        }
+    /// Snapshot of every open tab's FULL GRID for saving as a group — the same
+    /// capture the quit persist uses, including synchronous quit-time agent
+    /// detection, so a hand-launched `claude`/`codex` is saved as that
+    /// conversation even if the periodic adoption poll hasn't flipped the
+    /// pane's identity yet. ("Save this workspace" now genuinely saves panes —
+    /// groups used to store only each tab's active pane.)
+    func groupSnapshot() -> [PersistedWorkspace] {
+        currentWorkspaces(detected: detectLivePaneConversations())
     }
 
-    // MARK: - Persisted tabs (bookmarks + session restore)
+    // MARK: - Persisted workspaces (full per-tab grid)
 
     private static let lastSessionKey = "cherminal.lastSession"
     private static let lastWorkspacesKey = "cherminal.lastWorkspaces"   // V2: full per-tab grid
 
-    /// Open a saved list of tabs in order, resolving each to its live
-    /// conversation when the session still exists, else a shell in the same
-    /// room. Shared by session restore and bookmark groups so both honour the
-    /// same dedup + fallback rules. Resolves agents against the registry, so
-    /// the cache snapshot must be loaded first (else the agent's sessionFile is
-    /// unknown and the context gauge can't read it).
-    func openPersistedTabs(_ tabs: [PersistedTab]) {
-        for persisted in tabs {
-            let convo: Conversation
-            if persisted.agentRaw == AgentKind.shell.rawValue {
-                // Reuse the persisted id so reopening focuses the same tab
-                // instead of spawning a fresh duplicate.
-                convo = Conversation.shellConversation(
-                    cwd: URL(fileURLWithPath: persisted.roomPath),
-                    id: persisted.conversationID)
-            } else if let real = registry.conversation(id: persisted.conversationID) {
-                convo = real
-            } else {
-                // The agent session is gone (file deleted / reconciled away).
-                // Reopen as a shell in the same room rather than dropping the
-                // tab. Fresh id so a stale agent id can't collide with a future
-                // real conversation.
-                convo = Conversation.shellConversation(cwd: URL(fileURLWithPath: persisted.roomPath))
-            }
-            openOrFocus(convo)
-        }
-    }
-
-    // MARK: - Persisted workspaces (full per-tab grid — supersedes single-pane PersistedTab)
-
     /// Snapshot every open tab's full grid (all panes + layout) so restore
     /// rebuilds the exact arrangement, not just the active pane. Uses each pane's
     /// *effective* conversation (already adopted by the live-session reconcile),
-    /// so a hand-launched agent is saved as that agent.
-    func currentWorkspaces(detected: [ObjectIdentifier: Conversation] = [:]) -> [PersistedWorkspace] {
-        // A conversation may be serialized into ONE pane only — two panes can't
-        // resume the same agent (they'd share a dtach socket), and restore's
-        // dedup would otherwise silently drop a pane. Resolve each pane's
-        // identity in two passes so a duplicate yields a *unique* fallback.
-        let allPanes = controllers.flatMap { $0.workspace.panes }
-        var identity: [ObjectIdentifier: Conversation] = [:]
-        var claimed = Set<String>()
-
-        // Pass 1: fixed-identity (agent) panes own their conversation id — they
-        // were deliberately opened as that agent, so they win any collision with
-        // a shell that merely hand-launched the same agent.
-        for pane in allPanes where pane.base.agent != .shell {
-            if claimed.insert(pane.conversation.id).inserted {
-                identity[ObjectIdentifier(pane)] = pane.conversation
-            } else {
-                // Two fixed panes for one agent shouldn't occur (open/restore
-                // dedup), but be safe: demote the duplicate to a fresh shell.
-                let shell = Conversation.shellConversation(cwd: pane.conversation.roomPath)
-                identity[ObjectIdentifier(pane)] = shell
-                claimed.insert(shell.id)
-            }
-        }
-        // Pass 2: shell panes — a freshly hand-launched agent (quit detection) or
-        // the pane's adopted conversation, unless that id is already claimed, in
-        // which case fall back to the pane's unique base shell identity.
-        for pane in allPanes where pane.base.agent == .shell {
-            var convo = detected[ObjectIdentifier(pane)] ?? pane.conversation
-            if !claimed.insert(convo.id).inserted {
-                convo = pane.base
-                claimed.insert(convo.id)
-            }
-            identity[ObjectIdentifier(pane)] = convo
-        }
-
+    /// so a hand-launched agent is saved as that agent. The unique-identity
+    /// claim (one conversation per pane, ever) is the ledger's law — see
+    /// ConversationLedger.claimIdentities.
+    func currentWorkspaces(detected: [UUID: Conversation] = [:]) -> [PersistedWorkspace] {
+        let identity = ConversationLedger.claimIdentities(panes: paneFacts(), detected: detected)
         return controllers.map { controller in
             PersistedWorkspace(
-                layout: controller.workspace.layout,
                 panes: controller.workspace.panes.map { pane in
-                    let convo = identity[ObjectIdentifier(pane)] ?? pane.conversation
+                    let convo = identity[pane.id] ?? pane.conversation
                     return PersistedPane(
                         conversationID: convo.id,
                         agentRaw: convo.agent.rawValue,
                         roomPath: convo.roomPath.path,
-                        role: pane.role,
-                        gridPosition: pane.gridPosition,
-                        socketID: convo.id)
+                        role: pane.role)
                 })
         }
     }
@@ -844,18 +792,20 @@ final class TabWindowCoordinator: ObservableObject {
     /// Synchronous per-pane live detection for the quit snapshot: a shell pane
     /// that just hand-launched `claude`/`codex` is captured as that agent even if
     /// the periodic reconcile hasn't adopted it yet (preserves the pre-grid
-    /// snapshot() guarantee). One blocking lsof of the open panes' pids — fine on
-    /// quit, same cost as the old snapshot().
-    private func detectLivePaneConversations() -> [ObjectIdentifier: Conversation] {
-        let pidToPane = foregroundPIDs()
+    /// snapshot() guarantee). One ProcTable capture + one batched lsof, every
+    /// probe watchdog-bounded — a wedged lsof can no longer hang the quit.
+    private func detectLivePaneConversations() -> [UUID: Conversation] {
+        let table = ProcTable.cached(socketDir: Dtach.directory)
+        let pidToPane = foregroundPIDs(table: table)
         guard !pidToPane.isEmpty else { return [:] }
-        let info = LiveSessionLinker.inspect(pids: Array(pidToPane.keys))
-        var out: [ObjectIdentifier: Conversation] = [:]
+        let info = LiveSessionLinker.inspect(pids: Array(pidToPane.keys),
+                                             argvByPID: table?.argv)
+        var out: [UUID: Conversation] = [:]
         var adopted = Set<String>()   // mirror reconcileLiveSessions: one pane per convo
         for (pid, pane) in pidToPane where pane.base.agent == .shell {
             guard let detected = detectConversation(for: info[pid]),
                   adopted.insert(detected.id).inserted else { continue }
-            out[ObjectIdentifier(pane)] = detected
+            out[pane.id] = detected
         }
         return out
     }
@@ -882,21 +832,29 @@ final class TabWindowCoordinator: ObservableObject {
     }
 
     /// Open saved full-grid workspaces: one tab per workspace, its first pane
-    /// opening the tab and the rest filling the grid in order.
+    /// opening the tab and the rest filling the grid in order. The one-pane-
+    /// per-conversation dedup (two panes must never resume the same agent —
+    /// they'd share one dtach socket and mirror I/O) is the ledger's law, and
+    /// it also skips ids ALREADY open in a live pane — so restore is
+    /// idempotent: re-running it over a session that's partially open (a tab
+    /// opened early during launch, a group whose tabs exist) only adds what's
+    /// missing, never duplicates a socket. forceNew gives each workspace its
+    /// OWN tab — openOrFocus's dedup would otherwise merge two workspaces
+    /// sharing a first-pane id.
     func openPersistedWorkspaces(_ workspaces: [PersistedWorkspace]) {
-        var seen = Set<String>()   // conversation ids already restored
-        for workspace in workspaces {
-            // Drop any pane whose conversation id already appeared: two panes must
-            // never resume the same agent (they'd share one dtach socket and
-            // mirror I/O). Shell ids are unique per pane, so only genuine dups get
-            // dropped. forceNew gives each workspace its OWN tab — openOrFocus's
-            // dedup would otherwise merge two workspaces sharing a first-pane id.
-            let panes = workspace.panes.filter { seen.insert($0.conversationID).inserted }
-            guard let first = panes.first,
-                  let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
-            else { continue }
-            for pane in panes.dropFirst() {
-                addPane(conversation(forPersistedPane: pane), to: controller, role: pane.role)
+        let deduped = ConversationLedger.dedupeForRestore(
+            workspaces, alreadyOpen: ConversationLedger.openIDs(panes: paneFacts()))
+        for (original, filtered) in zip(workspaces, deduped) {
+            if let first = filtered.panes.first {
+                guard let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
+                else { continue }
+                for pane in filtered.panes.dropFirst() {
+                    addPane(conversation(forPersistedPane: pane), to: controller, role: pane.role)
+                }
+            } else if let first = original.panes.first {
+                // Everything in this saved tab is already open (a group whose
+                // conversations are live) — focus it instead of opening nothing.
+                focusExistingPane(conversationID: first.conversationID)
             }
         }
     }
@@ -909,13 +867,11 @@ final class TabWindowCoordinator: ObservableObject {
             return workspaces
         }
         return savedSessionTabs().map { tab in
-            PersistedWorkspace(layout: .single, panes: [
+            PersistedWorkspace(panes: [
                 PersistedPane(conversationID: tab.conversationID,
                               agentRaw: tab.agentRaw,
                               roomPath: tab.roomPath,
-                              role: nil,
-                              gridPosition: GridPosition(row: 0, col: 0),
-                              socketID: tab.conversationID)
+                              role: nil)
             ])
         }
     }
@@ -949,6 +905,11 @@ final class TabWindowCoordinator: ObservableObject {
     private var persistDebounce: DispatchWorkItem?
 
     private func schedulePersist() {
+        // Never persist mid-launch: restore opens tabs one by one (and the user
+        // can open one early), so a debounced save here could clobber the full
+        // saved snapshot with a partial set. Entering .running writes the
+        // post-restore truth once (see enterPhase).
+        guard phase != .launching else { return }
         persistDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.persistSessionLight() }
         persistDebounce = work
@@ -985,7 +946,7 @@ final class TabWindowCoordinator: ObservableObject {
         // still-attached panes AND a just-closed last window whose controller is
         // already gone by the time this runs on the close-last-window quit path.
         // At launch this is harmlessly redundant with the launch sweep that follows.
-        let keep = Set(savedDetached().map { $0.conversationID })
+        let keep = ConversationLedger.sweepKeepSet(savedWorkspaces: [], savedTray: savedDetached())
         for id in Dtach.knownSocketIDs() where !keep.contains(id) {
             Dtach.kill(id: id)
         }
@@ -1059,14 +1020,20 @@ final class TabWindowCoordinator: ObservableObject {
     func restoreDetachedAgents() {
         let saved = savedDetached()
         guard !saved.isEmpty else { return }
+        // One snapshot answers liveness for every saved agent (was an lsof
+        // each). If the snapshot failed, fall back to per-socket probes —
+        // restore must not silently drop parked agents on a wedged lsof.
+        let table = ProcTable.cached(socketDir: Dtach.directory)
+        func alive(_ id: String) -> Bool {
+            if let table { return Dtach.isMasterAlive(id: id, table: table) }
+            return Dtach.isMasterAlive(id: id)
+        }
+        // Alive + not-already-open filtering (one master must not be both a tab
+        // and a tray cell) is the ledger's law — see ConversationLedger.restorableTray.
+        let restorable = ConversationLedger.restorableTray(
+            saved: saved, openPanes: paneFacts(), masterAlive: alive)
         var restored: [DetachedAgent] = []
-        for it in saved {
-            guard Dtach.isMasterAlive(id: it.conversationID) else { continue }
-            // Skip ids already open as a pane (restoreSession ran first): one
-            // master must not be both a tab and a tray cell.
-            if controllers.contains(where: { c in
-                c.workspace.panes.contains { $0.base.id == it.conversationID || $0.conversation.id == it.conversationID }
-            }) { continue }
+        for it in restorable {
             let convo: Conversation
             if it.agentRaw == AgentKind.shell.rawValue {
                 // Synthetic shell — reconstruct from the persisted room + id (no
@@ -1098,10 +1065,8 @@ final class TabWindowCoordinator: ObservableObject {
     /// forgotten), and any dead socket is stale — both get killed (socket
     /// removed). Run once, before restore, so nothing lingers invisibly.
     func sweepDtachSockets() {
-        let savedPanes = savedWorkspaces().flatMap { $0.panes }
-        let keep = Set(savedPanes.map { $0.conversationID })
-            .union(savedPanes.compactMap { $0.socketID })
-            .union(savedDetached().map { $0.conversationID })
+        let keep = ConversationLedger.sweepKeepSet(
+            savedWorkspaces: savedWorkspaces(), savedTray: savedDetached())
         for id in Dtach.knownSocketIDs() where !keep.contains(id) {
             Dtach.kill(id: id)
             clog("tabs", "swept orphan dtach socket \(id)")
@@ -1125,28 +1090,21 @@ final class TabWindowCoordinator: ObservableObject {
     /// Called from the window controller's `windowWillClose`. Dropping the
     /// strong ref deallocates the window + surface.
     func windowClosed(_ controller: TerminalTabWindowController) {
-        // Closing a window during normal use parks its agent panes in the tray
-        // (masters survive); during app termination it must not (restore
-        // reattaches them into tabs next launch — see beginTermination).
-        // Capture identities now but defer the tray write to the next runloop:
-        // mutating @Published state mid window-close (during surface dealloc)
-        // faults libghostty.
-        // Park the closed window's agents in the tray — but NOT when the app is
-        // quitting (restore reattaches them as tabs next launch; parking them
-        // would also let one survive a "Don't Reopen"). Closing the last window
-        // routes to quit, yet windowClosed fires BEFORE applicationShouldTerminate
-        // can call beginTermination, so isTerminating is still false right here.
-        // We re-check it inside the deferred block: on a real quit, beginTermination
-        // runs synchronously during this same close event — before the next-runloop
-        // block executes — so it skips. If the app is NOT terminating (e.g. another
-        // window like Settings keeps it alive, or it's not the last window), the
-        // re-check still parks the agent so it never runs invisibly. The defer is
-        // also required because mutating @Published state mid window-close (during
-        // surface dealloc) faults libghostty.
-        if !isTerminating {
+        // Park the closed window's agents in the tray — but NOT during
+        // termination (restore reattaches them as tabs next launch; parking
+        // would also let one survive a "Don't Reopen"). Closing the last
+        // window routes to quit, yet windowClosed fires BEFORE
+        // applicationShouldTerminate can enter .terminating, so the phase is
+        // still parking-friendly right here. We re-check inside the deferred
+        // block: on a real quit the phase flips synchronously during this same
+        // close event — before the next-runloop block executes — so it skips.
+        // The defer is also required because mutating @Published state mid
+        // window-close (during surface dealloc) faults libghostty; detachToTray
+        // re-checks the full phase + ledger guards itself.
+        if phase != .terminating {
             let parked = controller.workspace.panes.map(\.base)
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.isTerminating else { return }   // quit won the race
+                guard let self, self.phase != .terminating else { return }   // quit won the race
                 parked.forEach { self.detachToTray($0) }
             }
         }
@@ -1154,14 +1112,16 @@ final class TabWindowCoordinator: ObservableObject {
         clog("tabs", "window closed (surfaces freed)")
         // The attention light is insert-on-bell / remove-on-focus; a tab that
         // closes while flagged would leak its id forever (clearAwaiting only
-        // fires for still-registered windows). Clear both the effective and
-        // base identity so a shell↔agent flip can't strand it either.
-        awaitingTurnIDs.remove(controller.conversation.id)
-        awaitingTurnIDs.remove(controller.base.id)
-        // Prune the seen-offset map too, else it grows unbounded over a long
-        // session (entries are written per conversation but were never removed).
-        seenTurnSize.removeValue(forKey: controller.conversation.id)
-        seenTurnSize.removeValue(forKey: controller.base.id)
+        // fires for still-registered windows). Clear EVERY pane of the closed
+        // window (not just the active one — the old holder-only cleanup leaked
+        // the other panes' entries), by both identities so a shell↔agent flip
+        // can't strand one either.
+        for pane in controller.workspace.panes {
+            awaitingTurnIDs.remove(pane.conversation.id)
+            awaitingTurnIDs.remove(pane.base.id)
+            seenTurnSize.removeValue(forKey: pane.conversation.id)
+            seenTurnSize.removeValue(forKey: pane.base.id)
+        }
 
         // Last tab gone → let the app quit like normal software (see
         // applicationShouldTerminateAfterLastWindowClosed → true, which routes to
@@ -1297,7 +1257,10 @@ final class TabWindowCoordinator: ObservableObject {
         ].filter { FileManager.default.fileExists(atPath: $0) }
         guard !paths.isEmpty else { return }
 
-        let watcher = FilesystemWatcher(paths: paths) { [weak self] in
+        // Changed paths aren't needed here — this only re-reads the tails of
+        // panes that are already live (O(live), cheap). The watcher's
+        // max-latency bound now guarantees the light fires even mid-burst.
+        let watcher = FilesystemWatcher(paths: paths) { [weak self] _ in
             // FSEvents fires on a background queue; hop to main for @Published state.
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1337,22 +1300,31 @@ final class TabWindowCoordinator: ObservableObject {
         // dtach to the inner foreground process (the running agent), for AGENTS as
         // well as shells — both are dtach-wrapped, and the surface's own foreground
         // pid is the `login`/dtach-client wrapper, which lsof can't inspect (login
-        // is setuid root) so it never identifies the agent. innerForegroundPID
-        // resolves the master via lsof on the socket → its agent child. Fall back
-        // to the surface pid only for a genuinely unwrapped pane. ALL the
-        // ps/lsof subprocess work happens here, never on @MainActor.
-        let (resolved, info) = await Task.detached(priority: .utility) {
-            () -> ([(socketID: String, pid: Int32)], [Int32: LiveSessionLinker.ProcessInfo]) in
+        // is setuid root) so it never identifies the agent. One shared ProcTable
+        // snapshot (2 bounded spawns, TTL-cached across reconcile/ports/tray)
+        // answers every per-pane question — previously this loop spawned
+        // lsof+pgrep+ps PER PANE every tick. Fall back to the surface pid only
+        // for a genuinely unwrapped pane. ALL subprocess work happens here,
+        // never on @MainActor.
+        let probed = await Task.detached(priority: .utility) {
+            () -> ([(socketID: String, pid: Int32)], [Int32: LiveSessionLinker.ProcessInfo])? in
+            // Snapshot failed (lsof/ps wedged → watchdog killed it): skip this
+            // tick and keep the previous live state — "unknown" must never be
+            // read as "everything exited".
+            guard let table = ProcTable.cached(socketDir: Dtach.directory) else { return nil }
             var resolved: [(socketID: String, pid: Int32)] = []
             for r in refs {
-                if let inner = Dtach.innerForegroundPID(id: r.socketID) {
+                if let inner = Dtach.innerForegroundPID(id: r.socketID, table: table) {
                     resolved.append((socketID: r.socketID, pid: Int32(inner)))
                 } else if r.fg > 0 {
                     resolved.append((socketID: r.socketID, pid: r.fg))
                 }
             }
-            return (resolved, LiveSessionLinker.inspect(pids: resolved.map { $0.pid }))
+            let info = LiveSessionLinker.inspect(pids: resolved.map { $0.pid },
+                                                 argvByPID: table.argv)
+            return (resolved, info)
         }.value
+        guard let (resolved, info) = probed else { return }
 
         // Back on main: map each effective pid to its still-open pane, then adopt.
         // Keying by the stable socket id (base.id) sidesteps the pid-reuse hazard
@@ -1433,8 +1405,11 @@ final class TabWindowCoordinator: ObservableObject {
         return c.hasPrefix("claude") || c.hasPrefix("codex") || c.hasPrefix("dtach")
     }
 
-    /// Every live pane across every window, keyed by foreground pid.
-    private func foregroundPIDs() -> [Int32: Pane] {
+    /// Every live pane across every window, keyed by foreground pid. Resolves
+    /// wrapped shells through dtach via the supplied snapshot (no per-pane
+    /// subprocess); when the snapshot is unavailable it falls back to the
+    /// single-socket probe (bounded by the subprocess watchdog).
+    private func foregroundPIDs(table: ProcTable?) -> [Int32: Pane] {
         var out: [Int32: Pane] = [:]
         for c in controllers {
             for pane in c.workspace.panes {
@@ -1444,8 +1419,15 @@ final class TabWindowCoordinator: ObservableObject {
                 // through dtach to the inner foreground for adoption. Agent panes
                 // keep the surface pid — their live signal already handles the
                 // dtach client (agentRunning matches the "dtach" command).
+                let inner: pid_t?
+                if pane.base.agent == .shell {
+                    inner = table.map { Dtach.innerForegroundPID(id: pane.base.id, table: $0) }
+                        ?? Dtach.innerForegroundPID(id: pane.base.id)
+                } else {
+                    inner = nil
+                }
                 let pid: Int32
-                if pane.base.agent == .shell, let inner = Dtach.innerForegroundPID(id: pane.base.id) {
+                if let inner {
                     pid = Int32(inner)
                 } else {
                     let fg = ghostty_surface_foreground_pid(surface)
@@ -1460,41 +1442,6 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// All panes across all windows (liveness, attention, persistence).
     private func allPanes() -> [Pane] { controllers.flatMap { $0.workspace.panes } }
-
-    /// Synchronous live detection (used by `snapshot()`): controller → the
-    /// agent conversation it's running, if any. Cheap `lsof` of a handful of
-    /// pids — fine on the save-group click.
-    private func detectLiveConversations() -> [ObjectIdentifier: Conversation] {
-        // Snapshot is per-window (active pane) for now; full multi-pane capture
-        // lands with PersistedWorkspace (Phase 7). Build a controller→pid map
-        // from each window's active pane.
-        var pidToController: [Int32: TerminalTabWindowController] = [:]
-        for c in controllers {
-            let pane = c.holder
-            guard let surface = pane.surfaceView?.surface else { continue }
-            // Look through dtach for a wrapped shell (the hand-launched agent runs
-            // under the master); else use the surface foreground pid.
-            let pid: Int32
-            if pane.base.agent == .shell, let inner = Dtach.innerForegroundPID(id: pane.base.id) {
-                pid = Int32(inner)
-            } else {
-                let fg = ghostty_surface_foreground_pid(surface)
-                guard fg > 0 else { continue }
-                pid = Int32(fg)
-            }
-            pidToController[pid] = c
-        }
-        guard !pidToController.isEmpty else { return [:] }
-        let info = LiveSessionLinker.inspect(pids: Array(pidToController.keys))
-        var out: [ObjectIdentifier: Conversation] = [:]
-        for (pid, controller) in pidToController {
-            guard controller.base.agent == .shell else { continue }
-            if let detected = detectConversation(for: info[pid]) {
-                out[ObjectIdentifier(controller)] = detected
-            }
-        }
-        return out
-    }
 
     /// Resolve a tab's foreground process to a conversation: the open session
     /// file (Codex) wins; otherwise, a running `claude` is linked to the

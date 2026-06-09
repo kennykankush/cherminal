@@ -1,9 +1,9 @@
 import Foundation
 import GhosttyKit
 
-/// Thin Swift facade over the libghostty C API. Phase 1 only exposes build
-/// info — enough to prove the xcframework links and the C bridge works.
-/// Later phases will add Config, App, and Surface wrappers.
+/// Thin Swift facade over libghostty's build-info call — a link-sanity probe.
+/// (The real Config/App/Surface wrappers live in Vendor/Ghostty; this predates
+/// them and stays only for the version readout.)
 enum GhosttyBridge {
     struct BuildInfo: Sendable {
         let version: String

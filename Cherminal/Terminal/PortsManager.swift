@@ -102,15 +102,21 @@ final class PortsManager: ObservableObject {
         let devRoots = self.devRoots
 
         let scanned = await Task.detached(priority: .utility) { () -> [DevPort] in
+            // One shared ProcTable answers every pane's master pid AND supplies
+            // the pid→ppid ancestry map — previously this loop spawned
+            // lsof+pgrep per pane plus its own ps. If the snapshot failed,
+            // attribute by surface pid only for this tick (graceful degrade).
+            let table = ProcTable.cached(socketDir: Dtach.directory)
             var tabPIDs: [Int32: String] = [:]
             for r in refs {
-                if let master = Dtach.masterPID(id: r.socketID) {
+                if let table, let master = Dtach.masterPID(id: r.socketID, table: table) {
                     tabPIDs[Int32(master)] = r.conversationID
                 } else if r.fgPID > 0 {
                     tabPIDs[r.fgPID] = r.conversationID
                 }
             }
-            return PortScanner.scan(.init(roomPaths: roomPaths, tabPIDs: tabPIDs, devRoots: devRoots))
+            return PortScanner.scan(.init(roomPaths: roomPaths, tabPIDs: tabPIDs,
+                                          devRoots: devRoots, parentMap: table?.parent))
         }.value
 
         if scanned != ports { ports = scanned }

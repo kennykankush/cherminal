@@ -48,6 +48,14 @@ enum TurnState {
     /// `tool_use` (or a trailing user/tool-result record) → still working.
     /// Trailing non-conversational records (summaries, file-history snapshots)
     /// are skipped so they can't mask the real turn boundary.
+    ///
+    /// Verified against real sessions (2026-06): subagent sidechains can NOT
+    /// pollute this read — their records live in separate files
+    /// (`<room>/<session-id>/subagents/agent-*.jsonl`), never in the main
+    /// session JSONL (whose records all carry isSidechain:false). While
+    /// subagents run, the main file's last assistant record is the
+    /// orchestrator's `tool_use` → correctly "working". Streaming partials
+    /// carry stop_reason null → also "working".
     private static func claudeAwaiting(_ lines: [Data.SubSequence]) -> Bool {
         for line in lines.reversed() {
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -65,13 +73,24 @@ enum TurnState {
         return false
     }
 
-    /// Codex closes each turn with a `task_complete` event, written last, so the
-    /// agent is awaiting you exactly when that's the final record. Checking only
-    /// the last line avoids matching a *previous* turn's completion mid-task.
+    /// Codex closes each turn with a `task_complete` event. In every observed
+    /// rollout it's the literal last line (the order is …, token_count,
+    /// task_complete), but the scan walks backward skipping benign bookkeeping
+    /// trailers (token_count) so a future write-order flip can't silently kill
+    /// the light. The FIRST substantive record from the end decides: a
+    /// task_complete → your turn; anything else (a user_message, a streaming
+    /// assistant message, a tool call) → a newer turn is underway.
     private static func codexAwaiting(_ lines: [Data.SubSequence]) -> Bool {
-        guard let last = lines.last,
-              let obj = try? JSONSerialization.jsonObject(with: Data(last)) as? [String: Any],
-              let payload = obj["payload"] as? [String: Any] else { return false }
-        return (payload["type"] as? String) == "task_complete"
+        for line in lines.suffix(6).reversed() {
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  let payload = obj["payload"] as? [String: Any],
+                  let type = payload["type"] as? String else { continue }
+            switch type {
+            case "task_complete": return true
+            case "token_count": continue   // bookkeeping, not turn activity
+            default: return false
+            }
+        }
+        return false
     }
 }

@@ -21,7 +21,10 @@ enum LiveSessionLinker {
         let resumeID: String?
     }
 
-    static func inspect(pids: [Int32]) -> [Int32: ProcessInfo] {
+    /// Inspect `pids` (one batched lsof). `argvByPID` — when the caller already
+    /// holds a ProcTable snapshot — supplies each pid's command line so no
+    /// second `ps` is spawned; without it we fall back to our own ps call.
+    static func inspect(pids: [Int32], argvByPID: [Int32: String]? = nil) -> [Int32: ProcessInfo] {
         guard !pids.isEmpty else { return [:] }
         let home = NSHomeDirectory()
         let roots = [home + "/.claude/projects/", home + "/.codex/sessions/"]
@@ -32,9 +35,19 @@ enum LiveSessionLinker {
         guard let raw = run("/usr/sbin/lsof", ["-p", list, "+c", "0", "-Fpcfn"]) else { return [:] }
         var info = parse(raw, roots: roots)
         // Merge in the exact resume id from each process's argv — lsof's command
-        // field is only the name, so we read argv via `ps`. This is the accurate
-        // session link for a resumed agent (vs. guessing by room recency).
-        for (pid, id) in resumeIDs(pids: pids) where info[pid] != nil {
+        // field is only the name. This is the accurate session link for a
+        // resumed agent (vs. guessing by room recency).
+        let resumed: [Int32: String]
+        if let argvByPID {
+            var out: [Int32: String] = [:]
+            for (pid, argv) in argvByPID where info[pid] != nil {
+                if let id = parseResumeID(argv) { out[pid] = id }
+            }
+            resumed = out
+        } else {
+            resumed = resumeIDs(pids: pids)
+        }
+        for (pid, id) in resumed where info[pid] != nil {
             let cur = info[pid]!
             info[pid] = ProcessInfo(command: cur.command, cwd: cur.cwd,
                                     openSessionFile: cur.openSessionFile, resumeID: id)
@@ -110,19 +123,6 @@ enum LiveSessionLinker {
     }
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        Subprocess.stdout(launchPath, args)
     }
 }

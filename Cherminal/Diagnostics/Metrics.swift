@@ -133,7 +133,11 @@ final class MetricsRecorder {
         let tabs = coordinator?.tabCount ?? 0
         let agents = coordinator?.liveConversationIDs.count ?? 0
         let windows = LiveCount.get("window")
-        let surfaces = LiveCount.get("holder")
+        // "pane" is the counter Pane.init/deinit actually bump. (This column
+        // read the long-dead "holder" key after the TabSurfaceHolder→Pane
+        // rename, so the surface-leak tripwire sat at a silent 0 — exactly the
+        // instrumentation rot it exists to catch.)
+        let surfaces = LiveCount.get("pane")
 
         let line = String(
             format: "%@,%.1f,%.1f,%d,%d,%@,%d,%d,%d,%d\n",

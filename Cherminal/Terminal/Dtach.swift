@@ -64,10 +64,12 @@ enum Dtach {
     /// whole agent→shell chain alive under one master. `-z` disables dtach's
     /// own detach keystroke (invisible; all keys reach the agent); `-r winch`
     /// makes the TUI repaint on reattach so you land on a live screen.
+    /// Everything interpolated — the binary, the socket, the inner command —
+    /// is quoted, so no path can break the shell line.
     static func wrap(_ inner: String, id: String) -> String {
-        let sock = quote(socketPath(for: id))
-        let bin = binaryPath()
-        return "\(bin) -A \(sock) -z -r winch /bin/sh -c \(quote(inner))"
+        let sock = Subprocess.quote(socketPath(for: id))
+        let bin = Subprocess.quote(binaryPath())
+        return "\(bin) -A \(sock) -z -r winch /bin/sh -c \(Subprocess.quote(inner))"
     }
 
     /// Is a master still alive for this conversation? True iff a `dtach`
@@ -76,6 +78,11 @@ enum Dtach {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return false }
         return !socketHolderPIDs(sock).isEmpty
+    }
+
+    /// Master liveness answered from a process snapshot — no subprocess.
+    static func isMasterAlive(id: String, table: ProcTable) -> Bool {
+        !table.holders(ofSocket: socketPath(for: id)).isEmpty
     }
 
     /// End a detached session for good: SIGTERM the master (its child exits,
@@ -103,23 +110,35 @@ enum Dtach {
     }
 
     // MARK: - Seeing through dtach (the master/child tree)
+    //
+    // The resolution LAW lives once, in `resolveMaster` / `resolveInner`, and
+    // is consumed two ways: the snapshot path (a ProcTable, zero subprocesses
+    // per question — what the poll loops use) and the legacy single-socket
+    // path (per-socket lsof/pgrep/ps, kept for one-off questions like "can
+    // this one pane park?" where a full snapshot would be overkill).
 
-    /// The `dtach` master holding a wrapped pane's socket. The surface's
-    /// foreground process is the dtach CLIENT (a childless relay); the master —
-    /// which actually runs the inner shell/agent on its own pty — is the
-    /// socket-matching process that HAS a child. Returns nil WITHOUT shelling out
-    /// when the pane isn't wrapped (socket file absent), so the off-by-default
-    /// path adds no per-pane subprocess.
+    /// The `dtach` master holding a wrapped pane's socket, answered from a
+    /// process snapshot — no subprocess.
+    static func masterPID(id: String, table: ProcTable) -> pid_t? {
+        resolveMaster(holders: table.holders(ofSocket: socketPath(for: id)),
+                      children: table.children(of:))
+    }
+
+    /// The `dtach` master holding a wrapped pane's socket (single-shot probe).
+    /// Returns nil WITHOUT shelling out when the pane isn't wrapped (socket
+    /// file absent), so the off-by-default path adds no per-pane subprocess.
     static func masterPID(id: String) -> pid_t? {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return nil }
-        let matches = socketHolderPIDs(sock)
-        guard !matches.isEmpty else { return nil }
-        if matches.count == 1 { return matches[0] }
-        // Master = the socket holder with a child (the inner shell). The client
-        // is a leaf relay. (ppid is unreliable: with a client attached the master's
-        // parent is the client, not launchd.)
-        return matches.first(where: { !childPIDs(of: $0).isEmpty }) ?? matches[0]
+        return resolveMaster(holders: socketHolderPIDs(sock), children: childPIDs(of:))
+    }
+
+    /// The real inner foreground process under a wrapped pane's master,
+    /// answered from a process snapshot — no subprocess.
+    static func innerForegroundPID(id: String, table: ProcTable) -> pid_t? {
+        resolveInner(holders: table.holders(ofSocket: socketPath(for: id)),
+                     children: table.children(of:),
+                     foregroundGroup: { table.tpgid[$0] })
     }
 
     /// The real inner foreground process under a wrapped pane's master: the inner
@@ -129,26 +148,43 @@ enum Dtach {
     static func innerForegroundPID(id: String) -> pid_t? {
         let sock = socketPath(for: id)
         guard FileManager.default.fileExists(atPath: sock) else { return nil }
-        let matches = socketHolderPIDs(sock)
-        guard !matches.isEmpty else { return nil }
-        // Find the master AND its inner-shell child in one pass over the socket
-        // matches (master = the one WITH a child; the client is a childless relay),
-        // so we don't re-run the pgrep -P that the separate masterPID already does.
-        var master = matches[0]
+        return resolveInner(holders: socketHolderPIDs(sock),
+                            children: childPIDs(of:),
+                            foregroundGroup: terminalForegroundPID(of:))
+    }
+
+    /// The master among a socket's holders. The surface's foreground process is
+    /// the dtach CLIENT (a childless relay); the master — which actually runs
+    /// the inner shell/agent on its own pty — is the socket-matching process
+    /// that HAS a child. (ppid is unreliable: with a client attached the
+    /// master's parent is the client, not launchd.)
+    private static func resolveMaster(holders: [pid_t], children: (pid_t) -> [pid_t]) -> pid_t? {
+        guard !holders.isEmpty else { return nil }
+        if holders.count == 1 { return holders[0] }
+        return holders.first(where: { !children($0).isEmpty }) ?? holders[0]
+    }
+
+    /// Master → inner shell → the pty's foreground group leader. The tpgid is
+    /// the ACTIVE foreground process (a hand-launched agent), or the shell's
+    /// own pid when it's at a prompt — foreground-aware, unlike "first child"
+    /// which could be a background job (e.g. `npm run dev &`).
+    private static func resolveInner(
+        holders: [pid_t],
+        children: (pid_t) -> [pid_t],
+        foregroundGroup: (pid_t) -> pid_t?
+    ) -> pid_t? {
+        guard !holders.isEmpty else { return nil }
+        var master = holders[0]
         var shell: pid_t?
-        if matches.count == 1 {
-            shell = childPIDs(of: master).first
+        if holders.count == 1 {
+            shell = children(master).first
         } else {
-            for m in matches where shell == nil {
-                if let kid = childPIDs(of: m).first { master = m; shell = kid }
+            for m in holders where shell == nil {
+                if let kid = children(m).first { master = m; shell = kid }
             }
         }
         guard let shell else { return master }
-        // The inner pty's foreground process group (tpgid) — its leader pid is the
-        // ACTIVE foreground process (a hand-launched agent), or the shell's own pid
-        // when it's at a prompt. Foreground-aware, unlike "first child" which could
-        // be a background job (e.g. `npm run dev &`).
-        if let fg = terminalForegroundPID(of: shell), fg > 0 { return fg }
+        if let fg = foregroundGroup(shell), fg > 0 { return fg }
         return shell
     }
 
@@ -156,32 +192,15 @@ enum Dtach {
     /// That id is the foreground group leader's pid — the active foreground process
     /// on the pty. nil if it has no controlling tty / no foreground group.
     private static func terminalForegroundPID(of pid: pid_t) -> pid_t? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-o", "tpgid=", "-p", String(pid)]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let tpgid = pid_t(raw), tpgid > 0 else { return nil }
+        guard let raw = Subprocess.stdout("/bin/ps", ["-o", "tpgid=", "-p", String(pid)]) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let tpgid = pid_t(trimmed), tpgid > 0 else { return nil }
         return tpgid
     }
 
     /// Direct child pids of `pid` (pgrep -P).
     static func childPIDs(of pid: pid_t) -> [pid_t] {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-P", String(pid)]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let out = String(data: data, encoding: .utf8) else { return [] }
+        guard let out = Subprocess.stdout("/usr/bin/pgrep", ["-P", String(pid)]) else { return [] }
         return out.split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
     }
@@ -199,23 +218,8 @@ enum Dtach {
     /// the listener (the master); connected clients don't hold the *named* socket
     /// path open, so this returns the master cleanly. [] if none (stale socket).
     private static func socketHolderPIDs(_ socket: String) -> [pid_t] {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        p.arguments = ["-t", socket]   // -t: terse, pids only
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let out = String(data: data, encoding: .utf8) else { return [] }
+        guard let out = Subprocess.stdout("/usr/sbin/lsof", ["-t", socket]) else { return [] }
         return out.split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
-    }
-
-    /// POSIX single-quote: wrap in '…' and escape embedded quotes. Used for the
-    /// socket path and the inner command so neither can break the shell line.
-    private static func quote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

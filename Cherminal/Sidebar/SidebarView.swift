@@ -21,9 +21,9 @@ struct SidebarView: View {
     /// Full-text body matches: session-file path → matched snippet.
     @State private var bodyHits: [String: String] = [:]
     @State private var searchingBodies = false
-    /// Session-file sizes (bytes) for Deep mode's recent subset — the real volume
-    /// signal (the cache's messageCount is a useless ≤10 stub). Filled off-main
-    /// when Deep is shown, keyed by conversation id.
+    /// Session-file sizes (bytes) for Deep mode's recent subset — the volume
+    /// signal (a head+tail parse can't count messages truthfully, so size is
+    /// the honest metric). Filled off-main when Deep is shown, keyed by id.
     @State private var deepSizes: [String: Int64] = [:]
     /// Rows shown per list before "Show more" — caps the otherwise huge sidebar.
     @State private var displayLimit = 50
@@ -214,9 +214,8 @@ struct SidebarView: View {
     }
 
     /// Recent (≤7 days) intensive sessions, ranked by session-file SIZE — the
-    /// reliable volume signal. (The cache's `messageCount` is a useless ≤10 stub,
-    /// so it can't gate on "messages".) Biggest first. Sizes are stat'd lazily
-    /// into `deepSizes` when Deep is shown; before that this is empty.
+    /// reliable volume signal. Biggest first. Sizes are stat'd lazily into
+    /// `deepSizes` when Deep is shown; before that this is empty.
     private var deepConversations: [Conversation] {
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         let minBytes = Int64(max(deepMinBytes, 1))   // ≥1 also drops unstat'd (size 0)
@@ -347,7 +346,7 @@ struct SidebarView: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
             Spacer(minLength: 6)
-            Text("\(group.tabs.count)")
+            Text("\(group.workspaces.count)")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
         }
@@ -411,9 +410,9 @@ struct SidebarView: View {
     }
 
     private func saveCurrentTabs() {
-        let tabs = coordinator.snapshot()
-        guard !tabs.isEmpty else { return }
-        DispatchQueue.main.async { bookmarks.create(name: "", tabs: tabs) }
+        let workspaces = coordinator.groupSnapshot()
+        guard !workspaces.isEmpty else { return }
+        DispatchQueue.main.async { bookmarks.create(name: "", workspaces: workspaces) }
     }
 
     // MARK: - Pinned (cross-room shortcuts)

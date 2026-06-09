@@ -106,16 +106,10 @@ enum GitStatusReader {
     }
 
     private static func git(_ args: [String]) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = args
-        let out = Pipe()
-        p.standardOutput = out
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
+        // 10s: `status` on a huge cold-cache repo can take a few seconds;
+        // a repo on a dead mount must still never wedge the poll.
+        guard let out = Subprocess.run("/usr/bin/git", args, timeout: 10),
+              out.status == 0 else { return nil }
+        return out.stdout
     }
 }

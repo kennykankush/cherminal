@@ -26,11 +26,14 @@ enum TerminalCommand {
         switch conversation.agent {
         case .claudeCode:
             guard let id = safeSessionID(conversation.id) else { return nil }
-            let bin = BinaryResolver.shared.path(for: "claude")
+            // Quote the binary: a resolved path with a space/quote in it must
+            // not be able to split the inner shell line. The id is alphabet-
+            // checked above, so it interpolates bare.
+            let bin = Subprocess.quote(BinaryResolver.shared.path(for: "claude"))
             return Dtach.wrap("\(bin) --dangerously-skip-permissions --resume \(id)", id: id)
         case .codex:
             guard let id = safeSessionID(conversation.id) else { return nil }
-            let bin = BinaryResolver.shared.path(for: "codex")
+            let bin = Subprocess.quote(BinaryResolver.shared.path(for: "codex"))
             return Dtach.wrap("\(bin) --dangerously-bypass-approvals-and-sandbox resume \(id)", id: id)
         case .shell:
             // Default: no command override → Ghostty spawns the user's login

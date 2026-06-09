@@ -26,6 +26,27 @@ struct ClaudeSessionScanner {
         )
     }
 
+    // MARK: - Incremental (single changed file)
+
+    /// Parse ONE session file — the watcher's changed-path fast path, so a
+    /// write to one session no longer costs a full stat-sweep of every session
+    /// on disk. Serves from cache when (mtime, size) still match; nil when the
+    /// file is gone/empty (caller removes the conversation).
+    static func summarizeFile(_ url: URL, cache: SessionCache?) -> Conversation? {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+        guard let size = values?.fileSize.map(Int64.init), size > 0 else { return nil }
+        let mtime = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
+        if let cache,
+           let entry = cache.get(path: url.path, mtime: mtime, size: size),
+           entry.summary.continuationScanned == true,   // pre-feature rows reparse (engine rule)
+           let convo = Conversation(persisted: entry.summary, sessionFile: url) {
+            return convo
+        }
+        let roomHint = PathEncoder.decode(url.deletingLastPathComponent().lastPathComponent)?.path
+        return parseOne(ScanCandidate(file: url, mtime: mtime, size: size, roomHint: roomHint),
+                        cache: cache)
+    }
+
     // MARK: - Stat sweep
 
     private static func enumerateCandidates() -> [ScanCandidate] {
@@ -92,7 +113,6 @@ struct ClaudeSessionScanner {
             roomPath: roomPath,
             firstTimestamp: summary.firstTimestamp,
             lastTimestamp: lastActivity,
-            messageCount: summary.userMessageCount,
             previewText: preview,
             continuedFromSessionID: detectContinuedFrom(file: candidate.file, selfID: id),
             continuationScanned: true
@@ -159,9 +179,7 @@ extension Conversation {
             sessionFile: sessionFile,
             firstMessageAt: persisted.firstTimestamp,
             lastActivityAt: persisted.lastTimestamp,
-            messageCount: persisted.messageCount,
             previewText: persisted.previewText,
-            state: .dormant,
             continuedFromID: persisted.continuedFromSessionID
         )
     }

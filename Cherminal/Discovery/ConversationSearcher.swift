@@ -62,16 +62,27 @@ enum ConversationSearcher {
     // MARK: - Phase 2: clean snippet from message text
 
     private static func snippet(forFileAt path: String, needle: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        // Stream the file in bounded chunks, carrying the partial trailing line
+        // across reads, and STOP at the first matching line. Loading whole
+        // files (FileManager.contents) meant a broad query over 80 candidates
+        // could pull gigabytes into memory — sessions reach 100 MB+ each.
+        guard let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)) else { return nil }
+        defer { try? handle.close() }
         let newline = UInt8(ascii: "\n")
-        var start = data.startIndex
-        for index in data.indices where data[index] == newline {
-            if let s = snippet(inLine: data[start..<index], needle: needle) { return s }
-            start = data.index(after: index)
+        let chunkSize = 4 * 1024 * 1024
+        var carry = Data()
+        while true {
+            let chunk = (try? handle.read(upToCount: chunkSize)) ?? Data()
+            if chunk.isEmpty { break }
+            carry.append(chunk)
+            var start = carry.startIndex
+            while let nl = carry[start...].firstIndex(of: newline) {
+                if let s = snippet(inLine: carry[start..<nl], needle: needle) { return s }
+                start = carry.index(after: nl)
+            }
+            carry = Data(carry[start...])   // partial line waits for the next chunk
         }
-        if start < data.endIndex {
-            if let s = snippet(inLine: data[start..<data.endIndex], needle: needle) { return s }
-        }
+        if !carry.isEmpty, let s = snippet(inLine: carry[...], needle: needle) { return s }
         return nil  // matched only in non-text (base64/tool noise) — drop it.
     }
 
@@ -120,23 +131,9 @@ enum ConversationSearcher {
     // MARK: - Subprocess
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        // Discard stderr to the null device. grep across ~1.6 GB emits
-        // permission / "no such file" warnings; an undrained Pipe() could fill
-        // its 64 KB buffer and wedge grep while we wait on stdout.
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            // grep exits 1 when no matches — that's not an error for us.
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        // grep across multi-GB of session files legitimately takes seconds —
+        // give it room, but never let it wedge a search forever. (grep exits 1
+        // on "no matches", which isn't an error for us — stdout() ignores status.)
+        Subprocess.stdout(launchPath, args, timeout: 20)
     }
 }

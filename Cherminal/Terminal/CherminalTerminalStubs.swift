@@ -24,9 +24,10 @@ class BaseTerminalController: NSWindowController {
     func promptTabTitle() {}
 }
 
-/// Stub for Ghostty.app's restore-from-session error type. Cherminal doesn't
-/// persist sessions, so the only case we provide is the one referenced by
-/// the lifted decoder.
+/// Stub for Ghostty.app's restore-from-session error type. Cherminal has its
+/// own persistence (PersistedWorkspace + dtach) and never uses Ghostty.app's
+/// NSWindow-restoration path, so the only case provided is the one referenced
+/// by the lifted decoder.
 enum TerminalRestoreError: Error {
     case delegateInvalid
 }

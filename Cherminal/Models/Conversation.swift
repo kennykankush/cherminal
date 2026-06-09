@@ -62,13 +62,6 @@ struct AgentBadge: View {
     }
 }
 
-enum ConversationState: Hashable, Sendable {
-    case live
-    case idle
-    case dormant
-    case pinned
-}
-
 struct Conversation: Identifiable, Hashable, Sendable {
     let id: String
     let agent: AgentKind
@@ -76,9 +69,13 @@ struct Conversation: Identifiable, Hashable, Sendable {
     let sessionFile: URL
     let firstMessageAt: Date?
     let lastActivityAt: Date
-    let messageCount: Int
     let previewText: String?
-    let state: ConversationState
+    // NOTE deliberately absent: a `state` enum (live/idle/dormant/pinned) and a
+    // `messageCount` both used to ride along here and were trusted by nothing —
+    // liveness comes from the coordinator's reconcile, pins from PinsManager,
+    // and the head+tail parse can't count messages truthfully (Deep mode ranks
+    // by file size; the inspector shows the accumulator's exact count). A model
+    // field nobody believes is bank-logic rot, so they're gone.
     /// If this session is a post-compaction continuation, the id of the session
     /// it continues from (Claude writes the parent's path + a "Continue the
     /// conversation…" handoff into the new session's first user turn). Lets the
