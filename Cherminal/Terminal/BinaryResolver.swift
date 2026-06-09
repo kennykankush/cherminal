@@ -23,6 +23,8 @@ final class BinaryResolver: @unchecked Sendable {
     private var capturedPath: String?
     private var capturedExtras: [String: String] = [:]
     private var binaryCache: [String: String] = [:]
+    /// Last time a capture was started — gates the retry-on-failure cooldown.
+    private var lastCaptureAttempt = Date.distantPast
     /// Balanced enter()/leave() around the background capture so the first
     /// surface spawn can wait for PATH without us blocking the launch thread.
     private let readyGroup = DispatchGroup()
@@ -50,15 +52,31 @@ final class BinaryResolver: @unchecked Sendable {
     /// slow rc file can never hang a surface spawn. By the time the first
     /// surface spawns (after registry bootstrap's awaits) capture is normally
     /// already done, so this returns immediately in the common case.
+    ///
+    /// If the launch capture FAILED (shell timed out, sentinel missing), one
+    /// later caller per cooldown re-attempts it synchronously — capture used to
+    /// be strictly one-shot, so a single bad launch silently degraded every
+    /// resume command to bare names for the whole session.
     private func waitUntilReady() {
         lock.lock(); let started = prewarmStarted; lock.unlock()
         guard started else { return }
         _ = readyGroup.wait(timeout: .now() + 3)
+
+        lock.lock()
+        let shouldRetry = capturedPath == nil
+            && Date().timeIntervalSince(lastCaptureAttempt) > 30
+        if shouldRetry { lastCaptureAttempt = Date() }   // claim the retry slot
+        lock.unlock()
+        if shouldRetry {
+            logger.warning("env capture missing — retrying login-shell capture")
+            capture()   // bounded by the subprocess timeout; off-main callers only
+        }
     }
 
     /// Pull `PATH` (and a curated set of other useful env vars) out of the
     /// user's login + interactive zsh once.
     private func capture() {
+        lock.lock(); lastCaptureAttempt = Date(); lock.unlock()
         let sentinel = "BELVEDERE_ENV_BEGIN"
         let end = "BELVEDERE_ENV_END"
         let script = """
@@ -125,9 +143,14 @@ final class BinaryResolver: @unchecked Sendable {
         guard let path else { return name }
 
         let resolved = lookup(name, inPath: path)
-        lock.lock()
-        binaryCache[name] = resolved ?? name
-        lock.unlock()
+        // Cache only successes. Caching the bare-name fallback meant a tool
+        // installed mid-session (or a transient PATH glitch) stayed
+        // unresolvable until relaunch.
+        if let resolved {
+            lock.lock()
+            binaryCache[name] = resolved
+            lock.unlock()
+        }
         return resolved ?? name
     }
 
@@ -145,28 +168,12 @@ final class BinaryResolver: @unchecked Sendable {
     }
 
     private func runLoginShell(script: String) -> String? {
-        let task = Process()
-        task.launchPath = "/bin/zsh"
         // -i + -l reproduces the user's terminal: zprofile, zshrc, the
         // works. Yes, this can spawn fastfetch and friends — sentinels in
-        // the script let us filter that noise back out.
-        task.arguments = ["-ilc", script]
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        // Discard stderr to the null device. A live Pipe() here would never be
-        // drained, so a chatty rc file could fill its 64 KB buffer and wedge
-        // the shell mid-write.
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            // Read stdout to EOF *before* waiting. rc files routinely emit more
-            // than the 64 KB pipe buffer (fastfetch banners, motd); waiting
-            // first would deadlock — the shell blocks writing, we block waiting.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        // the script let us filter that noise back out. 15s timeout: rc files
+        // are legitimately slow (nvm, pyenv), but a hung shell (a prompt
+        // waiting on input, a wedged plugin) must never poison the capture
+        // forever — on timeout we return nil and a later call can retry.
+        Subprocess.stdout("/bin/zsh", ["-ilc", script], timeout: 15)
     }
 }

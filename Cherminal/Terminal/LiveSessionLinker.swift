@@ -110,19 +110,6 @@ enum LiveSessionLinker {
     }
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        Subprocess.stdout(launchPath, args)
     }
 }

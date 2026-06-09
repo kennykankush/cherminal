@@ -64,10 +64,12 @@ enum Dtach {
     /// whole agent→shell chain alive under one master. `-z` disables dtach's
     /// own detach keystroke (invisible; all keys reach the agent); `-r winch`
     /// makes the TUI repaint on reattach so you land on a live screen.
+    /// Everything interpolated — the binary, the socket, the inner command —
+    /// is quoted, so no path can break the shell line.
     static func wrap(_ inner: String, id: String) -> String {
-        let sock = quote(socketPath(for: id))
-        let bin = binaryPath()
-        return "\(bin) -A \(sock) -z -r winch /bin/sh -c \(quote(inner))"
+        let sock = Subprocess.quote(socketPath(for: id))
+        let bin = Subprocess.quote(binaryPath())
+        return "\(bin) -A \(sock) -z -r winch /bin/sh -c \(Subprocess.quote(inner))"
     }
 
     /// Is a master still alive for this conversation? True iff a `dtach`
@@ -156,32 +158,15 @@ enum Dtach {
     /// That id is the foreground group leader's pid — the active foreground process
     /// on the pty. nil if it has no controlling tty / no foreground group.
     private static func terminalForegroundPID(of pid: pid_t) -> pid_t? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-o", "tpgid=", "-p", String(pid)]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let raw = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let tpgid = pid_t(raw), tpgid > 0 else { return nil }
+        guard let raw = Subprocess.stdout("/bin/ps", ["-o", "tpgid=", "-p", String(pid)]) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let tpgid = pid_t(trimmed), tpgid > 0 else { return nil }
         return tpgid
     }
 
     /// Direct child pids of `pid` (pgrep -P).
     static func childPIDs(of pid: pid_t) -> [pid_t] {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        p.arguments = ["-P", String(pid)]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let out = String(data: data, encoding: .utf8) else { return [] }
+        guard let out = Subprocess.stdout("/usr/bin/pgrep", ["-P", String(pid)]) else { return [] }
         return out.split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
     }
@@ -199,23 +184,8 @@ enum Dtach {
     /// the listener (the master); connected clients don't hold the *named* socket
     /// path open, so this returns the master cleanly. [] if none (stale socket).
     private static func socketHolderPIDs(_ socket: String) -> [pid_t] {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        p.arguments = ["-t", socket]   // -t: terse, pids only
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return [] }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard let out = String(data: data, encoding: .utf8) else { return [] }
+        guard let out = Subprocess.stdout("/usr/sbin/lsof", ["-t", socket]) else { return [] }
         return out.split(whereSeparator: \.isNewline)
             .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
-    }
-
-    /// POSIX single-quote: wrap in '…' and escape embedded quotes. Used for the
-    /// socket path and the inner command so neither can break the shell line.
-    private static func quote(_ s: String) -> String {
-        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

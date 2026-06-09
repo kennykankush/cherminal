@@ -120,23 +120,9 @@ enum ConversationSearcher {
     // MARK: - Subprocess
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        // Discard stderr to the null device. grep across ~1.6 GB emits
-        // permission / "no such file" warnings; an undrained Pipe() could fill
-        // its 64 KB buffer and wedge grep while we wait on stdout.
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            // grep exits 1 when no matches — that's not an error for us.
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        // grep across multi-GB of session files legitimately takes seconds —
+        // give it room, but never let it wedge a search forever. (grep exits 1
+        // on "no matches", which isn't an error for us — stdout() ignores status.)
+        Subprocess.stdout(launchPath, args, timeout: 20)
     }
 }

@@ -197,21 +197,6 @@ enum PortScanner {
     // MARK: - Subprocess helper
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {
-        let task = Process()
-        task.launchPath = launchPath
-        task.arguments = args
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        // Discard stderr: lsof/ps warn about fds they can't stat, and an
-        // undrained Pipe() could fill and wedge the child mid-write.
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        Subprocess.stdout(launchPath, args)
     }
 }
