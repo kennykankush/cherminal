@@ -287,7 +287,73 @@ struct ConversationLedgerTests {
         #expect(deduped.first?.panes.isEmpty == true)
     }
 
+    // MARK: - Hand-launch detection order (Fix A's law)
+
+    @Test func detectionPrefersArgvThenOpenFileThenRecency() {
+        let room = "/Users/x/dev/room"
+        let older = timed("c-old", room: room, at: 100)
+        let newer = timed("c-new", room: room, at: 200)
+        let codexConvo = timed("x-1", room: room, at: 50, agent: .codex,
+                               file: "/Users/x/.codex/sessions/r.jsonl")
+        let candidates = [older, newer, codexConvo]
+
+        // 1. argv resume id — exact, beats everything.
+        let argv = LiveSessionLinker.ProcessInfo(
+            command: "claude", cwd: room, openSessionFile: nil, resumeID: "c-old")
+        #expect(ConversationLedger.detectConversation(info: argv, candidates: candidates)?.id == "c-old")
+
+        // 2. codex's open rollout file — exact.
+        let openFile = LiveSessionLinker.ProcessInfo(
+            command: "codex", cwd: room,
+            openSessionFile: "/Users/x/.codex/sessions/r.jsonl", resumeID: nil)
+        #expect(ConversationLedger.detectConversation(info: openFile, candidates: candidates)?.id == "x-1")
+
+        // 3. claude with no exact signal → most-recently-active in the room.
+        let bare = LiveSessionLinker.ProcessInfo(
+            command: "claude", cwd: room, openSessionFile: nil, resumeID: nil)
+        #expect(ConversationLedger.detectConversation(info: bare, candidates: candidates)?.id == "c-new")
+
+        // Not an agent / no cwd / no info → nothing.
+        let shell = LiveSessionLinker.ProcessInfo(
+            command: "zsh", cwd: room, openSessionFile: nil, resumeID: nil)
+        #expect(ConversationLedger.detectConversation(info: shell, candidates: candidates) == nil)
+        #expect(ConversationLedger.detectConversation(info: nil, candidates: candidates) == nil)
+    }
+
+    // MARK: - Tray anti-leak (parked shells)
+
+    @Test func trayReapsAgedAndOverCapShellsKeepingNewest() {
+        let now = Date(timeIntervalSince1970: 100_000)
+        let day: TimeInterval = 86_400
+        var shells: [(id: String, detachedAt: Date)] = [
+            (id: "ancient", detachedAt: now.addingTimeInterval(-2 * day)),   // over maxAge
+        ]
+        // 5 fresh shells, newest last.
+        for i in 0..<5 {
+            shells.append((id: "s\(i)", detachedAt: now.addingTimeInterval(Double(i) * 60 - 3600)))
+        }
+        // Cap 3: the ancient one reaps by age; of the 5 fresh, the 2 OLDEST reap.
+        let reap = ConversationLedger.shellTrayReaps(
+            parkedShells: shells, now: now, cap: 3, maxAge: day)
+        #expect(reap == Set(["ancient", "s0", "s1"]))
+
+        // Under cap, nothing fresh reaps.
+        #expect(ConversationLedger.shellTrayReaps(
+            parkedShells: Array(shells.dropFirst()), now: now, cap: 16, maxAge: day).isEmpty)
+        #expect(ConversationLedger.shellTrayReaps(
+            parkedShells: [], now: now, cap: 3, maxAge: day).isEmpty)
+    }
+
     // MARK: - Helpers
+
+    private func timed(_ id: String, room: String, at: TimeInterval,
+                       agent: AgentKind = .claudeCode, file: String? = nil) -> Conversation {
+        Conversation(id: id, agent: agent, roomPath: URL(fileURLWithPath: room),
+                     sessionFile: URL(fileURLWithPath: file ?? room),
+                     firstMessageAt: nil,
+                     lastActivityAt: Date(timeIntervalSince1970: at),
+                     previewText: nil)
+    }
 
     private func persistedPane(_ id: String, agent: AgentKind = .claudeCode) -> PersistedPane {
         PersistedPane(conversationID: id, agentRaw: agent.rawValue,
