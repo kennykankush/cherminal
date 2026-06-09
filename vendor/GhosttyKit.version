@@ -1,0 +1,6 @@
+# The pinned vendored-libghostty release tag. CI downloads
+# GhosttyKit.xcframework.zip from this repo release (cached on this key);
+# local dev uses the gitignored vendor/GhosttyKit.xcframework built by
+# scripts/build-libghostty.sh. Bump by uploading a new release asset and
+# updating this tag (provenance in the release notes).
+vendor-libghostty-20260610

@@ -29,7 +29,7 @@ Cherminal watches agents the way a window manager watches windows — by reading
 - **macOS 26+** (deployment target).
 - **Xcode 26+**.
 - **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** — `brew install xcodegen`. The `.xcodeproj` is generated from `project.yml`.
-- `vendor/GhosttyKit.xcframework` (libghostty) is committed — no separate Ghostty build is needed for normal app work.
+- `vendor/GhosttyKit.xcframework` (libghostty) is **not** committed (134 MB) — grab it once with `gh release download $(grep -v '^#' vendor/GhosttyKit.version | tr -d '[:space:]') -p 'GhosttyKit.xcframework.zip' -O /tmp/g.zip && unzip /tmp/g.zip -d vendor/`, or rebuild it via `scripts/build-libghostty.sh`. CI fetches the same pinned release asset automatically.
 
 ## Build & run
 

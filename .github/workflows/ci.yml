@@ -23,6 +23,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The vendored libghostty is too large to commit (134 MB, >100 MB
+      # object) and too slow/unpinned to rebuild per run — it ships as a
+      # release asset pinned by vendor/GhosttyKit.version, cached here.
+      - name: Read pinned libghostty release
+        id: ghostty
+        run: echo "tag=$(grep -v '^#' vendor/GhosttyKit.version | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache GhosttyKit.xcframework
+        id: ghostty-cache
+        uses: actions/cache@v4
+        with:
+          path: vendor/GhosttyKit.xcframework
+          key: ghosttykit-${{ steps.ghostty.outputs.tag }}
+
+      - name: Download GhosttyKit.xcframework
+        if: steps.ghostty-cache.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ steps.ghostty.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" -p 'GhosttyKit.xcframework.zip' -O /tmp/ghosttykit.zip
+          unzip -q /tmp/ghosttykit.zip -d vendor/
+          test -d vendor/GhosttyKit.xcframework
+
       - name: Select newest Xcode
         run: |
           XCODE="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
