@@ -21,8 +21,14 @@ struct SidebarView: View {
     /// Full-text body matches: session-file path → matched snippet.
     @State private var bodyHits: [String: String] = [:]
     @State private var searchingBodies = false
-    /// Message-count cutoff for "Deep" mode (intensive, last-7-days sessions).
-    @AppStorage("cherminal.deepThreshold") private var deepThreshold = 20
+    /// Session-file sizes (bytes) for Deep mode's recent subset — the real volume
+    /// signal (the cache's messageCount is a useless ≤10 stub). Filled off-main
+    /// when Deep is shown, keyed by conversation id.
+    @State private var deepSizes: [String: Int64] = [:]
+    /// Rows shown per list before "Show more" — caps the otherwise huge sidebar.
+    @State private var displayLimit = 50
+    /// Minimum session size (bytes) for Deep mode — the size-filter chips.
+    @AppStorage("cherminal.deepMinBytes") private var deepMinBytes = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,6 +62,15 @@ struct SidebarView: View {
             bodyHits = Dictionary(hits.map { ($0.path, $0.snippet) }, uniquingKeysWith: { a, _ in a })
             searchingBodies = false
         }
+        // Stat the recent subset for Deep mode's size ranking — only while Deep
+        // is shown; re-runs when the conversation set changes.
+        .task(id: "\(mode == .deep)-\(registry.conversations.count)") {
+            if mode == .deep { await loadDeepSizes() }
+        }
+        // Reset the "Show more" cap when the list's scope changes.
+        .onChange(of: mode) { displayLimit = 50 }
+        .onChange(of: search) { displayLimit = 50 }
+        .onChange(of: deepMinBytes) { displayLimit = 50 }
     }
 
     // MARK: - Chrome
@@ -90,7 +105,7 @@ struct SidebarView: View {
             )
 
             ModeToggle(mode: $mode)
-            if mode == .deep { deepThresholdPicker }
+            if mode == .deep { deepSizeChips }
         }
         // Top padding clears the traffic-light overlay (hiddenTitleBar window).
         .padding(.top, 28)
@@ -155,8 +170,9 @@ struct SidebarView: View {
                     groupsSection
                     pinnedSection
                     // Pinned ones live in the Pinned section above — don't repeat
-                    // them here.
-                    ForEach(filteredConversations.filter { !pins.isPinned($0.id) }) { convo in
+                    // them here. Capped to `displayLimit` with a "Show more" footer.
+                    let all = filteredConversations.filter { !pins.isPinned($0.id) }
+                    ForEach(all.prefix(displayLimit)) { convo in
                         ConversationRow(conversation: convo, showRoom: true,
                                         isLive: coordinator.liveConversationIDs.contains(convo.id),
                                         isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
@@ -164,24 +180,30 @@ struct SidebarView: View {
                             .tag(convo.id as Conversation.ID?)
                             .contextMenu { rowMenu(convo) }
                     }
+                    showMoreRow(total: all.count)
                 }
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
                 .transition(pushTransition(towards: .trailing))
             case .deep:
-                if deepConversations.isEmpty {
+                if deepSizes.isEmpty {
+                    ProgressView().controlSize(.small).frame(maxHeight: .infinity)
+                } else if deepConversations.isEmpty {
                     deepEmptyState
                 } else {
+                    let all = deepConversations.filter { !pins.isPinned($0.id) }
                     List(selection: $selection) {
                         pinnedSection
-                        ForEach(deepConversations.filter { !pins.isPinned($0.id) }) { convo in
-                            ConversationRow(conversation: convo, showRoom: true, showVolume: true,
+                        ForEach(all.prefix(displayLimit)) { convo in
+                            ConversationRow(conversation: convo, showRoom: true,
+                                            volume: formatBytes(deepSizes[convo.id] ?? 0),
                                             isLive: coordinator.liveConversationIDs.contains(convo.id),
                                             isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                             isSuperseded: registry.supersededIDs.contains(convo.id))
                                 .tag(convo.id as Conversation.ID?)
                                 .contextMenu { rowMenu(convo) }
                         }
+                        showMoreRow(total: all.count)
                     }
                     .listStyle(.sidebar)
                     .scrollContentBackground(.hidden)
@@ -191,32 +213,74 @@ struct SidebarView: View {
         }
     }
 
-    /// Recent (≤7 days) high-volume conversations — the intensive sessions that
-    /// sink in a long Recent list. Sorted most-recent-first. Uses the already-
-    /// loaded `messageCount` (no parsing).
+    /// Recent (≤7 days) intensive sessions, ranked by session-file SIZE — the
+    /// reliable volume signal. (The cache's `messageCount` is a useless ≤10 stub,
+    /// so it can't gate on "messages".) Biggest first. Sizes are stat'd lazily
+    /// into `deepSizes` when Deep is shown; before that this is empty.
     private var deepConversations: [Conversation] {
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
+        let minBytes = Int64(max(deepMinBytes, 1))   // ≥1 also drops unstat'd (size 0)
         return registry.conversations
-            .filter { $0.lastActivityAt >= cutoff && $0.messageCount >= deepThreshold }
-            .sorted { $0.lastActivityAt > $1.lastActivityAt }
+            .filter { $0.lastActivityAt >= cutoff && (deepSizes[$0.id] ?? 0) >= minBytes }
+            .sorted { (deepSizes[$0.id] ?? 0) > (deepSizes[$1.id] ?? 0) }
     }
 
-    /// The "at least N msgs" cutoff chips for Deep mode.
-    private var deepThresholdPicker: some View {
-        HStack(spacing: 6) {
-            Text("at least").font(.system(size: 11)).foregroundStyle(.tertiary)
-            ForEach([20, 50, 100], id: \.self) { n in
-                let on = deepThreshold == n
-                Text("\(n)+")
+    /// Size-cutoff chips for Deep mode — filter by session volume.
+    private var deepSizeChips: some View {
+        let tiers: [(String, Int)] = [
+            ("All", 0), ("1MB+", 1_048_576), ("10MB+", 10_485_760), ("100MB+", 104_857_600),
+        ]
+        return HStack(spacing: 5) {
+            ForEach(tiers, id: \.1) { tier in
+                let on = deepMinBytes == tier.1
+                Text(tier.0)
                     .font(.system(size: 11, weight: on ? .semibold : .medium))
                     .foregroundStyle(on ? Color.primary : Color.secondary)
                     .padding(.horizontal, 8).padding(.vertical, 3)
                     .background(Capsule().fill(on ? CHM.Color.activeFill : CHM.Color.fillSubtle))
                     .contentShape(Capsule())
-                    .onTapGesture { deepThreshold = n }
+                    .onTapGesture { deepMinBytes = tier.1 }
             }
-            Text("msgs").font(.system(size: 11)).foregroundStyle(.tertiary)
             Spacer(minLength: 0)
+        }
+    }
+
+    /// Stat the last-7-days conversations' session files (off-main) for their real
+    /// sizes. Cheap — the recent subset is small and stat is ~free.
+    private func loadDeepSizes() async {
+        let cutoff = Date().addingTimeInterval(-7 * 86_400)
+        let recent = registry.conversations
+            .filter { $0.lastActivityAt >= cutoff }
+            .map { ($0.id, $0.sessionFile) }
+        let sizes = await Task.detached(priority: .utility) { () -> [String: Int64] in
+            var out: [String: Int64] = [:]
+            for (id, url) in recent {
+                if let n = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize { out[id] = Int64(n) }
+            }
+            return out
+        }.value
+        deepSizes = sizes
+    }
+
+    private func formatBytes(_ n: Int64) -> String {
+        if n >= 1_048_576 { return String(format: "%.0f MB", Double(n) / 1_048_576) }
+        if n >= 1024 { return String(format: "%.0f KB", Double(n) / 1024) }
+        return "\(n) B"
+    }
+
+    /// Load-on-demand footer (ChatGPT/Claude-style) — caps a long list and
+    /// reveals more in batches instead of rendering thousands of rows.
+    @ViewBuilder private func showMoreRow(total: Int) -> some View {
+        if total > displayLimit {
+            Button { displayLimit += 50 } label: {
+                Text("Show \(min(50, total - displayLimit)) more · \(total - displayLimit) hidden")
+                    .font(CHM.Font.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
         }
     }
 
@@ -227,7 +291,9 @@ struct SidebarView: View {
                 .foregroundStyle(.tertiary)
             Text("No intensive sessions")
                 .font(CHM.Font.bodyEmphasis)
-            Text("Nothing from the last 7 days with \(deepThreshold)+ messages. Try a lower cutoff.")
+            Text(deepMinBytes > 0
+                 ? "Nothing over \(formatBytes(Int64(deepMinBytes))) in the last 7 days. Try a smaller cutoff."
+                 : "Nothing heavy in the last 7 days yet.")
                 .font(CHM.Font.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -623,8 +689,8 @@ private struct RoomDisclosureHeader: View {
 private struct ConversationRow: View {
     let conversation: Conversation
     var showRoom: Bool = false
-    /// Show the message count ("N msgs") — the volume signal in Deep mode.
-    var showVolume: Bool = false
+    /// A volume label ("62 MB") shown after the timestamp — set in Deep mode.
+    var volume: String? = nil
     /// Matched body excerpt when this row came from a full-text search.
     var snippet: String? = nil
     /// This conversation is running live in an open tab right now.
@@ -691,9 +757,9 @@ private struct ConversationRow: View {
                     }
                     Text(conversation.lastActivityAt.relativeShort)
                         .foregroundStyle(.tertiary)
-                    if showVolume {
+                    if let volume {
                         Text("·").foregroundStyle(.quaternary)
-                        Text("\(conversation.messageCount) msgs")
+                        Text(volume)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     }
