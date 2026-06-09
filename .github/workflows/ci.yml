@@ -13,6 +13,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # GitHub forces Node 24 for JS actions from 2026-06-16; opt in now so the
+  # switch can never surprise a run (checkout/cache v4 support it).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   test:
     name: Build & test (arm64)
