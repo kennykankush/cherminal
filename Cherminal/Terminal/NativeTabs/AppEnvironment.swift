@@ -11,6 +11,7 @@ final class AppEnvironment {
     let ghostty: Ghostty.App
     let bookmarks: BookmarksManager
     let pins: PinsManager
+    let labels = ConversationLabelsManager()   // user-set name + note per conversation
     let coordinator: TabWindowCoordinator
     let ports: PortsManager
     let caffeine = CaffeineManager()

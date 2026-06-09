@@ -39,6 +39,13 @@ struct PaneCellView: View {
     private var showBorder: Bool { isActive && workspace.panes.count > 1 }
 
     var body: some View {
+        VStack(spacing: 0) {
+            surfaceArea
+            PaneNameBar(pane: pane)   // editable name strip at the bottom of the pane
+        }
+    }
+
+    private var surfaceArea: some View {
         ZStack {
             if let surface = pane.surfaceView {
                 Ghostty.SurfaceWrapper(surfaceView: surface)
@@ -103,5 +110,42 @@ struct PaneCellView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.opacity(0.15))
+    }
+}
+
+/// A slim, click-to-edit name strip at the bottom of each pane, so a conversation
+/// is always labeled and findable. Shows the user's custom name if set, else the
+/// `/rename` / auto title; click to rename inline. Persisted per conversation id
+/// (see ConversationLabelsManager) and shared with the Details "Name & note".
+private struct PaneNameBar: View {
+    @EnvironmentObject private var labels: ConversationLabelsManager
+    @ObservedObject var pane: Pane
+
+    private var id: String { pane.conversation.id }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "tag")
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+            // Always an editable field — NOT a tap-to-edit mode. The Ghostty
+            // surface is a greedy first responder; a mode that exited on any
+            // focus loss would intermittently vanish before you could type
+            // (autoreview P2). The placeholder shows the /rename / auto title
+            // when there's no custom name. Bound straight to the store so it
+            // stays in sync with the Details "Name" field.
+            TextField(pane.conversation.previewText ?? "Name this conversation…",
+                      text: Binding(get: { labels.label(for: id).name },
+                                    set: { labels.setName($0, for: id) }))
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(CHM.Color.fillSubtle)
+        .overlay(alignment: .top) { Divider().opacity(0.4) }
+        .help("Name this conversation")
     }
 }

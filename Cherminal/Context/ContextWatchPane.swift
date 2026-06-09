@@ -13,12 +13,15 @@ struct ContextWatchPane: View {
     @EnvironmentObject private var pins: PinsManager
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var ports: PortsManager
+    @EnvironmentObject private var labels: ConversationLabelsManager
 
     @State private var usage: ConversationUsage?
     @State private var showTokenDetails = false
     @State private var portsExpanded = false
     @State private var gitStatus: GitStatus?
     @State private var showGitDetails = false
+    @State private var nameDraft = ""
+    @State private var noteDraft = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,6 +34,7 @@ struct ContextWatchPane: View {
                         if coordinator.burstingAgents.contains(convo.agent) {
                             BurstBanner(agents: [convo.agent])
                         }
+                        labelSection(convo)
                         if let usage {
                             // 5H / Weekly account windows sit ABOVE the context
                             // window — glanceable rate-limit headroom first.
@@ -49,6 +53,13 @@ struct ContextWatchPane: View {
             }
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
+        // Seed the name/note drafts from the store whenever the conversation
+        // changes (and on first appear). Edits commit back via onChange below.
+        .onChange(of: conversation?.id, initial: true) {
+            let l = conversation.map { labels.label(for: $0.id) } ?? .init()
+            nameDraft = l.name
+            noteDraft = l.note
+        }
         // Live-refresh usage for the active conversation. Claude folds in
         // append-only deltas via the accumulator (which now survives for the
         // conversation's lifetime — no tab toggle tears it down); Codex re-reads
@@ -271,6 +282,36 @@ struct ContextWatchPane: View {
             Text(label).font(CHM.Font.caption).foregroundStyle(.secondary)
             Spacer()
             Text(formatTokens(value)).font(CHM.Font.monoSmall).foregroundStyle(.primary)
+        }
+    }
+
+    // MARK: - Name & note (user-set, persisted per conversation)
+
+    private func labelSection(_ convo: Conversation) -> some View {
+        section("Name & note") {
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                TextField(convo.previewText ?? "Name this conversation…", text: $nameDraft)
+                    .textFieldStyle(.plain)
+                    .font(CHM.Font.bodyEmphasis)
+                    .onChange(of: nameDraft) { _, v in labels.setName(v, for: convo.id) }
+                ZStack(alignment: .topLeading) {
+                    if noteDraft.isEmpty {
+                        Text("Leave a note — where you left off, blockers, TODOs…")
+                            .font(CHM.Font.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 8).padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $noteDraft)
+                        .font(CHM.Font.caption)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 56)
+                        .onChange(of: noteDraft) { _, v in labels.setNote(v, for: convo.id) }
+                }
+                .padding(.horizontal, 3)
+                .background(RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                    .fill(CHM.Color.fillSubtle))
+            }
         }
     }
 

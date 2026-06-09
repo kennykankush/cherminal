@@ -76,6 +76,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
             .environmentObject(ghostty)
             .environmentObject(bookmarks)
             .environmentObject(AppEnvironment.shared.pins)
+            .environmentObject(AppEnvironment.shared.labels)
             .environmentObject(AppEnvironment.shared.ports)
             .environmentObject(AppEnvironment.shared.caffeine)
             .environmentObject(coordinator)
