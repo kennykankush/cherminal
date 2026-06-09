@@ -4,6 +4,7 @@ struct SidebarView: View {
     enum Mode: String, CaseIterable, Identifiable {
         case byRoom = "By room"
         case byRecent = "Recent"
+        case deep = "Deep"   // recent (≤7d) + high message volume — the intensive sessions
         var id: String { rawValue }
     }
 
@@ -20,6 +21,8 @@ struct SidebarView: View {
     /// Full-text body matches: session-file path → matched snippet.
     @State private var bodyHits: [String: String] = [:]
     @State private var searchingBodies = false
+    /// Message-count cutoff for "Deep" mode (intensive, last-7-days sessions).
+    @AppStorage("cherminal.deepThreshold") private var deepThreshold = 20
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,6 +90,7 @@ struct SidebarView: View {
             )
 
             ModeToggle(mode: $mode)
+            if mode == .deep { deepThresholdPicker }
         }
         // Top padding clears the traffic-light overlay (hiddenTitleBar window).
         .padding(.top, 28)
@@ -164,8 +168,73 @@ struct SidebarView: View {
                 .listStyle(.sidebar)
                 .scrollContentBackground(.hidden)
                 .transition(pushTransition(towards: .trailing))
+            case .deep:
+                if deepConversations.isEmpty {
+                    deepEmptyState
+                } else {
+                    List(selection: $selection) {
+                        pinnedSection
+                        ForEach(deepConversations.filter { !pins.isPinned($0.id) }) { convo in
+                            ConversationRow(conversation: convo, showRoom: true, showVolume: true,
+                                            isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                            isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
+                                            isSuperseded: registry.supersededIDs.contains(convo.id))
+                                .tag(convo.id as Conversation.ID?)
+                                .contextMenu { rowMenu(convo) }
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    .scrollContentBackground(.hidden)
+                    .transition(pushTransition(towards: .trailing))
+                }
             }
         }
+    }
+
+    /// Recent (≤7 days) high-volume conversations — the intensive sessions that
+    /// sink in a long Recent list. Sorted most-recent-first. Uses the already-
+    /// loaded `messageCount` (no parsing).
+    private var deepConversations: [Conversation] {
+        let cutoff = Date().addingTimeInterval(-7 * 86_400)
+        return registry.conversations
+            .filter { $0.lastActivityAt >= cutoff && $0.messageCount >= deepThreshold }
+            .sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    /// The "at least N msgs" cutoff chips for Deep mode.
+    private var deepThresholdPicker: some View {
+        HStack(spacing: 6) {
+            Text("at least").font(.system(size: 11)).foregroundStyle(.tertiary)
+            ForEach([20, 50, 100], id: \.self) { n in
+                let on = deepThreshold == n
+                Text("\(n)+")
+                    .font(.system(size: 11, weight: on ? .semibold : .medium))
+                    .foregroundStyle(on ? Color.primary : Color.secondary)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(on ? CHM.Color.activeFill : CHM.Color.fillSubtle))
+                    .contentShape(Capsule())
+                    .onTapGesture { deepThreshold = n }
+            }
+            Text("msgs").font(.system(size: 11)).foregroundStyle(.tertiary)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var deepEmptyState: some View {
+        VStack(spacing: CHM.Space.sm) {
+            Image(systemName: "flame")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("No intensive sessions")
+                .font(CHM.Font.bodyEmphasis)
+            Text("Nothing from the last 7 days with \(deepThreshold)+ messages. Try a lower cutoff.")
+                .font(CHM.Font.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, CHM.Space.xl)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.bottom, CHM.Space.xxl)
     }
 
     /// Direction-aware transition for the mode swap: content enters/leaves on
@@ -554,6 +623,8 @@ private struct RoomDisclosureHeader: View {
 private struct ConversationRow: View {
     let conversation: Conversation
     var showRoom: Bool = false
+    /// Show the message count ("N msgs") — the volume signal in Deep mode.
+    var showVolume: Bool = false
     /// Matched body excerpt when this row came from a full-text search.
     var snippet: String? = nil
     /// This conversation is running live in an open tab right now.
@@ -620,6 +691,12 @@ private struct ConversationRow: View {
                     }
                     Text(conversation.lastActivityAt.relativeShort)
                         .foregroundStyle(.tertiary)
+                    if showVolume {
+                        Text("·").foregroundStyle(.quaternary)
+                        Text("\(conversation.messageCount) msgs")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                 }
                 .font(.system(size: 11))
                 if let snippet {
