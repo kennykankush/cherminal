@@ -12,48 +12,48 @@ struct PersistedTab: Codable, Hashable, Sendable, Identifiable {
     /// When this was parked in the tray — persisted so the shell age-reap policy
     /// survives quit/relaunch (a shell parked days ago must still be reaped, not
     /// treated as freshly parked). Only the detached-tray encoding sets it; the
-    /// session/bookmark encodings leave it nil. Optional so older data decodes.
+    /// session encoding leaves it nil. Optional so older data decodes.
     var detachedAt: Date? = nil
 }
 
 /// One slot in a saved grid — the grid analog of `PersistedTab`. Same
 /// agent/shell fallback rules: `agentRaw == AgentKind.shell.rawValue` means a
 /// synthetic shell reopened at `roomPath`, otherwise the agent session resumes.
-struct PersistedPane: Codable, Hashable, Sendable, Identifiable {
-    var id = UUID()
+/// Deliberately minimal: geometry (layout / grid position) is fully derivable
+/// from pane COUNT + ORDER on restore (`GridLayout.fit` + reindex), so it isn't
+/// persisted — a field that restore ignores is where silent drift breeds.
+/// (Older snapshots carry extra keys — layout, gridPosition, socketID, id —
+/// which decode ignores.)
+struct PersistedPane: Codable, Hashable, Sendable {
     let conversationID: String
     let agentRaw: String
     let roomPath: String
     var role: PaneRole?
-    var gridPosition: GridPosition
-    /// Reserved for the dtach-all phase: the stable dtach socket key (= the
-    /// conversation id for agents today). Optional so older saved data decodes.
-    var socketID: String?
 }
 
-/// A saved tab's full grid: ordered panes + their layout. Supersedes the
-/// single-active-pane `[PersistedTab]` lastSession blob — restoring rebuilds the
-/// whole arrangement, not just the focused pane. `Persisted*` = on-disk
-/// snapshot; the live runtime grid is the `Workspace` ObservableObject.
-struct PersistedWorkspace: Codable, Hashable, Sendable, Identifiable {
-    var id = UUID()
-    var layout: GridLayout
+/// A saved tab's full grid: ordered panes. Supersedes the single-active-pane
+/// `[PersistedTab]` lastSession blob — restoring rebuilds the whole
+/// arrangement, not just the focused pane. `Persisted*` = on-disk snapshot;
+/// the live runtime grid is the `Workspace` ObservableObject.
+struct PersistedWorkspace: Codable, Hashable, Sendable {
     var panes: [PersistedPane]
 }
 
-/// A user-named bundle of tabs the user explicitly bookmarked. Chrome's
-/// tab-group / saved-tabs pattern.
+/// A user-named bundle of saved tab grids ("Groups"). Since 2026-06: stores
+/// FULL workspaces — every pane of every tab — so "Save this workspace" means
+/// exactly that; legacy single-pane-per-tab bookmarks migrate on decode (see
+/// SessionCache.loadBookmarks).
 struct Bookmark: Codable, Hashable, Sendable, Identifiable {
     let id: UUID
     var name: String
-    var tabs: [PersistedTab]
+    var workspaces: [PersistedWorkspace]
     let createdAt: Date
     var updatedAt: Date
 
-    init(id: UUID = UUID(), name: String, tabs: [PersistedTab], createdAt: Date = .now, updatedAt: Date = .now) {
+    init(id: UUID = UUID(), name: String, workspaces: [PersistedWorkspace], createdAt: Date = .now, updatedAt: Date = .now) {
         self.id = id
         self.name = name
-        self.tabs = tabs
+        self.workspaces = workspaces
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }

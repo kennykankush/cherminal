@@ -306,7 +306,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
                 del.target = self; del.representedObject = g.id
                 sub.addItem(del)
                 let name = g.name.isEmpty ? "Untitled" : g.name
-                let item = NSMenuItem(title: "\(name) (\(g.tabs.count))", action: nil, keyEquivalent: "")
+                let item = NSMenuItem(title: "\(name) (\(g.workspaces.count))", action: nil, keyEquivalent: "")
                 item.submenu = sub
                 menu.addItem(item)
             }
@@ -316,8 +316,8 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     @objc private func saveGroupAction() {
         MainActor.assumeIsolated {
             let env = AppEnvironment.shared
-            let tabs = env.coordinator.snapshot()
-            if !tabs.isEmpty { env.bookmarks.create(name: "", tabs: tabs) }
+            let workspaces = env.coordinator.groupSnapshot()
+            if !workspaces.isEmpty { env.bookmarks.create(name: "", workspaces: workspaces) }
         }
     }
 

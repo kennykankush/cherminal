@@ -752,62 +752,20 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Bookmarks
 
-    /// Snapshot of every open tab, for saving as a bookmark group. Resolves
-    /// each tab to what it's *actually running right now* (synchronous detect),
-    /// so a hand-launched `claude`/`codex` is saved as that conversation even
-    /// if the periodic adoption poll hasn't flipped the tab's identity yet —
-    /// otherwise the group would store a bare shell and reopen as one.
-    func snapshot() -> [PersistedTab] {
-        let detected = detectLiveConversations()
-        // Dedup by conversation id: two shell tabs in the same room can both
-        // resolve to the same agent session, and a group must never store two
-        // PersistedTab with the same id (their Identifiable id == conversationID).
-        var seen = Set<String>()
-        return controllers.compactMap { c in
-            let convo = detected[ObjectIdentifier(c)] ?? c.conversation
-            guard seen.insert(convo.id).inserted else { return nil }
-            return PersistedTab(
-                conversationID: convo.id,
-                agentRaw: convo.agent.rawValue,
-                roomPath: convo.roomPath.path
-            )
-        }
+    /// Snapshot of every open tab's FULL GRID for saving as a group — the same
+    /// capture the quit persist uses, including synchronous quit-time agent
+    /// detection, so a hand-launched `claude`/`codex` is saved as that
+    /// conversation even if the periodic adoption poll hasn't flipped the
+    /// pane's identity yet. ("Save this workspace" now genuinely saves panes —
+    /// groups used to store only each tab's active pane.)
+    func groupSnapshot() -> [PersistedWorkspace] {
+        currentWorkspaces(detected: detectLivePaneConversations())
     }
 
-    // MARK: - Persisted tabs (bookmarks + session restore)
+    // MARK: - Persisted workspaces (full per-tab grid)
 
     private static let lastSessionKey = "cherminal.lastSession"
     private static let lastWorkspacesKey = "cherminal.lastWorkspaces"   // V2: full per-tab grid
-
-    /// Open a saved list of tabs in order, resolving each to its live
-    /// conversation when the session still exists, else a shell in the same
-    /// room. Shared by session restore and bookmark groups so both honour the
-    /// same dedup + fallback rules. Resolves agents against the registry, so
-    /// the cache snapshot must be loaded first (else the agent's sessionFile is
-    /// unknown and the context gauge can't read it).
-    func openPersistedTabs(_ tabs: [PersistedTab]) {
-        for persisted in tabs {
-            let convo: Conversation
-            if persisted.agentRaw == AgentKind.shell.rawValue {
-                // Reuse the persisted id so reopening focuses the same tab
-                // instead of spawning a fresh duplicate.
-                convo = Conversation.shellConversation(
-                    cwd: URL(fileURLWithPath: persisted.roomPath),
-                    id: persisted.conversationID)
-            } else if let real = registry.conversation(id: persisted.conversationID) {
-                convo = real
-            } else {
-                // The agent session is gone (file deleted / reconciled away).
-                // Reopen as a shell in the same room rather than dropping the
-                // tab. Fresh id so a stale agent id can't collide with a future
-                // real conversation.
-                convo = Conversation.shellConversation(cwd: URL(fileURLWithPath: persisted.roomPath))
-            }
-            openOrFocus(convo)
-        }
-    }
-
-    // MARK: - Persisted workspaces (full per-tab grid — supersedes single-pane PersistedTab)
 
     /// Snapshot every open tab's full grid (all panes + layout) so restore
     /// rebuilds the exact arrangement, not just the active pane. Uses each pane's
@@ -819,16 +777,13 @@ final class TabWindowCoordinator: ObservableObject {
         let identity = ConversationLedger.claimIdentities(panes: paneFacts(), detected: detected)
         return controllers.map { controller in
             PersistedWorkspace(
-                layout: controller.workspace.layout,
                 panes: controller.workspace.panes.map { pane in
                     let convo = identity[pane.id] ?? pane.conversation
                     return PersistedPane(
                         conversationID: convo.id,
                         agentRaw: convo.agent.rawValue,
                         roomPath: convo.roomPath.path,
-                        role: pane.role,
-                        gridPosition: pane.gridPosition,
-                        socketID: convo.id)
+                        role: pane.role)
                 })
         }
     }
@@ -888,12 +843,17 @@ final class TabWindowCoordinator: ObservableObject {
     func openPersistedWorkspaces(_ workspaces: [PersistedWorkspace]) {
         let deduped = ConversationLedger.dedupeForRestore(
             workspaces, alreadyOpen: ConversationLedger.openIDs(panes: paneFacts()))
-        for workspace in deduped {
-            guard let first = workspace.panes.first,
-                  let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
-            else { continue }
-            for pane in workspace.panes.dropFirst() {
-                addPane(conversation(forPersistedPane: pane), to: controller, role: pane.role)
+        for (original, filtered) in zip(workspaces, deduped) {
+            if let first = filtered.panes.first {
+                guard let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
+                else { continue }
+                for pane in filtered.panes.dropFirst() {
+                    addPane(conversation(forPersistedPane: pane), to: controller, role: pane.role)
+                }
+            } else if let first = original.panes.first {
+                // Everything in this saved tab is already open (a group whose
+                // conversations are live) — focus it instead of opening nothing.
+                focusExistingPane(conversationID: first.conversationID)
             }
         }
     }
@@ -906,13 +866,11 @@ final class TabWindowCoordinator: ObservableObject {
             return workspaces
         }
         return savedSessionTabs().map { tab in
-            PersistedWorkspace(layout: .single, panes: [
+            PersistedWorkspace(panes: [
                 PersistedPane(conversationID: tab.conversationID,
                               agentRaw: tab.agentRaw,
                               roomPath: tab.roomPath,
-                              role: nil,
-                              gridPosition: GridPosition(row: 0, col: 0),
-                              socketID: tab.conversationID)
+                              role: nil)
             ])
         }
     }
@@ -1481,41 +1439,6 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// All panes across all windows (liveness, attention, persistence).
     private func allPanes() -> [Pane] { controllers.flatMap { $0.workspace.panes } }
-
-    /// Synchronous live detection (used by `snapshot()`): controller → the
-    /// agent conversation it's running, if any. Cheap `lsof` of a handful of
-    /// pids — fine on the save-group click.
-    private func detectLiveConversations() -> [ObjectIdentifier: Conversation] {
-        // Snapshot is per-window (active pane) for now; full multi-pane capture
-        // lands with PersistedWorkspace (Phase 7). Build a controller→pid map
-        // from each window's active pane.
-        var pidToController: [Int32: TerminalTabWindowController] = [:]
-        for c in controllers {
-            let pane = c.holder
-            guard let surface = pane.surfaceView?.surface else { continue }
-            // Look through dtach for a wrapped shell (the hand-launched agent runs
-            // under the master); else use the surface foreground pid.
-            let pid: Int32
-            if pane.base.agent == .shell, let inner = Dtach.innerForegroundPID(id: pane.base.id) {
-                pid = Int32(inner)
-            } else {
-                let fg = ghostty_surface_foreground_pid(surface)
-                guard fg > 0 else { continue }
-                pid = Int32(fg)
-            }
-            pidToController[pid] = c
-        }
-        guard !pidToController.isEmpty else { return [:] }
-        let info = LiveSessionLinker.inspect(pids: Array(pidToController.keys))
-        var out: [ObjectIdentifier: Conversation] = [:]
-        for (pid, controller) in pidToController {
-            guard controller.base.agent == .shell else { continue }
-            if let detected = detectConversation(for: info[pid]) {
-                out[ObjectIdentifier(controller)] = detected
-            }
-        }
-        return out
-    }
 
     /// Resolve a tab's foreground process to a conversation: the open session
     /// file (Codex) wins; otherwise, a running `claude` is linked to the

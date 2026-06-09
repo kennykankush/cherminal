@@ -111,18 +111,19 @@ enum ConversationLedger {
     /// ONE pane — across all workspaces — and skip ids in `alreadyOpen` (panes
     /// live right now), which makes restore idempotent: re-running it over an
     /// existing session can only add what's missing, never duplicate a socket.
-    /// Workspaces left with no panes are dropped.
+    /// The result is aligned 1:1 with the input (a workspace whose panes were
+    /// all dropped comes back empty) so callers can act on the originals —
+    /// e.g. focus an already-open tab instead of opening nothing.
     static func dedupeForRestore(
         _ workspaces: [PersistedWorkspace],
         alreadyOpen: Set<String> = []
     ) -> [PersistedWorkspace] {
         var seen = alreadyOpen
-        var out: [PersistedWorkspace] = []
-        for var workspace in workspaces {
-            workspace.panes = workspace.panes.filter { seen.insert($0.conversationID).inserted }
-            if !workspace.panes.isEmpty { out.append(workspace) }
+        return workspaces.map { workspace in
+            var filtered = workspace
+            filtered.panes = workspace.panes.filter { seen.insert($0.conversationID).inserted }
+            return filtered
         }
-        return out
     }
 
     // MARK: - Tray (park / restore) guards
@@ -166,13 +167,12 @@ enum ConversationLedger {
     /// The socket ids the launch sweep must NOT reap: everything a restored
     /// tab or a restored tray cell will reattach. Anything else holding a
     /// socket is a crash orphan (it would run forgotten) or a stale socket.
+    /// (Sockets are keyed by conversation id — Dtach.socketPath(for:).)
     static func sweepKeepSet(
         savedWorkspaces: [PersistedWorkspace],
         savedTray: [PersistedTab]
     ) -> Set<String> {
-        let panes = savedWorkspaces.flatMap { $0.panes }
-        return Set(panes.map { $0.conversationID })
-            .union(panes.compactMap { $0.socketID })
+        Set(savedWorkspaces.flatMap { $0.panes.map(\.conversationID) })
             .union(savedTray.map { $0.conversationID })
     }
 }

@@ -119,28 +119,31 @@ struct ConversationLedgerTests {
     // MARK: - dedupeForRestore
 
     @Test func restoreDropsDuplicatePanesAcrossWorkspaces() {
-        let ws1 = PersistedWorkspace(layout: .single, panes: [
+        let ws1 = PersistedWorkspace(panes: [
             persistedPane("a1"), persistedPane("s1", agent: .shell),
         ])
-        let ws2 = PersistedWorkspace(layout: .single, panes: [
+        let ws2 = PersistedWorkspace(panes: [
             persistedPane("a1"),   // dup of ws1's agent → dropped
             persistedPane("s2", agent: .shell),
         ])
         let out = ConversationLedger.dedupeForRestore([ws1, ws2])
-        #expect(out.count == 2)
+        #expect(out.count == 2)   // aligned 1:1 with input
         #expect(out[0].panes.map(\.conversationID) == ["a1", "s1"])
         #expect(out[1].panes.map(\.conversationID) == ["s2"])
     }
 
-    @Test func restoreDropsFullyDuplicateWorkspaceAndSkipsOpenIDs() {
-        let ws1 = PersistedWorkspace(layout: .single, panes: [persistedPane("a1")])
-        let ws2 = PersistedWorkspace(layout: .single, panes: [persistedPane("a1")])
+    @Test func restoreEmptiesFullyDuplicateWorkspaceAndSkipsOpenIDs() {
+        let ws1 = PersistedWorkspace(panes: [persistedPane("a1")])
+        let ws2 = PersistedWorkspace(panes: [persistedPane("a1")])
         let out = ConversationLedger.dedupeForRestore([ws1, ws2], alreadyOpen: [])
-        #expect(out.count == 1)
+        #expect(out.count == 2)
+        #expect(out[0].panes.count == 1)
+        #expect(out[1].panes.isEmpty)   // emptied, not dropped — caller can focus it
 
         // Idempotent restore: an id already open in a live pane is skipped.
         let openFiltered = ConversationLedger.dedupeForRestore([ws1], alreadyOpen: ["a1"])
-        #expect(openFiltered.isEmpty)
+        #expect(openFiltered.count == 1)
+        #expect(openFiltered[0].panes.isEmpty)
     }
 
     // MARK: - Tray guards
@@ -185,20 +188,53 @@ struct ConversationLedgerTests {
 
     // MARK: - Sweep keep-set
 
-    @Test func sweepKeepsSavedPanesSocketsAndTray() {
-        let ws = PersistedWorkspace(layout: .single, panes: [
-            PersistedPane(conversationID: "a1", agentRaw: "claudeCode", roomPath: "/r",
-                          role: nil, gridPosition: GridPosition(row: 0, col: 0), socketID: "sock-1"),
-        ])
+    @Test func sweepKeepsSavedPanesAndTray() {
+        let ws = PersistedWorkspace(panes: [persistedPane("a1")])
         let tray = [PersistedTab(conversationID: "parked-1", agentRaw: "codex", roomPath: "/r")]
         let keep = ConversationLedger.sweepKeepSet(savedWorkspaces: [ws], savedTray: tray)
-        #expect(keep == Set(["a1", "sock-1", "parked-1"]))
+        #expect(keep == Set(["a1", "parked-1"]))
+    }
+
+    // MARK: - Persisted-shape migration
+
+    /// A legacy V2 snapshot (with layout / gridPosition / socketID / id keys)
+    /// must decode into the slimmed shapes — extra keys are ignored.
+    @Test func legacyWorkspaceJSONDecodesIntoSlimShape() throws {
+        let legacy = """
+        [{"id":"5D1B0E9B-0000-0000-0000-000000000000",
+          "layout":{"rows":2,"cols":2},
+          "panes":[{"id":"6F000000-0000-0000-0000-000000000000",
+                    "conversationID":"a1","agentRaw":"claudeCode","roomPath":"/r",
+                    "gridPosition":{"row":0,"col":1,"rowSpan":1,"colSpan":1},
+                    "socketID":"a1"}]}]
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode([PersistedWorkspace].self, from: legacy)
+        #expect(decoded.count == 1)
+        #expect(decoded[0].panes.map(\.conversationID) == ["a1"])
+    }
+
+    /// Old single-pane bookmark blobs ([PersistedTab]) migrate to one
+    /// single-pane workspace per tab; new blobs decode directly.
+    @Test func bookmarkBlobMigratesFromTabsShape() throws {
+        let decoder = JSONDecoder()
+        let oldBlob = """
+        [{"conversationID":"a1","agentRaw":"claudeCode","roomPath":"/r"},
+         {"conversationID":"s1","agentRaw":"shell","roomPath":"/r2"}]
+        """.data(using: .utf8)!
+        let migrated = SessionCache.decodeBookmarkWorkspaces(oldBlob, decoder: decoder)
+        #expect(migrated?.count == 2)
+        #expect(migrated?[0].panes.map(\.conversationID) == ["a1"])
+        #expect(migrated?[1].panes.first?.agentRaw == "shell")
+
+        let newBlob = try JSONEncoder().encode([PersistedWorkspace(panes: [persistedPane("x")])])
+        let direct = SessionCache.decodeBookmarkWorkspaces(newBlob, decoder: decoder)
+        #expect(direct?.first?.panes.map(\.conversationID) == ["x"])
     }
 
     // MARK: - Helpers
 
     private func persistedPane(_ id: String, agent: AgentKind = .claudeCode) -> PersistedPane {
-        PersistedPane(conversationID: id, agentRaw: agent.rawValue, roomPath: "/Users/x/dev/room",
-                      role: nil, gridPosition: GridPosition(row: 0, col: 0), socketID: id)
+        PersistedPane(conversationID: id, agentRaw: agent.rawValue,
+                      roomPath: "/Users/x/dev/room", role: nil)
     }
 }

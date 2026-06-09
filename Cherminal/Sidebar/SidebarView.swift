@@ -347,7 +347,7 @@ struct SidebarView: View {
                 .font(.system(size: 13))
                 .lineLimit(1)
             Spacer(minLength: 6)
-            Text("\(group.tabs.count)")
+            Text("\(group.workspaces.count)")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.tertiary)
         }
@@ -411,9 +411,9 @@ struct SidebarView: View {
     }
 
     private func saveCurrentTabs() {
-        let tabs = coordinator.snapshot()
-        guard !tabs.isEmpty else { return }
-        DispatchQueue.main.async { bookmarks.create(name: "", tabs: tabs) }
+        let workspaces = coordinator.groupSnapshot()
+        guard !workspaces.isEmpty else { return }
+        DispatchQueue.main.async { bookmarks.create(name: "", workspaces: workspaces) }
     }
 
     // MARK: - Pinned (cross-room shortcuts)
