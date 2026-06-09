@@ -108,19 +108,40 @@ final class TabWindowCoordinator: ObservableObject {
     /// as windows become key; nil until the first tab takes key.
     @Published private(set) var frontmostTabID: ObjectIdentifier?
 
-    /// Set the instant the app starts quitting. Closing a window during normal
-    /// use detaches its agents to the tray; closing windows during *termination*
-    /// must not — the masters survive anyway and session restore reattaches them
-    /// into tabs on next launch, so tray-on-quit would just duplicate them.
-    private var isTerminating = false
-    func beginTermination() { isTerminating = true }
+    /// The app-lifecycle phase — ONE explicit state machine replacing the old
+    /// `isTerminating` + `terminationDecisionPending` boolean pair and the
+    /// ordering rules that lived only in comments. Every lifecycle-sensitive
+    /// behavior (parking, the continuous persist) consults the phase:
+    ///
+    ///   launching ──→ running ⇄ quitDeciding ──→ terminating
+    ///
+    /// • `.launching` — sweep/restore in flight. Parking allowed; the debounced
+    ///   persist is SUPPRESSED so a partially-restored (or user-opened-early)
+    ///   tab set can never clobber the saved snapshot mid-restore.
+    /// • `.running` — normal use. Entering it from `.launching` writes one
+    ///   post-restore persist so the snapshot reflects what actually opened.
+    /// • `.quitDeciding` — applicationShouldTerminate is deciding (the reopen
+    ///   prompt may be up). Parking suppressed: the quit flow owns the panes
+    ///   (restore on cancel/reopen, reap on Don't-Reopen).
+    /// • `.terminating` — quit confirmed. Closing windows must NOT park: the
+    ///   masters survive anyway and session restore reattaches them as tabs
+    ///   next launch, so tray-on-quit would just duplicate them.
+    enum AppPhase: String {
+        case launching, running, quitDeciding, terminating
 
-    /// Set while `applicationShouldTerminate` is deciding (the reopen prompt may
-    /// be up). Suppresses close-time parking so a just-closed last window's panes
-    /// aren't parked mid-decision — the quit flow owns them (restore on
-    /// cancel/reopen, reap on Don't-Reopen). Cleared on Cancel; superseded by
-    /// `isTerminating` on a real quit.
-    var terminationDecisionPending = false
+        var allowsParking: Bool { self == .launching || self == .running }
+    }
+
+    private(set) var phase: AppPhase = .launching
+
+    func enterPhase(_ next: AppPhase) {
+        guard phase != next else { return }
+        let prev = phase
+        phase = next
+        clog("tabs", "phase \(prev.rawValue) → \(next.rawValue)")
+        // Restore just settled — write the truth of what actually opened.
+        if prev == .launching && next == .running { schedulePersist() }
+    }
 
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
@@ -583,11 +604,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// quit) removes the tray cell and reattaches the same live master — which is
     /// why we park rather than reap on close.
     private func detachToTray(_ convo: Conversation) {
-        // Don't park while a quit decision is pending (the close-last-window
-        // reopen prompt is up) or during termination — the quit flow owns these
-        // panes (restore on cancel/reopen, reap on Don't-Reopen). Parking here
-        // would race that decision and could spare a pane from the Don't-Reopen reap.
-        guard !isTerminating, !terminationDecisionPending else { return }
+        // Parking is a normal-use behavior: during a quit decision or
+        // termination the quit flow owns the panes (restore on cancel/reopen,
+        // reap on Don't-Reopen) — parking would race it and could spare a pane
+        // from the Don't-Reopen reap. See AppPhase.
+        guard phase.allowsParking else { return }
         // The park guards (live master to keep, not still open, not already
         // parked) are the ledger's law — see ConversationLedger.canPark.
         guard ConversationLedger.canPark(
@@ -857,11 +878,16 @@ final class TabWindowCoordinator: ObservableObject {
     /// Open saved full-grid workspaces: one tab per workspace, its first pane
     /// opening the tab and the rest filling the grid in order. The one-pane-
     /// per-conversation dedup (two panes must never resume the same agent —
-    /// they'd share one dtach socket and mirror I/O) is the ledger's law.
-    /// forceNew gives each workspace its OWN tab — openOrFocus's dedup would
-    /// otherwise merge two workspaces sharing a first-pane id.
+    /// they'd share one dtach socket and mirror I/O) is the ledger's law, and
+    /// it also skips ids ALREADY open in a live pane — so restore is
+    /// idempotent: re-running it over a session that's partially open (a tab
+    /// opened early during launch, a group whose tabs exist) only adds what's
+    /// missing, never duplicates a socket. forceNew gives each workspace its
+    /// OWN tab — openOrFocus's dedup would otherwise merge two workspaces
+    /// sharing a first-pane id.
     func openPersistedWorkspaces(_ workspaces: [PersistedWorkspace]) {
-        let deduped = ConversationLedger.dedupeForRestore(workspaces)
+        let deduped = ConversationLedger.dedupeForRestore(
+            workspaces, alreadyOpen: ConversationLedger.openIDs(panes: paneFacts()))
         for workspace in deduped {
             guard let first = workspace.panes.first,
                   let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
@@ -920,6 +946,11 @@ final class TabWindowCoordinator: ObservableObject {
     private var persistDebounce: DispatchWorkItem?
 
     private func schedulePersist() {
+        // Never persist mid-launch: restore opens tabs one by one (and the user
+        // can open one early), so a debounced save here could clobber the full
+        // saved snapshot with a partial set. Entering .running writes the
+        // post-restore truth once (see enterPhase).
+        guard phase != .launching else { return }
         persistDebounce?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.persistSessionLight() }
         persistDebounce = work
@@ -1100,28 +1131,21 @@ final class TabWindowCoordinator: ObservableObject {
     /// Called from the window controller's `windowWillClose`. Dropping the
     /// strong ref deallocates the window + surface.
     func windowClosed(_ controller: TerminalTabWindowController) {
-        // Closing a window during normal use parks its agent panes in the tray
-        // (masters survive); during app termination it must not (restore
-        // reattaches them into tabs next launch — see beginTermination).
-        // Capture identities now but defer the tray write to the next runloop:
-        // mutating @Published state mid window-close (during surface dealloc)
-        // faults libghostty.
-        // Park the closed window's agents in the tray — but NOT when the app is
-        // quitting (restore reattaches them as tabs next launch; parking them
-        // would also let one survive a "Don't Reopen"). Closing the last window
-        // routes to quit, yet windowClosed fires BEFORE applicationShouldTerminate
-        // can call beginTermination, so isTerminating is still false right here.
-        // We re-check it inside the deferred block: on a real quit, beginTermination
-        // runs synchronously during this same close event — before the next-runloop
-        // block executes — so it skips. If the app is NOT terminating (e.g. another
-        // window like Settings keeps it alive, or it's not the last window), the
-        // re-check still parks the agent so it never runs invisibly. The defer is
-        // also required because mutating @Published state mid window-close (during
-        // surface dealloc) faults libghostty.
-        if !isTerminating {
+        // Park the closed window's agents in the tray — but NOT during
+        // termination (restore reattaches them as tabs next launch; parking
+        // would also let one survive a "Don't Reopen"). Closing the last
+        // window routes to quit, yet windowClosed fires BEFORE
+        // applicationShouldTerminate can enter .terminating, so the phase is
+        // still parking-friendly right here. We re-check inside the deferred
+        // block: on a real quit the phase flips synchronously during this same
+        // close event — before the next-runloop block executes — so it skips.
+        // The defer is also required because mutating @Published state mid
+        // window-close (during surface dealloc) faults libghostty; detachToTray
+        // re-checks the full phase + ledger guards itself.
+        if phase != .terminating {
             let parked = controller.workspace.panes.map(\.base)
             DispatchQueue.main.async { [weak self] in
-                guard let self, !self.isTerminating else { return }   // quit won the race
+                guard let self, self.phase != .terminating else { return }   // quit won the race
                 parked.forEach { self.detachToTray($0) }
             }
         }

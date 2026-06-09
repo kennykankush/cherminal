@@ -136,16 +136,23 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
             // Detached agents are always agents, so resolving them needs the
             // cache even when the restored tabs were shell-only.
             let hasDetached = !env.coordinator.savedDetached().isEmpty
-            if (env.coordinator.isEmpty && needsCache) || hasDetached {
+            if needsCache || hasDetached {
                 await env.registry.loadCacheSnapshot()
             }
-            if env.coordinator.isEmpty && needsCache {
-                if !env.coordinator.restoreSession() {
+            if needsCache {
+                // No isEmpty gate: restore is idempotent (already-open ids are
+                // skipped by the ledger), so a tab the user opened in the
+                // seconds before this ran no longer silently cancels the whole
+                // restore — the saved tabs still come back alongside it.
+                if !env.coordinator.restoreSession() && env.coordinator.isEmpty {
                     env.coordinator.openFreshShell()
                 }
             }
             // Rebuild the rail from masters that are still alive.
             if hasDetached { env.coordinator.restoreDetachedAgents() }
+            // Launch settled: normal-use rules apply (and the post-restore
+            // snapshot persists — see AppPhase).
+            env.coordinator.enterPhase(.running)
             // Full reconcile + watcher (cache load above is idempotent-skipped).
             await env.registry.bootstrap()
         }
@@ -159,15 +166,19 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isRunningTests else { return .terminateNow }
         let coordinator = AppEnvironment.shared.coordinator
-        // Mark the decision in progress so a close-last-window deferred park
-        // doesn't race into the tray while the reopen prompt is up (cleared below
-        // on Cancel; beginTermination supersedes it on a real quit).
-        coordinator.terminationDecisionPending = true
+        let wasLaunching = coordinator.phase == .launching
+        // Enter the deciding phase so a close-last-window deferred park doesn't
+        // race into the tray while the reopen prompt is up (back to .running on
+        // Cancel; .terminating supersedes it on a real quit).
+        coordinator.enterPhase(.quitDeciding)
 
         // Capture what's open now. persistSession keeps the last non-empty
         // snapshot if we're quitting from the placeholder (nothing open), so the
-        // prompt still offers to reopen the tabs you last had.
-        coordinator.persistSession()
+        // prompt still offers to reopen the tabs you last had. Quitting while
+        // launch restore was still in flight skips the capture entirely — the
+        // saved snapshot IS what restore was reproducing; persisting the
+        // partial set would truncate it.
+        if !wasLaunching { coordinator.persistSession() }
         let count = coordinator.savedWorkspaces().count
 
         // "Save windows"-style reopen decision. Nothing to reopen → just quit.
@@ -182,18 +193,18 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Mark teardown ONLY when actually quitting, so a cancelled quit doesn't
-        // leave isTerminating set (which would stop window closes from parking
-        // agents in the rail). Durable breadcrumb: a clean quit logs this line;
-        // a crash/SIGKILL just stops with no such line.
+        // Enter .terminating ONLY when actually quitting, so a cancelled quit
+        // doesn't leave the app in a phase that stops window closes from
+        // parking agents in the rail. Durable breadcrumb: a clean quit logs
+        // this line; a crash/SIGKILL just stops with no such line.
         if reply == .terminateNow {
-            coordinator.beginTermination()
+            coordinator.enterPhase(.terminating)
             clog("app", "clean termination (reopen=\(count) tabs, choice=\(coordinator.reopenChoice.rawValue))")
         } else {
-            // Quit cancelled — allow close-time parking again (suppressed while
-            // the decision was pending), and if this was a close-the-last-window
-            // quit, reopen the tabs so we're not left running with no window.
-            coordinator.terminationDecisionPending = false
+            // Quit cancelled — back to normal-use rules (parking allowed
+            // again), and if this was a close-the-last-window quit, reopen the
+            // tabs so we're not left running with no window.
+            coordinator.enterPhase(.running)
             if coordinator.isEmpty {
                 coordinator.restoreSession()
             }
