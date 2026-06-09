@@ -784,7 +784,11 @@ final class TabWindowCoordinator: ObservableObject {
                         conversationID: convo.id,
                         agentRaw: convo.agent.rawValue,
                         roomPath: convo.roomPath.path,
-                        role: pane.role)
+                        role: pane.role,
+                        // A hand-launched agent's live master is keyed on its
+                        // wrapped SHELL's socket — persist it so the sweep
+                        // keeps it and restore reattaches it (ledger law).
+                        socketID: ConversationLedger.socketToPersist(base: pane.base, claimed: convo))
                 })
         }
     }
@@ -810,25 +814,33 @@ final class TabWindowCoordinator: ObservableObject {
         return out
     }
 
-    /// Resolve a persisted pane to a live conversation: a shell reopens in its
-    /// room (reusing its id so it maps to the same pane); an agent resumes if its
-    /// session still exists, else falls back to a shell there. Mirrors
-    /// openPersistedTabs' rules.
-    private func conversation(forPersistedPane pane: PersistedPane) -> Conversation {
-        if pane.agentRaw == AgentKind.shell.rawValue {
+    /// Resolve a persisted pane to the conversation to spawn, per the ledger's
+    /// restore plan:
+    ///   • .shell — a synthetic shell reusing its persisted id (= its socket,
+    ///     so a surviving wrapped-shell master reattaches).
+    ///   • .attachLiveShell — a hand-launched agent whose wrapped shell's
+    ///     master SURVIVED: open the shell on that socket; `dtach -A`
+    ///     reattaches and the agent is live on screen immediately (the
+    ///     reconcile re-adopts its identity within a tick). This is what makes
+    ///     hand-launched agents survive ⌘Q like sidebar-opened ones.
+    ///   • .resumeAgent — cold `--resume` by persisted id. On a registry miss
+    ///     (cache not loaded yet — brand-new session) DON'T downgrade to a
+    ///     blank shell: that loses the conversation and strands its master;
+    ///     resume by id and let the registry fill in details after bootstrap.
+    private func restoredConversation(
+        for pane: PersistedPane,
+        plan: ConversationLedger.RestorePlan
+    ) -> Conversation {
+        switch plan {
+        case .shell(let id), .attachLiveShell(let id):
             return Conversation.shellConversation(
-                cwd: URL(fileURLWithPath: pane.roomPath), id: pane.conversationID)
+                cwd: URL(fileURLWithPath: pane.roomPath), id: id)
+        case .resumeAgent:
+            if let real = registry.conversation(id: pane.conversationID) { return real }
+            let agent = AgentKind(rawValue: pane.agentRaw) ?? .unknown
+            return Conversation.restoredAgent(
+                id: pane.conversationID, agent: agent, room: URL(fileURLWithPath: pane.roomPath))
         }
-        if let real = registry.conversation(id: pane.conversationID) { return real }
-        // Registry miss (session not in the cache yet — brand-new, or scanned
-        // after the snapshot loaded). DON'T downgrade to a blank shell: that
-        // loses the conversation and strands its still-running dtach master.
-        // Resume the agent by its persisted id instead; the registry fills in the
-        // accurate details after bootstrap. Keeping the id also lets the tray
-        // restore correctly skip it (it's now genuinely open as this agent).
-        let agent = AgentKind(rawValue: pane.agentRaw) ?? .unknown
-        return Conversation.restoredAgent(
-            id: pane.conversationID, agent: agent, room: URL(fileURLWithPath: pane.roomPath))
     }
 
     /// Open saved full-grid workspaces: one tab per workspace, its first pane
@@ -844,17 +856,41 @@ final class TabWindowCoordinator: ObservableObject {
     func openPersistedWorkspaces(_ workspaces: [PersistedWorkspace]) {
         let deduped = ConversationLedger.dedupeForRestore(
             workspaces, alreadyOpen: ConversationLedger.openIDs(panes: paneFacts()))
+        // One snapshot answers master liveness for every pane's restore plan
+        // (live foreign socket → reattach; dead → cold resume). Snapshot
+        // failure falls back to per-socket probes — never silently cold-resume
+        // an agent whose master is actually alive.
+        let table = ProcTable.cached(socketDir: Dtach.directory)
+        let alive: (String) -> Bool = { id in
+            if let table { return Dtach.isMasterAlive(id: id, table: table) }
+            return Dtach.isMasterAlive(id: id)
+        }
+        var attachedLive = false
         for (original, filtered) in zip(workspaces, deduped) {
             if let first = filtered.panes.first {
-                guard let controller = openOrFocus(conversation(forPersistedPane: first), forceNew: true)
+                let firstPlan = ConversationLedger.restorePlan(for: first, masterAlive: alive)
+                guard let controller = openOrFocus(
+                    restoredConversation(for: first, plan: firstPlan), forceNew: true)
                 else { continue }
+                if firstPlan.isLiveAttach { attachedLive = true }
                 for pane in filtered.panes.dropFirst() {
-                    addPane(conversation(forPersistedPane: pane), to: controller, role: pane.role)
+                    let plan = ConversationLedger.restorePlan(for: pane, masterAlive: alive)
+                    if plan.isLiveAttach { attachedLive = true }
+                    addPane(restoredConversation(for: pane, plan: plan), to: controller, role: pane.role)
                 }
             } else if let first = original.panes.first {
                 // Everything in this saved tab is already open (a group whose
                 // conversations are live) — focus it instead of opening nothing.
                 focusExistingPane(conversationID: first.conversationID)
+            }
+        }
+        // A reattached shell holds a live agent the pane doesn't know it is yet
+        // (its identity re-adopts via the reconcile). Kick one early reconcile
+        // — after the async surface spawns settle — so badges/title/sidebar
+        // flip to the agent in seconds, not at the next 8s tick.
+        if attachedLive {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                Task { @MainActor in await self?.reconcileLiveSessions() }
             }
         }
     }

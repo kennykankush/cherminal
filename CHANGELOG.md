@@ -2,6 +2,23 @@
 
 All notable changes to Cherminal. Newest first.
 
+## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
+
+### Added
+- **Persistent sessions ON by default.** Every pane — shells included — now
+  runs under a `dtach` master (a registered default; `defaults write
+  dev.hamulia.Cherminal cherminal.persistentSessions -bool false` opts out).
+- **Hand-launched agents survive ⌘Q.** A `claude`/`codex` you type into any
+  tab used to run raw inside the shell: the conversation came back on
+  relaunch, but as a cold `--resume` — process killed, in-flight turn lost.
+  Now the pane's real socket identity (its wrapped shell's) is persisted when
+  it differs from the conversation id, the launch sweep keeps that master
+  alive, and restore **reattaches the live process** (the identity re-adopts
+  within seconds); if the master died (Mac restart), it falls back to the cold
+  `--resume` exactly as before. Sidebar-opened and hand-launched conversations
+  now have the same survival guarantee. Live-tested E2E (quit → master
+  survives → relaunch → same pid reattached).
+
 ## [Unreleased] — "The foundation pass" (2026-06-10)
 
 A first-principles strengthening of the bank logic — who owns which

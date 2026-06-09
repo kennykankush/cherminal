@@ -50,10 +50,12 @@ enum Dtach {
         return BinaryResolver.shared.path(for: "dtach")
     }
 
-    /// Opt-in (`cherminal.persistentSessions`, default off): wrap EVERY pane —
-    /// plain shells/tmux/vim, not just resumed agents — under a dtach master, so
-    /// any process survives close/quit and reattaches live on reopen. Off keeps
-    /// today's behavior (only agents wrapped).
+    /// Wrap EVERY pane — plain shells/tmux/vim, not just resumed agents —
+    /// under a dtach master, so any process (including a hand-launched
+    /// `claude`) survives close/quit and reattaches live on reopen. ON by
+    /// default since 2026-06-10 (a registered default — `defaults write
+    /// dev.hamulia.Cherminal cherminal.persistentSessions -bool false` opts
+    /// out, reverting to agents-only wrapping).
     static var wrapAllPanes: Bool {
         UserDefaults.standard.bool(forKey: "cherminal.persistentSessions")
     }

@@ -64,6 +64,14 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         // produce no standard crash report).
         Diagnostics.bootstrap()
 
+        // Persistent sessions are ON by default (2026-06-10): every pane —
+        // shells included — runs under a dtach master, so anything you launch
+        // in any tab survives quit/relaunch and pane-close. A registered
+        // default, so an explicit `defaults write … -bool false` still wins.
+        // (Survival of hand-launched agents across relaunch also needs the
+        // socket-identity restore — see ConversationLedger.restorePlan.)
+        UserDefaults.standard.register(defaults: ["cherminal.persistentSessions": true])
+
         // Point libghostty at our bundled resources (terminfo etc.). Without
         // this, libghostty can't find the xterm-ghostty terminfo and falls back
         // to TERM=xterm-256color for spawned surfaces — which lacks bracketed
