@@ -221,7 +221,10 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// Recompute which live agent tabs are awaiting you, from their session
     /// files. Called at the tail of each live-session reconcile (same 8s
-    /// cadence), so the light follows turn completion without any bell.
+    /// cadence), so the light follows turn completion without any bell. The
+    /// unread semantics (when the light turns on / stays off / clears) are
+    /// AttentionLaw's — this just gathers the per-pane facts and applies
+    /// the verdicts.
     private func updateAwaiting(live: Set<String>) {
         var awaiting = awaitingTurnIDs
         var panesAwaiting: Set<String> = []   // minimap: raw "waiting now", rebuilt each pass
@@ -239,16 +242,14 @@ final class TabWindowCoordinator: ObservableObject {
                 // Minimap signal: lit whenever the agent is awaiting you, no
                 // matter which pane you're looking at (a live status, not a badge).
                 if reading.awaitingUser { panesAwaiting.insert(id) }
-                // Sidebar "your turn" badge (unread semantics): "viewed" = its
-                // window is key AND it's the active pane.
-                if isKey && controller.workspace.activePaneID == pane.id {
-                    seenTurnSize[id] = reading.size
-                    awaiting.remove(id)
-                } else if reading.awaitingUser && reading.size > (seenTurnSize[id] ?? 0) {
-                    awaiting.insert(id)        // a new completed turn you haven't seen
-                } else if !reading.awaitingUser {
-                    awaiting.remove(id)        // back to working
-                }
+                let verdict = AttentionLaw.verdict(
+                    wasLit: awaiting.contains(id),
+                    viewing: isKey && controller.workspace.activePaneID == pane.id,
+                    awaitingUser: reading.awaitingUser,
+                    fileSize: reading.size,
+                    seenSize: seenTurnSize[id])
+                if let seen = verdict.markSeen { seenTurnSize[id] = seen }
+                if verdict.lit { awaiting.insert(id) } else { awaiting.remove(id) }
             }
         }
         // A pane that closed or whose agent exited is no longer awaiting.
@@ -757,21 +758,15 @@ final class TabWindowCoordinator: ObservableObject {
     /// AGENTS are left untouched. Naturally inert when persistent sessions are off
     /// (no shell has a master to park). Reattaching a shell removes its cell and
     /// resets its age, so this only ever hits genuinely-forgotten shells.
+    /// Which ids get reaped is the ledger's law (shellTrayReaps).
     private func enforceShellTrayLimits() {
-        let now = Date()
-        let shells = detachedAgents.filter { $0.conversation.agent == .shell }
-        guard !shells.isEmpty else { return }
-        var reap = Set<String>()
-        // Age: shells parked longer than the max age are forgotten.
-        for s in shells where now.timeIntervalSince(s.detachedAt) > Self.parkedShellMaxAge {
-            reap.insert(s.id)
-        }
-        // Cap: among the rest, keep the most-recently parked and reap the oldest
-        // beyond the cap.
-        let fresh = shells.filter { !reap.contains($0.id) }.sorted { $0.detachedAt > $1.detachedAt }
-        if fresh.count > Self.maxParkedShells {
-            for s in fresh[Self.maxParkedShells...] { reap.insert(s.id) }
-        }
+        let reap = ConversationLedger.shellTrayReaps(
+            parkedShells: detachedAgents
+                .filter { $0.conversation.agent == .shell }
+                .map { (id: $0.id, detachedAt: $0.detachedAt) },
+            now: Date(),
+            cap: Self.maxParkedShells,
+            maxAge: Self.parkedShellMaxAge)
         guard !reap.isEmpty else { return }
         for id in reap { Dtach.kill(id: id) }
         detachedAgents.removeAll { reap.contains($0.id) }
@@ -1602,31 +1597,11 @@ final class TabWindowCoordinator: ObservableObject {
     /// All panes across all windows (liveness, attention, persistence).
     private func allPanes() -> [Pane] { controllers.flatMap { $0.workspace.panes } }
 
-    /// Resolve a tab's foreground process to a conversation: the open session
-    /// file (Codex) wins; otherwise, a running `claude` is linked to the
-    /// most-recently-active conversation in its cwd (Claude doesn't hold the
-    /// file open, so cwd + recency is the best precise-enough signal).
+    /// Resolve a tab's foreground process to a conversation. The resolution
+    /// ORDER (argv resume-id → codex open rollout → claude cwd+recency) is the
+    /// ledger's law — see ConversationLedger.detectConversation.
     private func detectConversation(for info: LiveSessionLinker.ProcessInfo?) -> Conversation? {
-        guard let info else { return nil }
-        // Most reliable: the exact session id from the process's OWN argv
-        // (`claude --resume <id>` / `codex resume <id>`) — the conversation the
-        // user actually selected. No guessing; works for both agents.
-        if let id = info.resumeID, let match = registry.conversation(id: id) {
-            return match
-        }
-        // Codex holds its rollout file open → exact open-file match.
-        if let path = info.openSessionFile, info.command.lowercased().hasPrefix("codex"),
-           let match = registry.conversations.first(where: { $0.sessionFile.path == path }) {
-            return match
-        }
-        // Claude doesn't hold its file open and wasn't resumed by id (a fresh
-        // session): best-effort — the most-recently-active Claude conversation in
-        // the room. Inherently approximate when a room has several; the argv /
-        // open-file paths above are the accurate ones.
-        guard info.command.lowercased().hasPrefix("claude"), let cwd = info.cwd else { return nil }
-        return registry.conversations
-            .filter { $0.agent == .claudeCode && $0.roomPath.path == cwd }
-            .max { $0.lastActivityAt < $1.lastActivityAt }
+        ConversationLedger.detectConversation(info: info, candidates: registry.conversations)
     }
 }
 

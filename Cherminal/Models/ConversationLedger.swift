@@ -211,6 +211,59 @@ enum ConversationLedger {
         return saved.filter { masterAlive($0.conversationID) && !open.contains($0.conversationID) }
     }
 
+    // MARK: - Hand-launch detection (Fix A's resolution order)
+
+    /// Resolve a pane's foreground process to the conversation it's running:
+    ///   1. the exact session id from the process's OWN argv
+    ///      (`claude --resume <id>` / `codex resume <id>`) — what the user
+    ///      actually selected; no guessing, works for both agents
+    ///   2. codex's open rollout file — codex holds it open, an exact match
+    ///   3. claude's cwd + recency — claude doesn't hold its file open, so the
+    ///      most-recently-active claude conversation in the room is the best
+    ///      precise-enough signal (inherently approximate with several)
+    static func detectConversation(
+        info: LiveSessionLinker.ProcessInfo?,
+        candidates: [Conversation]
+    ) -> Conversation? {
+        guard let info else { return nil }
+        if let id = info.resumeID, let match = candidates.first(where: { $0.id == id }) {
+            return match
+        }
+        if let path = info.openSessionFile, info.command.lowercased().hasPrefix("codex"),
+           let match = candidates.first(where: { $0.sessionFile.path == path }) {
+            return match
+        }
+        guard info.command.lowercased().hasPrefix("claude"), let cwd = info.cwd else { return nil }
+        return candidates
+            .filter { $0.agent == .claudeCode && $0.roomPath.path == cwd }
+            .max { $0.lastActivityAt < $1.lastActivityAt }
+    }
+
+    // MARK: - Tray anti-leak (parked shells)
+
+    /// Which parked SHELL ids the tray must reap: anything parked longer than
+    /// `maxAge` (forgotten — its master would otherwise run indefinitely), and
+    /// among the rest, the oldest beyond `cap` (most-recently parked survive).
+    /// Parked AGENTS never come through here — the user manages those.
+    static func shellTrayReaps(
+        parkedShells: [(id: String, detachedAt: Date)],
+        now: Date,
+        cap: Int,
+        maxAge: TimeInterval
+    ) -> Set<String> {
+        guard !parkedShells.isEmpty else { return [] }
+        var reap = Set<String>()
+        for s in parkedShells where now.timeIntervalSince(s.detachedAt) > maxAge {
+            reap.insert(s.id)
+        }
+        let fresh = parkedShells.filter { !reap.contains($0.id) }
+            .sorted { $0.detachedAt > $1.detachedAt }
+        if fresh.count > cap {
+            for s in fresh[cap...] { reap.insert(s.id) }
+        }
+        return reap
+    }
+
     // MARK: - Launch sweep
 
     /// The socket ids the launch sweep must NOT reap: everything a restored
