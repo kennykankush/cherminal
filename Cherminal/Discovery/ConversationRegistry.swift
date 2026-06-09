@@ -123,20 +123,29 @@ final class ConversationRegistry: ObservableObject {
     /// Refresh only what changed. A write to one session used to trigger a
     /// FULL stat-sweep of every session on disk (the 18%-CPU incident was
     /// "fixed" by lowering the frequency, not the work); FSEvents hands us the
-    /// changed paths, so the standing cost is now O(changed). Any non-session
-    /// path in the batch (a directory, a watched root on FSEvents overflow)
-    /// falls back to the authoritative full scan.
+    /// changed paths, so the standing cost is now O(changed).
+    ///
+    /// Paths are classified to EXACTLY what the full scanners enumerate
+    /// (SessionPaths): real session files refresh incrementally; everything
+    /// else under the roots — subagent sidechain files, directories, index
+    /// files — is ignored, same as the full scan, so a subagent's write burst
+    /// costs nothing. Only a watched ROOT itself (FSEvents overflow) falls
+    /// back to the authoritative full scan.
     func refresh(changedPaths: [String]) async {
         let home = NSHomeDirectory()
         let claudeRoot = home + "/.claude/projects/"
         let codexRoot = home + "/.codex/sessions/"
-        let files = changedPaths.filter {
-            $0.hasSuffix(".jsonl") && ($0.hasPrefix(claudeRoot) || $0.hasPrefix(codexRoot))
+        var files: [String] = []
+        for path in changedPaths {
+            switch SessionPaths.classify(path, claudeRoot: claudeRoot, codexRoot: codexRoot) {
+            case .claudeSession, .codexRollout: files.append(path)
+            case .ignored: continue
+            case .fullRescan:
+                await refresh()
+                return
+            }
         }
-        guard files.count == changedPaths.count, !files.isEmpty else {
-            await refresh()
-            return
-        }
+        guard !files.isEmpty else { return }
         // A full scan is already running — it stats everything, so it will see
         // these changes; just make sure one more pass follows it.
         if refreshInFlight != nil {
