@@ -5,6 +5,13 @@ All notable changes to Cherminal. Newest first.
 ## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
 
 ### Added
+- **Rename tabs.** Double-click a tab to edit its title inline (the vendored
+  Ghostty tab-title editor, now wired up), or Tabs → Rename Tab (⌘⇧R; falls
+  back to a prompt when the inline editor can't attach). Empty reverts to the
+  automatic title (the active pane's room). The name persists with the
+  workspace snapshot — it survives relaunch and travels with saved Groups —
+  and wins over every automatic title write (adoption, reconcile) via the one
+  title law (`refreshTitle`). The Sessions minimap shows it live too.
 - **Persistent sessions ON by default.** Every pane — shells included — now
   runs under a `dtach` master (a registered default; `defaults write
   dev.hamulia.Cherminal cherminal.persistentSessions -bool false` opts out).

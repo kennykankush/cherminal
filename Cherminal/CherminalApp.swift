@@ -27,6 +27,10 @@ struct CherminalApp: App {
                         AppEnvironment.shared.coordinator.focusNextWaiting()
                     }
                     .keyboardShortcut("j", modifiers: [.command, .shift])
+                    Button("Rename Tab") {
+                        AppEnvironment.shared.coordinator.renameActiveTab()
+                    }
+                    .keyboardShortcut("r", modifiers: [.command, .shift])
                     Divider()
                     Button("Show Next Tab") {
                         AppEnvironment.shared.coordinator.selectNextTab()

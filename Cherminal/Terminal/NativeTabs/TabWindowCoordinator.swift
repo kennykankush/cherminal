@@ -778,6 +778,7 @@ final class TabWindowCoordinator: ObservableObject {
         let identity = ConversationLedger.claimIdentities(panes: paneFacts(), detected: detected)
         return controllers.map { controller in
             PersistedWorkspace(
+                name: controller.workspace.name,
                 panes: controller.workspace.panes.map { pane in
                     let convo = identity[pane.id] ?? pane.conversation
                     return PersistedPane(
@@ -872,6 +873,13 @@ final class TabWindowCoordinator: ObservableObject {
                 guard let controller = openOrFocus(
                     restoredConversation(for: first, plan: firstPlan), forceNew: true)
                 else { continue }
+                // Restore the user's tab name before anything else can write
+                // the title (adoption, reconcile — all go through refreshTitle,
+                // where a set name wins).
+                if let name = original.name {
+                    controller.workspace.name = name
+                    controller.refreshTitle()
+                }
                 if firstPlan.isLiveAttach { attachedLive = true }
                 for pane in filtered.panes.dropFirst() {
                     let plan = ConversationLedger.restorePlan(for: pane, masterAlive: alive)
@@ -1212,6 +1220,52 @@ final class TabWindowCoordinator: ObservableObject {
         focusActivePaneSurface(in: controller)
     }
 
+    // MARK: - Tab rename
+
+    /// Commit a tab rename (from the inline editor or the prompt). Empty /
+    /// whitespace clears the custom name — the tab reverts to its automatic
+    /// title (the active pane's room). The name persists with the workspace
+    /// snapshot, so it survives relaunch and travels with saved Groups.
+    func renameTab(window: NSWindow, to title: String) {
+        guard let controller = controllers.first(where: { $0.window === window }) else { return }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        controller.workspace.name = trimmed.isEmpty ? nil : trimmed
+        controller.refreshTitle()
+        schedulePersist()
+        clog("tabs", "renamed tab → \(trimmed.isEmpty ? "(auto)" : trimmed)")
+    }
+
+    /// Begin renaming the frontmost tab (Tabs → Rename Tab, ⌘⇧R). Inline in
+    /// the tab itself when possible, else the prompt.
+    func renameActiveTab() {
+        activeController?.beginRename()
+    }
+
+    /// Alert-based rename — the fallback when the inline editor can't attach
+    /// (tab bar hidden, fullscreen edge cases).
+    func promptRenameTab(window: NSWindow) {
+        guard let controller = controllers.first(where: { $0.window === window }) else { return }
+        let alert = NSAlert()
+        alert.messageText = "Rename Tab"
+        alert.informativeText = "Leave empty to use the automatic title."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = controller.workspace.name ?? ""
+        field.placeholderString = controller.holder.conversation.roomName
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        if alert.runModal() == .alertFirstButtonReturn {
+            renameTab(window: window, to: field.stringValue)
+        }
+    }
+
+    /// Hand keyboard focus back to a window's active-pane surface (after the
+    /// inline title editor finishes, etc.).
+    func restoreFocus(inWindow window: NSWindow) {
+        focusActivePaneSurface(inWindow: window)
+    }
+
     // MARK: - Tab navigation (menu shortcuts)
 
     /// The shared tab group, taken from the frontmost Cherminal window. Using
@@ -1412,8 +1466,10 @@ final class TabWindowCoordinator: ObservableObject {
             }
         }
         if burstingAgents != bursting { burstingAgents = bursting }
-        // Keep each window's title on its active pane (adoption may have flipped it).
-        for c in controllers { c.window?.title = c.holder.conversation.roomName }
+        // Keep each window's title current (adoption may have flipped the
+        // active pane's identity) — through the one title law, so a user
+        // rename always wins over the automatic room title.
+        for c in controllers { c.refreshTitle() }
 
         // With the live set settled, refresh the "your turn" lights from each
         // live agent tab's session file, and the parked agents' rail cells.

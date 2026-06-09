@@ -145,7 +145,9 @@ private struct TabMiniMap: View {
                     Circle().fill(CHM.Color.accent).frame(width: 5, height: 5)
                         .help("Current tab")
                 }
-                Text(tab.title.isEmpty ? "Untitled" : tab.title)
+                // The user's tab rename wins (observed live off the workspace);
+                // else the snapshot title (the room) from when the tab opened.
+                Text(workspace.name ?? (tab.title.isEmpty ? "Untitled" : tab.title))
                     .font(CHM.Font.captionEmphasis)
                     .foregroundStyle(isFrontmost ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                     .lineLimit(1)
