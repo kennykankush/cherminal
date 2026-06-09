@@ -184,13 +184,52 @@ struct ConversationLedgerTests {
         #expect(out.map(\.conversationID) == ["alive-free"])
     }
 
+    // MARK: - Socket identity (persist + restore plan)
+
+    /// Only an ADOPTED shell (hand-launched agent) persists its foreign socket.
+    /// Agent panes and plain shells persist nil; a demoted duplicate (agent
+    /// base, fresh-shell claim) must NEVER leak its base socket — that socket
+    /// belongs to the other pane's claim.
+    @Test func socketPersistsOnlyForAdoptedShells() {
+        let shellBase = convo("shell-1", agent: .shell)
+        let agent = convo("a1")
+        #expect(ConversationLedger.socketToPersist(base: shellBase, claimed: agent) == "shell-1")
+        #expect(ConversationLedger.socketToPersist(base: shellBase, claimed: shellBase) == nil)
+        #expect(ConversationLedger.socketToPersist(base: agent, claimed: agent) == nil)
+        // Demoted duplicate: agent base, fresh-shell claim → nil.
+        #expect(ConversationLedger.socketToPersist(base: agent, claimed: convo("fresh-9", agent: .shell)) == nil)
+    }
+
+    @Test func restorePlanReattachesLiveForeignSocketElseColdResumes() {
+        let handLaunched = PersistedPane(conversationID: "a1", agentRaw: "claudeCode",
+                                         roomPath: "/r", role: nil, socketID: "shell-1")
+        // Master alive → reattach the wrapped shell (the agent is inside it).
+        #expect(ConversationLedger.restorePlan(for: handLaunched, masterAlive: { $0 == "shell-1" })
+                == .attachLiveShell(socketID: "shell-1"))
+        // Master dead (Mac restart) → cold resume by conversation id.
+        #expect(ConversationLedger.restorePlan(for: handLaunched, masterAlive: { _ in false })
+                == .resumeAgent)
+        // Sidebar-opened agent (no foreign socket) → resume; liveness is never
+        // even consulted (dtach -A reattaches its own socket anyway).
+        #expect(ConversationLedger.restorePlan(for: persistedPane("a2"), masterAlive: { _ in true })
+                == .resumeAgent)
+        // Shell pane → shell, reusing its id/socket.
+        #expect(ConversationLedger.restorePlan(for: persistedPane("s1", agent: .shell),
+                                               masterAlive: { _ in false })
+                == .shell(id: "s1"))
+    }
+
     // MARK: - Sweep keep-set
 
-    @Test func sweepKeepsSavedPanesAndTray() {
-        let ws = PersistedWorkspace(panes: [persistedPane("a1")])
+    @Test func sweepKeepsSavedPanesForeignSocketsAndTray() {
+        let ws = PersistedWorkspace(panes: [
+            persistedPane("a1"),
+            PersistedPane(conversationID: "a2", agentRaw: "claudeCode", roomPath: "/r",
+                          role: nil, socketID: "shell-7"),   // hand-launch's live master
+        ])
         let tray = [PersistedTab(conversationID: "parked-1", agentRaw: "codex", roomPath: "/r")]
         let keep = ConversationLedger.sweepKeepSet(savedWorkspaces: [ws], savedTray: tray)
-        #expect(keep == Set(["a1", "parked-1"]))
+        #expect(keep == Set(["a1", "a2", "shell-7", "parked-1"]))
     }
 
     // MARK: - Persisted-shape migration

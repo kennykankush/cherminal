@@ -19,7 +19,7 @@ Cherminal watches agents the way a window manager watches windows — by reading
 - **Finish alerts.** A macOS notification + Dock badge the moment an agent finishes in a pane you're *not* watching (tap to jump). **⌘⇧J** cycles focus to the next agent waiting on you.
 - **Burst detection.** When an agent hits its account usage limit, its panes go red (**"CODEX BURST"**) and the Details tab shows the limit banner.
 - **Details readout.** Context-window fill, token breakdown, 5h/Weekly usage-limit meters, dev-server ports — plus **live git state** for the room (branch, ahead/behind, ±diff, changed files), read-only.
-- **Persistent sessions.** Agents run under `dtach`, so they survive quit/relaunch and pane-close (parked + reattachable); the full pane-grid layout restores on launch.
+- **Persistent sessions.** Every pane runs under `dtach` (on by default), so agents — including ones you hand-launch by typing `claude` in any tab — survive quit/relaunch and pane-close (parked + reattachable); the full pane-grid layout restores on launch and live masters reattach to the same processes. Opt out with `defaults write dev.hamulia.Cherminal cherminal.persistentSessions -bool false`.
 
 ## Requirements
 

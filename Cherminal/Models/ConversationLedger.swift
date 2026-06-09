@@ -105,6 +105,55 @@ enum ConversationLedger {
         return identity
     }
 
+    // MARK: - Socket identity (persist + restore plan)
+
+    /// The socket key to persist for a pane, when it carries information: a
+    /// pane's dtach socket is fixed at spawn (keyed on `base.id`), so when a
+    /// shell pane has ADOPTED a hand-launched agent, its claimed identity (the
+    /// agent id) diverges from the socket actually holding the live process
+    /// (the shell id). Persist the shell id so the sweep keeps that master and
+    /// restore can reattach it. Everything else — sidebar-opened agents, plain
+    /// shells, demoted duplicates (whose base socket belongs to ANOTHER pane's
+    /// claim and must never be reattached here) — persists nil.
+    static func socketToPersist(base: Conversation, claimed: Conversation) -> String? {
+        (base.agent == .shell && claimed.id != base.id) ? base.id : nil
+    }
+
+    /// How a persisted pane comes back:
+    ///   • a shell pane → a synthetic shell reusing its id (= its socket; the
+    ///     wrap reattaches a surviving master, or cold-starts a fresh shell)
+    ///   • an agent pane whose FOREIGN socket (a hand-launch's wrapped shell)
+    ///     still has a live master → reattach that shell: the agent process is
+    ///     alive inside it (the whole point of the wrap); the live-session
+    ///     reconcile re-adopts the agent identity within a tick
+    ///   • otherwise → cold `--resume` keyed on the conversation id (the
+    ///     master died — Mac restart — or there never was a foreign socket)
+    enum RestorePlan: Equatable {
+        case shell(id: String)
+        case attachLiveShell(socketID: String)
+        case resumeAgent
+
+        /// True when this pane reattaches a live master holding an agent the
+        /// pane's identity doesn't reflect yet (adoption will flip it).
+        var isLiveAttach: Bool {
+            if case .attachLiveShell = self { return true }
+            return false
+        }
+    }
+
+    static func restorePlan(
+        for pane: PersistedPane,
+        masterAlive: (String) -> Bool
+    ) -> RestorePlan {
+        if pane.agentRaw == AgentKind.shell.rawValue {
+            return .shell(id: pane.conversationID)
+        }
+        if let socket = pane.socketID, socket != pane.conversationID, masterAlive(socket) {
+            return .attachLiveShell(socketID: socket)
+        }
+        return .resumeAgent
+    }
+
     // MARK: - Restore dedup
 
     /// Filter saved workspaces so each conversation id restores into at most
@@ -165,14 +214,17 @@ enum ConversationLedger {
     // MARK: - Launch sweep
 
     /// The socket ids the launch sweep must NOT reap: everything a restored
-    /// tab or a restored tray cell will reattach. Anything else holding a
-    /// socket is a crash orphan (it would run forgotten) or a stale socket.
-    /// (Sockets are keyed by conversation id — Dtach.socketPath(for:).)
+    /// tab or a restored tray cell will reattach — including a hand-launched
+    /// agent's FOREIGN socket (its wrapped shell's master, holding the live
+    /// agent; see socketToPersist). Anything else holding a socket is a crash
+    /// orphan (it would run forgotten) or a stale socket.
     static func sweepKeepSet(
         savedWorkspaces: [PersistedWorkspace],
         savedTray: [PersistedTab]
     ) -> Set<String> {
-        Set(savedWorkspaces.flatMap { $0.panes.map(\.conversationID) })
+        let panes = savedWorkspaces.flatMap { $0.panes }
+        return Set(panes.map(\.conversationID))
+            .union(panes.compactMap(\.socketID))
             .union(savedTray.map { $0.conversationID })
     }
 }

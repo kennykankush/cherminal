@@ -22,13 +22,22 @@ struct PersistedTab: Codable, Hashable, Sendable, Identifiable {
 /// Deliberately minimal: geometry (layout / grid position) is fully derivable
 /// from pane COUNT + ORDER on restore (`GridLayout.fit` + reindex), so it isn't
 /// persisted — a field that restore ignores is where silent drift breeds.
-/// (Older snapshots carry extra keys — layout, gridPosition, socketID, id —
-/// which decode ignores.)
+/// (Older snapshots carry extra keys — layout, gridPosition, id — which decode
+/// ignores.)
 struct PersistedPane: Codable, Hashable, Sendable {
     let conversationID: String
     let agentRaw: String
     let roomPath: String
     var role: PaneRole?
+    /// The pane's dtach socket key when it DIFFERS from `conversationID`: a
+    /// hand-launched agent adopted inside a wrapped shell keeps the SHELL's
+    /// socket (sockets are fixed at spawn), so its live master is keyed on the
+    /// shell id while the pane's identity is the agent's. Persisting the real
+    /// socket lets the launch sweep keep that master alive and lets restore
+    /// REATTACH it (the agent is still running inside) instead of cold-
+    /// resuming — see ConversationLedger.restorePlan. nil when the socket is
+    /// just the conversation id (sidebar-opened agents, plain shells).
+    var socketID: String? = nil
 }
 
 /// A saved tab's full grid: ordered panes. Supersedes the single-active-pane
