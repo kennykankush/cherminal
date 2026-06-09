@@ -1296,7 +1296,10 @@ final class TabWindowCoordinator: ObservableObject {
         ].filter { FileManager.default.fileExists(atPath: $0) }
         guard !paths.isEmpty else { return }
 
-        let watcher = FilesystemWatcher(paths: paths) { [weak self] in
+        // Changed paths aren't needed here — this only re-reads the tails of
+        // panes that are already live (O(live), cheap). The watcher's
+        // max-latency bound now guarantees the light fires even mid-burst.
+        let watcher = FilesystemWatcher(paths: paths) { [weak self] _ in
             // FSEvents fires on a background queue; hop to main for @Published state.
             Task { @MainActor [weak self] in
                 guard let self else { return }

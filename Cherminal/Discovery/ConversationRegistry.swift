@@ -118,6 +118,84 @@ final class ConversationRegistry: ObservableObject {
         conversations.first { $0.id == id }
     }
 
+    // MARK: - Incremental refresh (the watcher's changed paths)
+
+    /// Refresh only what changed. A write to one session used to trigger a
+    /// FULL stat-sweep of every session on disk (the 18%-CPU incident was
+    /// "fixed" by lowering the frequency, not the work); FSEvents hands us the
+    /// changed paths, so the standing cost is now O(changed). Any non-session
+    /// path in the batch (a directory, a watched root on FSEvents overflow)
+    /// falls back to the authoritative full scan.
+    func refresh(changedPaths: [String]) async {
+        let home = NSHomeDirectory()
+        let claudeRoot = home + "/.claude/projects/"
+        let codexRoot = home + "/.codex/sessions/"
+        let files = changedPaths.filter {
+            $0.hasSuffix(".jsonl") && ($0.hasPrefix(claudeRoot) || $0.hasPrefix(codexRoot))
+        }
+        guard files.count == changedPaths.count, !files.isEmpty else {
+            await refresh()
+            return
+        }
+        // A full scan is already running — it stats everything, so it will see
+        // these changes; just make sure one more pass follows it.
+        if refreshInFlight != nil {
+            pendingRefresh = true
+            return
+        }
+        let task = Task { await applyChangedFiles(files, claudeRoot: claudeRoot) }
+        refreshInFlight = task
+        await task.value
+        refreshInFlight = nil
+        if pendingRefresh { await refresh() }
+    }
+
+    /// Parse the changed files off-main, then merge into the published list.
+    private func applyChangedFiles(_ paths: [String], claudeRoot: String) async {
+        let cache = self.cache
+        let result = await Task.detached(priority: .utility) {
+            () -> (parsed: [Conversation], removed: [String]) in
+            var parsed: [Conversation] = []
+            var removed: [String] = []
+            lazy var titles = CodexSessionScanner.titleIndex()
+            for path in paths {
+                guard FileManager.default.fileExists(atPath: path) else {
+                    removed.append(path)
+                    cache?.remove(path: path)
+                    continue
+                }
+                let url = URL(fileURLWithPath: path)
+                let convo = path.hasPrefix(claudeRoot)
+                    ? ClaudeSessionScanner.summarizeFile(url, cache: cache)
+                    : CodexSessionScanner.summarizeFile(url, titles: titles, cache: cache)
+                if let convo { parsed.append(convo) }
+            }
+            return (parsed, removed)
+        }.value
+        guard !(result.parsed.isEmpty && result.removed.isEmpty) else { return }
+
+        // Merge, honoring the id-collision rule the full scan uses: two files
+        // can share one session id (codex forks a rollout on resume) and the
+        // most recently active one owns the id.
+        var byID = Dictionary(
+            conversations.map { ($0.id, $0) },
+            uniquingKeysWith: { $0.lastActivityAt >= $1.lastActivityAt ? $0 : $1 }
+        )
+        if !result.removed.isEmpty {
+            let removedSet = Set(result.removed)
+            byID = byID.filter { !removedSet.contains($0.value.sessionFile.path) }
+        }
+        for convo in result.parsed {
+            if let existing = byID[convo.id],
+               existing.sessionFile.path != convo.sessionFile.path,
+               existing.lastActivityAt > convo.lastActivityAt {
+                continue   // a newer file already owns this id (fork rule)
+            }
+            byID[convo.id] = convo
+        }
+        publish(from: byID)
+    }
+
     private func rebuildRooms() {
         let grouped = Dictionary(grouping: conversations, by: \.roomPath)
         rooms = grouped
@@ -233,19 +311,17 @@ final class ConversationRegistry: ObservableObject {
 
         guard !paths.isEmpty else { return }
 
-        // Coalesce hard (2.5s vs the 0.3s default): each fire runs a FULL
-        // re-scan of every session, and an active agent writing its JSONL emits
-        // a continuous stream of FS events. At ~1000 conversations a 0.3s
-        // debounce turned that into ~2 full scans/sec — each ending in a
-        // main-thread @Published update + room rebuild + sidebar re-render —
-        // which burned ~18% CPU and visibly lagged typing. The sidebar doesn't
-        // need sub-second freshness; the "your turn"/live dots come from the
-        // coordinator's own faster watcher, not this scan.
-        let watcher = FilesystemWatcher(paths: paths, debounce: 2.5) { [weak self] in
+        // 2.5s coalescing batches an agent turn's write-burst into one fire;
+        // each fire is now an INCREMENTAL refresh of just the changed files
+        // (refresh(changedPaths:)), not a full re-scan of every session — the
+        // old full-scan-per-fire burned ~18% CPU under an active agent. The
+        // watcher's max-latency bound guarantees a fire at least every ~10s
+        // even mid-burst, so a long continuous turn can't starve the sidebar.
+        let watcher = FilesystemWatcher(paths: paths, debounce: 2.5) { [weak self] changed in
             // FSEvents callback fires on a background queue; hop to main
             // before touching @Published state.
             Task { @MainActor [weak self] in
-                await self?.refresh()
+                await self?.refresh(changedPaths: changed)
             }
         }
         watcher.start()
