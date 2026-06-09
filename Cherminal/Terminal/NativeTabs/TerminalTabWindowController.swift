@@ -17,6 +17,10 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
     let base: Conversation
     let workspace: Workspace
     private weak var coordinator: TabWindowCoordinator?
+    /// Inline tab-title editing (double-click the tab). The editor installs its
+    /// own click monitor scoped to this window's tab bar; we just supply the
+    /// delegate. Lives as long as the controller.
+    private var titleEditor: TabTitleEditor?
 
     /// The active pane. Shim for the pre-grid call sites (`controller.holder`).
     var holder: Pane { workspace.activePane ?? workspace.panes[0] }
@@ -84,6 +88,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
         window.delegate = self
+        titleEditor = TabTitleEditor(hostWindow: window, delegate: self)
         LiveCount.inc("window")
     }
 
@@ -105,6 +110,57 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
     /// running (the agent exited and we're back at a shell). Idempotent.
     func applyDetectedSession(_ detected: Conversation?) {
         holder.applyDetectedSession(detected)
-        window?.title = holder.conversation.roomName
+        refreshTitle()
+    }
+
+    // MARK: - Tab title (the one title law)
+
+    /// The tab's title: the user's rename when set, else the active pane's
+    /// room. EVERY title write goes through here — adoption and the reconcile
+    /// used to write `window.title` raw, which would have stomped a rename
+    /// within seconds.
+    func refreshTitle() {
+        window?.title = workspace.name ?? holder.conversation.roomName
+    }
+
+    /// Begin the inline tab rename for THIS tab (the Tabs → Rename Tab path;
+    /// double-click reaches the editor directly). Falls back to the prompt
+    /// when the inline editor can't attach (e.g. tab bar hidden).
+    func beginRename() {
+        guard let window else { return }
+        if titleEditor?.beginEditing(for: window) != true {
+            coordinator?.promptRenameTab(window: window)
+        }
+    }
+}
+
+// MARK: - TabTitleEditorDelegate (inline rename on tab double-click)
+
+// @preconcurrency: the vendored protocol is nonisolated, but the editor only
+// calls it from AppKit main-thread contexts (event monitor, field editor) —
+// asserted at runtime by the main-actor isolation.
+extension TerminalTabWindowController: @preconcurrency TabTitleEditorDelegate {
+    func tabTitleEditor(_ editor: TabTitleEditor, canRenameTabFor targetWindow: NSWindow) -> Bool {
+        // Only our terminal tabs — never the placeholder or foreign windows.
+        targetWindow.tabbingIdentifier == "belvedere-native"
+    }
+
+    func tabTitleEditor(_ editor: TabTitleEditor, titleFor targetWindow: NSWindow) -> String {
+        // Seed with what's on screen (rename or room) — targetWindow may be a
+        // sibling tab, and its title is kept fresh by refreshTitle.
+        targetWindow.title
+    }
+
+    func tabTitleEditor(_ editor: TabTitleEditor, didCommitTitle editedTitle: String, for targetWindow: NSWindow) {
+        coordinator?.renameTab(window: targetWindow, to: editedTitle)
+    }
+
+    func tabTitleEditor(_ editor: TabTitleEditor, performFallbackRenameFor targetWindow: NSWindow) {
+        coordinator?.promptRenameTab(window: targetWindow)
+    }
+
+    func tabTitleEditor(_ editor: TabTitleEditor, didFinishEditing targetWindow: NSWindow) {
+        // Hand the keyboard back to the terminal the user was in.
+        coordinator?.restoreFocus(inWindow: targetWindow)
     }
 }

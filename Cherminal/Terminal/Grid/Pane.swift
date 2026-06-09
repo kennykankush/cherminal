@@ -64,11 +64,16 @@ final class Workspace: ObservableObject {
     @Published var panes: [Pane]
     @Published var layout: GridLayout
     @Published var activePaneID: Pane.ID?
+    /// User-set tab name (double-click the tab / Tabs → Rename Tab). nil =
+    /// automatic title (the active pane's room). Persisted with the workspace,
+    /// so it survives relaunch and travels with saved Groups.
+    @Published var name: String?
 
-    init(panes: [Pane], layout: GridLayout = .single) {
+    init(panes: [Pane], layout: GridLayout = .single, name: String? = nil) {
         self.panes = panes
         self.layout = layout
         self.activePaneID = panes.first?.id
+        self.name = name
     }
 
     var activePane: Pane? { panes.first { $0.id == activePaneID } ?? panes.first }

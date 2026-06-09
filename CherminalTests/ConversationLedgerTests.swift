@@ -268,6 +268,25 @@ struct ConversationLedgerTests {
         #expect(direct?.first?.panes.map(\.conversationID) == ["x"])
     }
 
+    /// A user's tab rename rides the workspace snapshot: round-trips through
+    /// JSON, decodes nil from pre-feature snapshots, and survives the restore
+    /// dedup untouched (dedupe filters panes, never the name).
+    @Test func tabNameRoundTripsAndSurvivesDedupe() throws {
+        let ws = PersistedWorkspace(name: "review fleet", panes: [persistedPane("a1")])
+        let decoded = try JSONDecoder().decode(
+            [PersistedWorkspace].self, from: JSONEncoder().encode([ws]))
+        #expect(decoded.first?.name == "review fleet")
+
+        let legacy = try JSONDecoder().decode([PersistedWorkspace].self, from: """
+        [{"panes":[{"conversationID":"x","agentRaw":"shell","roomPath":"/r"}]}]
+        """.data(using: .utf8)!)
+        #expect(legacy.first?.name == nil)
+
+        let deduped = ConversationLedger.dedupeForRestore([ws], alreadyOpen: ["a1"])
+        #expect(deduped.first?.name == "review fleet")
+        #expect(deduped.first?.panes.isEmpty == true)
+    }
+
     // MARK: - Helpers
 
     private func persistedPane(_ id: String, agent: AgentKind = .claudeCode) -> PersistedPane {

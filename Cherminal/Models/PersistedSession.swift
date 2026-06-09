@@ -40,11 +40,14 @@ struct PersistedPane: Codable, Hashable, Sendable {
     var socketID: String? = nil
 }
 
-/// A saved tab's full grid: ordered panes. Supersedes the single-active-pane
-/// `[PersistedTab]` lastSession blob — restoring rebuilds the whole
-/// arrangement, not just the focused pane. `Persisted*` = on-disk snapshot;
-/// the live runtime grid is the `Workspace` ObservableObject.
+/// A saved tab's full grid: ordered panes + the user's tab name (if set).
+/// Supersedes the single-active-pane `[PersistedTab]` lastSession blob —
+/// restoring rebuilds the whole arrangement, not just the focused pane.
+/// `Persisted*` = on-disk snapshot; the live runtime grid is the `Workspace`
+/// ObservableObject.
 struct PersistedWorkspace: Codable, Hashable, Sendable {
+    /// User-set tab name; nil = automatic title. Optional so older snapshots decode.
+    var name: String? = nil
     var panes: [PersistedPane]
 }
 
