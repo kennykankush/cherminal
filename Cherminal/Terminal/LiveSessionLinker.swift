@@ -16,6 +16,9 @@ enum LiveSessionLinker {
         let cwd: String?
         /// A session JSONL the process currently holds open (Codex).
         let openSessionFile: String?
+        /// The session id from the process's argv (`claude --resume <id>` /
+        /// `codex resume <id>`) — the exact, verified conversation it's running.
+        let resumeID: String?
     }
 
     static func inspect(pids: [Int32]) -> [Int32: ProcessInfo] {
@@ -27,7 +30,48 @@ enum LiveSessionLinker {
         // +c 0: full command names. -Fpcfn: pid, command, fd, name fields — the
         // fd tells us which `n` is the cwd vs a regular open file.
         guard let raw = run("/usr/sbin/lsof", ["-p", list, "+c", "0", "-Fpcfn"]) else { return [:] }
-        return parse(raw, roots: roots)
+        var info = parse(raw, roots: roots)
+        // Merge in the exact resume id from each process's argv — lsof's command
+        // field is only the name, so we read argv via `ps`. This is the accurate
+        // session link for a resumed agent (vs. guessing by room recency).
+        for (pid, id) in resumeIDs(pids: pids) where info[pid] != nil {
+            let cur = info[pid]!
+            info[pid] = ProcessInfo(command: cur.command, cwd: cur.cwd,
+                                    openSessionFile: cur.openSessionFile, resumeID: id)
+        }
+        return info
+    }
+
+    /// pid → session id parsed from its argv (`--resume`/`-r`/`resume <id>`).
+    /// `ps` because lsof doesn't expose argv. Empty if none match.
+    static func resumeIDs(pids: [Int32]) -> [Int32: String] {
+        guard !pids.isEmpty else { return [:] }
+        let list = pids.map(String.init).joined(separator: ",")
+        guard let raw = run("/bin/ps", ["-ww", "-o", "pid=,command=", "-p", list]) else { return [:] }
+        var out: [Int32: String] = [:]
+        for line in raw.split(separator: "\n") {
+            let trimmed = line.drop(while: { $0 == " " })
+            guard let sp = trimmed.firstIndex(of: " "), let pid = Int32(trimmed[..<sp]) else { continue }
+            if let id = parseResumeID(String(trimmed[trimmed.index(after: sp)...])) { out[pid] = id }
+        }
+        return out
+    }
+
+    /// The session id following `--resume` / `-r` / `resume` in an argv string,
+    /// if it looks like a session id (UUID-ish). Pure, for unit-testing.
+    static func parseResumeID(_ argv: String) -> String? {
+        let tokens = argv.split(separator: " ")
+        guard tokens.count >= 2 else { return nil }
+        for i in 0..<(tokens.count - 1) where tokens[i] == "--resume" || tokens[i] == "-r" || tokens[i] == "resume" {
+            let cand = String(tokens[i + 1])
+            if isSessionIDLike(cand) { return cand }
+        }
+        return nil
+    }
+
+    /// UUID-ish: hex digits and hyphens, long enough not to match a flag value.
+    static func isSessionIDLike(_ s: String) -> Bool {
+        s.count >= 16 && s.allSatisfy { $0.isHexDigit || $0 == "-" }
     }
 
     /// Pure parse of lsof `-Fpcfn` output → per-pid process info. Split out so
@@ -62,7 +106,7 @@ enum LiveSessionLinker {
                 break
             }
         }
-        return out.mapValues { ProcessInfo(command: $0.command, cwd: $0.cwd, openSessionFile: $0.file) }
+        return out.mapValues { ProcessInfo(command: $0.command, cwd: $0.cwd, openSessionFile: $0.file, resumeID: nil) }
     }
 
     private static func run(_ launchPath: String, _ args: [String]) -> String? {

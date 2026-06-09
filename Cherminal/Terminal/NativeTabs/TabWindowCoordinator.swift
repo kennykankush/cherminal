@@ -258,25 +258,40 @@ final class TabWindowCoordinator: ObservableObject {
 
     // MARK: - Open / focus
 
+    /// Find an open pane running `id`, PREFERRING a pane opened *as* that
+    /// conversation (`base.id` — the identity you actually chose) over one that
+    /// merely *adopted* it (`conversation.id` — a best-effort guess for a
+    /// hand-launched Claude, which can be wrong when a room has several Claude
+    /// conversations). Two full passes across all windows so the exact match
+    /// always wins over an adopted guess, regardless of tab order. This is what
+    /// makes "click conversation X" land on X and not a pane that guessed X.
+    private func findOpenPane(forConversationID id: String) -> (TerminalTabWindowController, Pane)? {
+        for controller in controllers {
+            if let pane = controller.workspace.panes.first(where: { $0.base.id == id }) {
+                return (controller, pane)
+            }
+        }
+        for controller in controllers {
+            if let pane = controller.workspace.panes.first(where: { $0.conversation.id == id }) {
+                return (controller, pane)
+            }
+        }
+        return nil
+    }
+
     /// Open `conversation` in a new native tab, or select its existing tab.
     @discardableResult
     func openOrFocus(_ conversation: Conversation, forceNew: Bool = false) -> TerminalTabWindowController? {
         clog("tabs", "openOrFocus id=\(conversation.id) agent=\(conversation.agent.rawValue) room=\(conversation.roomName) path=\(conversation.roomPath.path)")
         // Focus an existing tab/pane already running this conversation — searching
-        // ALL panes (by effective OR opened identity), not just each tab's active
-        // pane, so a restored grid holding it in a non-active slot is found
-        // instead of spawning a duplicate tab on the same dtach socket.
-        if !forceNew {
-            for controller in controllers {
-                if let pane = controller.workspace.panes.first(where: {
-                    $0.conversation.id == conversation.id || $0.base.id == conversation.id
-                }) {
-                    clog("tabs", "→ focus existing pane")
-                    select(controller)
-                    focusPane(pane, in: controller.workspace)
-                    return controller
-                }
-            }
+        // ALL panes (preferring opened identity over adopted, see findOpenPane),
+        // not just each tab's active pane, so a restored grid holding it in a
+        // non-active slot is found instead of spawning a duplicate dtach socket.
+        if !forceNew, let (controller, pane) = findOpenPane(forConversationID: conversation.id) {
+            clog("tabs", "→ focus existing pane")
+            select(controller)
+            focusPane(pane, in: controller.workspace)
+            return controller
         }
 
         guard ghostty.app != nil else {
@@ -401,16 +416,10 @@ final class TabWindowCoordinator: ObservableObject {
     /// "Open as Pane" / rail reattach against an already-open conversation.
     @discardableResult
     private func focusExistingPane(conversationID: String) -> Bool {
-        for controller in controllers {
-            if let pane = controller.workspace.panes.first(where: {
-                $0.conversation.id == conversationID || $0.base.id == conversationID
-            }) {
-                select(controller)
-                focusPane(pane, in: controller.workspace)
-                return true
-            }
-        }
-        return false
+        guard let (controller, pane) = findOpenPane(forConversationID: conversationID) else { return false }
+        select(controller)
+        focusPane(pane, in: controller.workspace)
+        return true
     }
 
     private func addPane(_ conversation: Conversation, to controller: TerminalTabWindowController, role: PaneRole? = nil) {
@@ -1485,10 +1494,21 @@ final class TabWindowCoordinator: ObservableObject {
     /// file open, so cwd + recency is the best precise-enough signal).
     private func detectConversation(for info: LiveSessionLinker.ProcessInfo?) -> Conversation? {
         guard let info else { return nil }
+        // Most reliable: the exact session id from the process's OWN argv
+        // (`claude --resume <id>` / `codex resume <id>`) — the conversation the
+        // user actually selected. No guessing; works for both agents.
+        if let id = info.resumeID, let match = registry.conversation(id: id) {
+            return match
+        }
+        // Codex holds its rollout file open → exact open-file match.
         if let path = info.openSessionFile, info.command.lowercased().hasPrefix("codex"),
            let match = registry.conversations.first(where: { $0.sessionFile.path == path }) {
             return match
         }
+        // Claude doesn't hold its file open and wasn't resumed by id (a fresh
+        // session): best-effort — the most-recently-active Claude conversation in
+        // the room. Inherently approximate when a room has several; the argv /
+        // open-file paths above are the accurate ones.
         guard info.command.lowercased().hasPrefix("claude"), let cwd = info.cwd else { return nil }
         return registry.conversations
             .filter { $0.agent == .claudeCode && $0.roomPath.path == cwd }
