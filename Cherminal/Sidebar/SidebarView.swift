@@ -703,28 +703,37 @@ private struct ConversationRow: View {
     var isSuperseded: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var breathing = false
 
     /// Calm ambient status: blue "your turn" light (full + halo, slow breathe)
     /// when awaiting; a dim blue dot when live-but-working; nothing when idle.
+    /// The breathe is wall-clock-driven (CHM.Phase + TimelineView) so list
+    /// re-renders can never reset or desync it — the old @State repeatForever
+    /// restarted on every render pass.
     @ViewBuilder private var statusDot: some View {
         if isAwaiting {
-            ZStack {
-                Circle().fill(CHM.Color.attentionHalo).frame(width: 13, height: 13).blur(radius: 2.5)
-                Circle().fill(CHM.Color.attention).frame(width: 7, height: 7)
+            Group {
+                if reduceMotion {
+                    attentionLight.opacity(0.95)
+                } else {
+                    TimelineView(.animation(minimumInterval: 1.0 / 15.0)) { context in
+                        attentionLight
+                            .opacity(0.82 + 0.18 * CHM.Phase.breathe(context.date, period: 3.0))
+                    }
+                }
             }
-            .opacity(breathing ? 1.0 : 0.85)
-            .animation(reduceMotion ? nil : CHM.Motion.breathe, value: breathing)
-            // Reset on disappear so each awaiting→idle→awaiting cycle produces a
-            // real false→true transition and re-arms the repeatForever pulse.
-            .onAppear { breathing = true }
-            .onDisappear { breathing = false }
             .help("Waiting for you")
         } else if isLive {
             Circle()
                 .fill(CHM.Color.attention.opacity(0.30))
                 .frame(width: 6, height: 6)
                 .help("Running in an open tab")
+        }
+    }
+
+    private var attentionLight: some View {
+        ZStack {
+            Circle().fill(CHM.Color.attentionHalo).frame(width: 13, height: 13).blur(radius: 2.5)
+            Circle().fill(CHM.Color.attention).frame(width: 7, height: 7)
         }
     }
 

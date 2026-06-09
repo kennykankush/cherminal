@@ -75,12 +75,13 @@ struct InspectorPane: View {
     }
 }
 
-/// The Sessions tab: a **quick-look minimap** of every open tab's pane grid.
-/// Each tab renders as a small grid mirroring its real layout; a cell pulses
-/// blue when that pane's agent finished a turn and is waiting on you ("done"),
-/// so you can watch many panes at once without switching tabs — click a cell to
-/// jump straight to it. A compact "Parked" strip sits below for reattaching
-/// agents you've closed (their dtach master is still alive).
+/// The Sessions tab: a **quick-look minimap** of every open tab's pane grid,
+/// in the user's visible tab order. Each tab renders as a small grid mirroring
+/// its real layout; a cell glows blue when that pane's agent finished a turn
+/// and is waiting on you ("done"), so you can watch many panes at once without
+/// switching tabs — click a cell to jump straight to it. A compact "Parked"
+/// strip sits below for reattaching agents you've closed (their dtach master
+/// is still alive).
 struct SessionsPane: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
 
@@ -90,11 +91,14 @@ struct SessionsPane: View {
             emptyState
         } else {
             ScrollView {
-                VStack(alignment: .leading, spacing: CHM.Space.lg) {
+                VStack(alignment: .leading, spacing: CHM.Space.xl) {
                     if !tabs.isEmpty {
                         VStack(alignment: .leading, spacing: CHM.Space.md) {
-                            ForEach(tabs) { tab in
-                                TabMiniMap(tab: tab, isFrontmost: tab.id == coordinator.frontmostTabID)
+                            sectionHeader("Open tabs", count: tabs.count)
+                            ForEach(Array(tabs.enumerated()), id: \.element.id) { index, tab in
+                                TabMiniMap(tab: tab,
+                                           index: index + 1,
+                                           isFrontmost: tab.id == coordinator.frontmostTabID)
                             }
                         }
                     }
@@ -104,6 +108,21 @@ struct SessionsPane: View {
                 }
                 .padding(CHM.Space.md)
             }
+        }
+    }
+
+    private func sectionHeader(_ title: String, count: Int) -> some View {
+        HStack(spacing: CHM.Space.xs) {
+            Text(title)
+                .font(CHM.Font.eyebrow)
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .tracking(0.6)
+            Text("\(count)")
+                .font(CHM.Font.caption)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+            Spacer(minLength: 0)
         }
     }
 
@@ -123,28 +142,33 @@ struct SessionsPane: View {
     }
 }
 
-/// One tab in the quick-look: its title + a mini grid that mirrors the tab's
-/// pane layout. Observes the live `Workspace`, so it tracks splits and the
-/// active pane in real time.
+/// One tab in the quick-look: an index numeral (matches ⌘1-9 in visible
+/// order) + title row, and a mini grid that mirrors the tab's pane layout.
+/// Observes the live `Workspace`, so it tracks splits, renames, and the
+/// active pane in real time. Right-click the row for tab actions.
 private struct TabMiniMap: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     let tab: TabWindowCoordinator.TabOverview
+    let index: Int
     let isFrontmost: Bool
     @ObservedObject private var workspace: Workspace
+    @State private var hoveringRow = false
 
-    init(tab: TabWindowCoordinator.TabOverview, isFrontmost: Bool) {
+    init(tab: TabWindowCoordinator.TabOverview, index: Int, isFrontmost: Bool) {
         self.tab = tab
+        self.index = index
         self.isFrontmost = isFrontmost
         self._workspace = ObservedObject(wrappedValue: tab.workspace)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                if isFrontmost {
-                    Circle().fill(CHM.Color.accent).frame(width: 5, height: 5)
-                        .help("Current tab")
-                }
+            HStack(spacing: 6) {
+                // The tab's position in visible order — the same number ⌘n
+                // jumps to, so the minimap teaches the shortcut for free.
+                Text(index <= 9 ? "⌘\(index)" : "\(index)")
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundStyle(isFrontmost ? AnyShapeStyle(CHM.Color.accent) : AnyShapeStyle(.tertiary))
                 // The user's tab rename wins (observed live off the workspace);
                 // else the snapshot title (the room) from when the tab opened.
                 Text(workspace.name ?? (tab.title.isEmpty ? "Untitled" : tab.title))
@@ -153,9 +177,24 @@ private struct TabMiniMap: View {
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: CHM.Radius.chip, style: .continuous)
+                    .fill(isFrontmost ? CHM.Color.activeFill : (hoveringRow ? CHM.Color.hoverFill : .clear))
+            )
             .contentShape(Rectangle())
+            .onHover { hoveringRow = $0 }
             .onTapGesture { if let p = workspace.activePane { coordinator.reveal(p) } }
+            .contextMenu {
+                Button("Jump Here") { if let p = workspace.activePane { coordinator.reveal(p) } }
+                Button("Rename Tab…") { coordinator.beginRename(tabID: tab.id) }
+                Divider()
+                Button("Close Tab", role: .destructive) { coordinator.closeTab(tabID: tab.id) }
+            }
+            .help(isFrontmost ? "Current tab" : "Click to jump to this tab")
             grid
+                .padding(.horizontal, 6)
         }
     }
 
@@ -197,118 +236,147 @@ private struct TabMiniMap: View {
     }
 }
 
-/// One pane in the minimap. Pulses blue when its agent finished a turn and is
-/// waiting on you ("done"); an accent ring marks the tab's active pane; a faint
-/// accent fill = live and working; a bare outline = idle. Click to jump there.
+/// One pane in the minimap. A calm blue glow when its agent finished a turn
+/// and is waiting on you ("done"); an accent ring marks the tab's active pane;
+/// a faint accent fill + thin sweep = live and working; a bare outline = idle.
+/// Click to jump there; right-click for pane actions. State changes crossfade
+/// (200ms) instead of popping.
 private struct MiniPaneCell: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @ObservedObject var pane: Pane
     let isActive: Bool
     @State private var hovering = false
 
-    private var isAwaiting: Bool { coordinator.awaitingPaneIDs.contains(pane.conversation.id) }
-    private var isLive: Bool { coordinator.liveConversationIDs.contains(pane.conversation.id) }
-    /// Agent running and mid-turn (live, not waiting on you) → show the loading bar.
-    private var isWorking: Bool { isLive && !isAwaiting }
-    /// This pane's agent type has hit its usage limit (account-wide) → red BURST.
-    private var isBursting: Bool { coordinator.burstingAgents.contains(pane.conversation.agent) }
+    /// The cell's resolved state — one value, so the crossfade animation is
+    /// scoped to genuine state changes and nothing else.
+    private enum CellState: Equatable { case idle, working, awaiting, bursting }
+    private var state: CellState {
+        if coordinator.burstingAgents.contains(pane.conversation.agent) { return .bursting }
+        let live = coordinator.liveConversationIDs.contains(pane.conversation.id)
+        if coordinator.awaitingPaneIDs.contains(pane.conversation.id) { return .awaiting }
+        return live ? .working : .idle
+    }
 
     var body: some View {
+        let state = self.state
         RoundedRectangle(cornerRadius: 3, style: .continuous)
             // Burst overrides every other state — it's the loudest signal.
-            .fill(isBursting ? CHM.Color.alert.opacity(0.92) : baseFill)
+            .fill(state == .bursting ? CHM.Color.alert.opacity(0.92) : baseFill(state))
             .overlay {
-                if isBursting {
+                if state == .bursting {
                     Text("BURST")
                         .font(.system(size: 8, weight: .heavy))
                         .foregroundStyle(.white)
                         .lineLimit(1).minimumScaleFactor(0.5)
                         .padding(.horizontal, 2)
-                } else if isAwaiting {
-                    // The "done" pulse, layered over the base. Conditionally inserted
-                    // → its @State resets each cycle, so the breathe re-arms (same
-                    // trick as the sidebar status dot).
-                    PulsingFill()
+                } else if state == .awaiting {
+                    DoneGlow()
                 }
             }
-            // The "working" loading bar along the bottom edge while the agent is
-            // mid-turn. Conditionally inserted so its sweep re-arms each time.
-            .overlay(alignment: .bottom) { if isWorking && !isBursting { WorkingBar() } }
+            // The thin "working" sweep along the bottom edge while mid-turn.
+            .overlay(alignment: .bottom) { if state == .working { WorkingSweep() } }
             .overlay(
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .strokeBorder(isBursting ? CHM.Color.alert : stroke,
-                                  lineWidth: (isBursting || isActive) ? 1.6 : 1)
+                    .strokeBorder(stroke(state),
+                                  lineWidth: (state == .bursting || isActive) ? 1.6 : 1)
             )
+            // Crossfade between states — without this, working↔done flips pop
+            // and read as glitches. Value-scoped: hover/renders never animate.
+            .animation(.easeOut(duration: 0.2), value: state)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
             .onTapGesture { coordinator.reveal(pane) }
-            .help(tooltip)
+            .contextMenu {
+                Button("Jump Here") { coordinator.reveal(pane) }
+                Divider()
+                Button("Close Pane", role: .destructive) { coordinator.close(pane) }
+            }
+            .help(tooltip(state))
     }
 
-    private var baseFill: SwiftUI.Color {
+    private func baseFill(_ state: CellState) -> SwiftUI.Color {
         if hovering { return CHM.Color.hoverFill }
-        if isLive   { return CHM.Color.accent.opacity(0.14) }
+        if state == .working { return CHM.Color.accent.opacity(0.12) }
         return CHM.Color.fillSubtle
     }
 
-    private var stroke: SwiftUI.Color {
-        if isActive   { return CHM.Color.accent.opacity(0.9) }
-        if isAwaiting { return CHM.Color.attention }
+    private func stroke(_ state: CellState) -> SwiftUI.Color {
+        if state == .bursting { return CHM.Color.alert }
+        if isActive           { return CHM.Color.accent.opacity(0.9) }
+        if state == .awaiting { return CHM.Color.attention }
         return CHM.Color.hairline
     }
 
-    private var tooltip: String {
+    private func tooltip(_ state: CellState) -> String {
         let name = pane.conversation.agent.displayName
         let room = pane.conversation.roomName
-        let state = isBursting ? "usage limit reached (burst)"
-            : (isAwaiting ? "waiting for you" : (isWorking ? "working…" : "idle"))
-        return "\(name) · \(room) — \(state)\nClick to jump here"
+        let word: String
+        switch state {
+        case .bursting: word = "usage limit reached (burst)"
+        case .awaiting: word = "waiting for you"
+        case .working:  word = "working…"
+        case .idle:     word = "idle"
+        }
+        return "\(name) · \(room) — \(word)\nClick to jump here"
     }
 }
 
-/// An indeterminate "working" sweep along a cell's bottom edge — shown while a
-/// pane's agent is mid-turn (live but not awaiting you). Self-contained so the
-/// sweep re-arms each time the cell enters the working state.
-private struct WorkingBar: View {
+/// The "working" indicator: a thin segment sweeping ONE direction along the
+/// cell's bottom edge, linear, wall-clock-driven — steady and unhurried, like
+/// a quiet progress shimmer. (The old version ping-ponged with autoreverse and
+/// restarted on every re-render — exactly the back-and-forth glitch.)
+private struct WorkingSweep: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var animate = false
 
     var body: some View {
         if reduceMotion {
             // No motion: a steady faint bar still reads as "working".
             Capsule().fill(CHM.Color.accent.opacity(0.5))
-                .frame(height: 2.5)
+                .frame(height: 2)
                 .padding(.horizontal, 2)
         } else {
-            GeometryReader { geo in
-                let w = geo.size.width
-                let seg = max(10, w * 0.4)
-                Capsule()
-                    .fill(CHM.Color.accent)
-                    .frame(width: seg, height: 2.5)
-                    .position(x: animate ? w - seg / 2 : seg / 2, y: 1.5)
-                    .animation(.easeInOut(duration: 0.85).repeatForever(autoreverses: true), value: animate)
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    let seg = max(12, w * 0.38)
+                    // Travel from fully off-left to fully off-right, then wrap.
+                    let x = -seg + CHM.Phase.ramp(context.date, period: 1.8) * (w + seg)
+                    Capsule()
+                        .fill(LinearGradient(
+                            colors: [CHM.Color.accent.opacity(0),
+                                     CHM.Color.accent.opacity(0.85),
+                                     CHM.Color.accent.opacity(0)],
+                            startPoint: .leading, endPoint: .trailing))
+                        .frame(width: seg, height: 2)
+                        .offset(x: x)
+                }
+                .clipped()
             }
-            .frame(height: 3)
+            .frame(height: 2)
             .padding(.horizontal, 2)
-            .onAppear { animate = true }
+            .padding(.bottom, 1.5)
         }
     }
 }
 
-/// The breathing blue fill for a "done" pane. Self-contained so its animation
-/// state resets cleanly each time it appears (see MiniPaneCell).
-private struct PulsingFill: View {
+/// The "done / your turn" fill: a slow luminance breathe of the attention
+/// blue — no movement, wall-clock-driven so it can never jump or desync.
+private struct DoneGlow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var on = false
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 3, style: .continuous)
-            .fill(CHM.Color.attention)
-            .opacity(on ? 0.9 : 0.4)
-            .animation(reduceMotion ? nil : CHM.Motion.breathe, value: on)
-            .onAppear { on = true }
+        if reduceMotion {
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(CHM.Color.attention)
+                .opacity(0.65)
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { context in
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(CHM.Color.attention)
+                    .opacity(0.45 + 0.35 * CHM.Phase.breathe(context.date, period: 2.8))
+            }
+        }
     }
 }
 

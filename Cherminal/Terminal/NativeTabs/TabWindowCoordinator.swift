@@ -210,6 +210,9 @@ final class TabWindowCoordinator: ObservableObject {
               let controller = controllers.first(where: { $0.window === window }) else { return }
         let oid = ObjectIdentifier(controller)
         if frontmostTabID != oid { frontmostTabID = oid }   // "you are here" in the minimap
+        // A tab drag-drop makes the dragged window key — re-read the visible
+        // order so the minimap follows rearrangement (change-guarded, cheap).
+        rebuildTabOverviews()
         let id = controller.conversation.id
         awaitingTurnIDs.remove(id)
         FleetAlerts.clearDelivered(conversationID: id)   // you looked — drop the banner
@@ -458,14 +461,32 @@ final class TabWindowCoordinator: ObservableObject {
     /// pane is *detached* (parked in the rail, master kept alive) rather than
     /// killed; a shell pane just closes.
     func closeActivePane() {
-        guard let controller = activeController else { return }
+        guard let controller = activeController,
+              let active = controller.workspace.activePane else {
+            activeController?.window?.performClose(nil)
+            return
+        }
+        close(active, in: controller)
+    }
+
+    /// Close one specific pane (the minimap's "Close Pane"). Same semantics as
+    /// closing the active pane: the last pane closes the window; an agent pane
+    /// parks in the tray (master kept alive) rather than dying.
+    func close(_ pane: Pane) {
+        guard let controller = controllers.first(where: { c in
+            c.workspace.panes.contains { $0 === pane }
+        }) else { return }
+        close(pane, in: controller)
+    }
+
+    private func close(_ pane: Pane, in controller: TerminalTabWindowController) {
         let ws = controller.workspace
-        guard ws.panes.count > 1, let active = ws.activePane else {
+        guard ws.panes.count > 1 else {
             controller.window?.performClose(nil)   // last pane → window close (handles detach)
             return
         }
-        let parked = active.base       // capture before teardown; defer the tray write
-        ws.removePane(id: active.id)   // pane deinit drops its surface (SIGHUP to the dtach client)
+        let parked = pane.base         // capture before teardown; defer the tray write
+        ws.removePane(id: pane.id)     // pane deinit drops its surface (SIGHUP to the dtach client)
         controller.window?.contentView?.layoutSubtreeIfNeeded()
         DispatchQueue.main.async { [weak self] in self?.detachToTray(parked) }
         schedulePersist()
@@ -524,13 +545,39 @@ final class TabWindowCoordinator: ObservableObject {
         }
     }
 
-    /// Rebuild the quick-look minimap's tab snapshot from the live controllers.
-    /// Cheap; runs on every tab open/close. Per-tab pane/layout/active changes are
-    /// observed directly off each Workspace, so they don't trigger a rebuild.
+    /// Rebuild the quick-look minimap's tab snapshot in the user's VISIBLE tab
+    /// order — read from the live `NSWindowTabGroup`, the same source ⌘1-9
+    /// navigation uses, so drag-reordering tabs reorders the minimap too (it
+    /// used to follow the coordinator's append order and ignore drags).
+    /// Change-guarded publish; cheap. Called on open/close, on key-window
+    /// changes (a drag-drop makes the dragged tab key), and each reconcile
+    /// tick as the backstop. Per-tab pane/layout/active changes are observed
+    /// directly off each Workspace and don't need a rebuild.
     private func rebuildTabOverviews() {
-        tabOverviews = controllers.map {
+        let next = visibleOrderedControllers().map {
             TabOverview(id: ObjectIdentifier($0), title: $0.conversation.roomName, workspace: $0.workspace)
         }
+        if next.map(\.id) != tabOverviews.map(\.id) || next.map(\.title) != tabOverviews.map(\.title) {
+            tabOverviews = next
+        }
+    }
+
+    /// Controllers sorted by their window's position in the shared tab group
+    /// (the order the user sees); windows not yet in a group sort last, in
+    /// open order (Swift's sort isn't stable — the index tiebreak keeps it
+    /// deterministic).
+    private func visibleOrderedControllers() -> [TerminalTabWindowController] {
+        guard let group = controllers.lazy.compactMap({ $0.window?.tabGroup }).first else {
+            return controllers
+        }
+        var position: [ObjectIdentifier: Int] = [:]
+        for (i, window) in group.windows.enumerated() { position[ObjectIdentifier(window)] = i }
+        func slot(_ c: TerminalTabWindowController) -> Int {
+            c.window.flatMap { position[ObjectIdentifier($0)] } ?? Int.max
+        }
+        return controllers.enumerated()
+            .sorted { (slot($0.element), $0.offset) < (slot($1.element), $1.offset) }
+            .map(\.element)
     }
 
     /// Jump to the pane running `id` (a finish-notification tap). Selects its tab
@@ -1241,6 +1288,23 @@ final class TabWindowCoordinator: ObservableObject {
         activeController?.beginRename()
     }
 
+    private func controller(forTabID id: ObjectIdentifier) -> TerminalTabWindowController? {
+        controllers.first { ObjectIdentifier($0) == id }
+    }
+
+    /// Rename a specific tab from the minimap's context menu. The inline
+    /// editor needs the tab visible, so select it first.
+    func beginRename(tabID: ObjectIdentifier) {
+        guard let controller = controller(forTabID: tabID) else { return }
+        select(controller)
+        controller.beginRename()
+    }
+
+    /// Close a specific tab from the minimap's context menu (agents park).
+    func closeTab(tabID: ObjectIdentifier) {
+        controller(forTabID: tabID)?.window?.performClose(nil)
+    }
+
     /// Alert-based rename — the fallback when the inline editor can't attach
     /// (tab bar hidden, fullscreen edge cases).
     func promptRenameTab(window: NSWindow) {
@@ -1476,6 +1540,9 @@ final class TabWindowCoordinator: ObservableObject {
         updateAwaiting(live: live)
         refreshDetachedStates()
         enforceShellTrayLimits()
+        // Backstop for tab drag-reorders that didn't change the key window
+        // (dragging the already-key tab): re-read the visible order each tick.
+        rebuildTabOverviews()
 
         // A tab may have just adopted a hand-launched agent (its effective
         // conversation changed without controllers changing) — re-persist so the
