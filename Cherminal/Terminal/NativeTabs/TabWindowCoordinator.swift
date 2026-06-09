@@ -870,7 +870,15 @@ final class TabWindowCoordinator: ObservableObject {
                 cwd: URL(fileURLWithPath: pane.roomPath), id: pane.conversationID)
         }
         if let real = registry.conversation(id: pane.conversationID) { return real }
-        return Conversation.shellConversation(cwd: URL(fileURLWithPath: pane.roomPath))
+        // Registry miss (session not in the cache yet — brand-new, or scanned
+        // after the snapshot loaded). DON'T downgrade to a blank shell: that
+        // loses the conversation and strands its still-running dtach master.
+        // Resume the agent by its persisted id instead; the registry fills in the
+        // accurate details after bootstrap. Keeping the id also lets the tray
+        // restore correctly skip it (it's now genuinely open as this agent).
+        let agent = AgentKind(rawValue: pane.agentRaw) ?? .unknown
+        return Conversation.restoredAgent(
+            id: pane.conversationID, agent: agent, room: URL(fileURLWithPath: pane.roomPath))
     }
 
     /// Open saved full-grid workspaces: one tab per workspace, its first pane
