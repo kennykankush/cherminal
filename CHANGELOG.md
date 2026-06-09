@@ -2,6 +2,68 @@
 
 All notable changes to Cherminal. Newest first.
 
+## [Unreleased] — "The foundation pass" (2026-06-10)
+
+A first-principles strengthening of the bank logic — who owns which
+conversation, in which pane, on which socket — plus a large cut in standing
+cost. No feature changes; the same app on much firmer ground.
+
+### Changed (foundations)
+- **ConversationLedger.** The identity law — open-pane preference (opened-as
+  beats adopted), the unique serialization claim, restore dedup, tray
+  park/restore guards, the launch-sweep keep-set — used to be re-derived at six
+  coordinator sites with slightly different rules. It now lives once, as pure
+  unit-tested functions; the coordinator delegates.
+- **AppPhase.** One lifecycle state machine (launching → running ⇄ quitDeciding
+  → terminating) replaces the `isTerminating`/`terminationDecisionPending`
+  boolean pair. Closes two launch races: the debounced persist can no longer
+  clobber the saved session mid-restore, and a tab opened in the first seconds
+  after launch no longer cancels the restore (restore is now idempotent —
+  already-open conversations are skipped).
+- **ProcTable.** All process liveness (dtach masters, parent/child trees, pty
+  foreground groups, argv) is answered from ONE snapshot — two bounded spawns
+  (~30 ms each, TTL-shared) — instead of lsof+pgrep+ps *per pane per tick*
+  (~3N+2 spawns). A failed snapshot reads as "unknown", never "everything died".
+- **Watchdog-bounded subprocesses.** Every probe (lsof/ps/pgrep/git/grep/login
+  shell) is SIGKILLed at a timeout — a probe wedged on a dead mount can no
+  longer hang a poll loop or the quit path. Binary paths in spawned commands
+  are now fully quoted.
+- **Incremental discovery.** A session write now refreshes just that file —
+  the watcher passes FSEvents' changed paths through (classified to exactly
+  what the scanners enumerate; subagent sidechain files are correctly ignored)
+  instead of triggering a full stat-sweep of every session. The debounce gained
+  a max-latency bound, so a long continuous turn can't starve the sidebar or
+  the "your turn" light.
+- **Groups save full grids.** "Save this workspace" now saves every pane of
+  every tab (it captured only each tab's active pane); old single-pane groups
+  migrate on decode, and groups reopen through the same idempotent restore path
+  as session restore — fully-open tabs focus instead of duplicating.
+- **Inspector polling is visibility-gated.** The per-tab usage/git loops run
+  only for the tab actually on screen (they ran for every open tab).
+- **TurnState verified against real data.** Claude: sidechains live in separate
+  files and cannot pollute the light (documented + fixture-pinned). Codex: the
+  scan now skips bookkeeping trailers so a write-order change can't kill it.
+
+### Fixed
+- Quitting mid-launch no longer persists a partially-restored tab set.
+- Closing a multi-pane window cleans the attention/seen state for every pane
+  (the holder-only cleanup leaked the others').
+- The metrics "surfaces" leak-tripwire column read a dead counter key since the
+  Pane rename (always 0); BinaryResolver retries a failed login-shell capture
+  and no longer caches failed lookups; full-text search streams files instead
+  of loading them whole.
+
+### Removed
+- `Conversation.state` and `messageCount` (model fields nothing trusted),
+  persisted-but-ignored snapshot fields (layout/gridPosition/socketID), the V1
+  single-pane group path (`snapshot()`/`openPersistedTabs`), and stale
+  comments/docs that misdescribed the system.
+
+### Tests
+- 23 → 60: the ledger's invariants, ProcTable parsers, subprocess watchdog,
+  dtach quoting, TurnState fixtures, persisted-shape migrations, path
+  classification.
+
 ## [Unreleased] — "Persistent sessions & live fleet awareness" (2026-06-09)
 
 Agents now survive across launches, and Cherminal surfaces what every one of
