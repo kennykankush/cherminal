@@ -41,6 +41,10 @@ struct SidebarView: View {
     @State private var displayLimit = 50
     /// Minimum session size (bytes) for Deep mode — the size-filter chips.
     @AppStorage("cherminal.deepMinBytes") private var deepMinBytes = 0
+    /// git branch per workspace path — fetched ONCE when a workspace expands
+    /// (read-only `git`, off-main), never polled: ~48 workspaces × polling
+    /// would be a subprocess storm for an ambient label.
+    @State private var roomBranches: [String: String] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,6 +59,7 @@ struct SidebarView: View {
             // instantly — the toggle thumb's slide is the feedback (Raycast
             // rule: high-frequency switches shouldn't animate content).
             list
+            sidebarFooter
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
         // Debounced full-text body search. Title/room filtering stays instant
@@ -92,6 +97,24 @@ struct SidebarView: View {
         .onChange(of: mode) { displayLimit = 50 }
         .onChange(of: search) { displayLimit = 50 }
         .onChange(of: deepMinBytes) { displayLimit = 50 }
+        // Fetch the git branch for newly-expanded workspaces (once each).
+        .onChange(of: expandedRooms) { _, expanded in
+            let missing = expanded.subtracting(roomBranches.keys)
+            guard !missing.isEmpty else { return }
+            Task.detached(priority: .utility) {
+                var found: [String: String] = [:]
+                for path in missing {
+                    if let status = GitStatusReader.read(roomPath: URL(fileURLWithPath: path)),
+                       !status.branch.isEmpty {
+                        found[path] = status.branch
+                    } else {
+                        found[path] = ""   // not a repo — cache the miss too
+                    }
+                }
+                let resolved = found
+                await MainActor.run { roomBranches.merge(resolved) { _, new in new } }
+            }
+        }
     }
 
     // MARK: - Chrome
@@ -171,6 +194,35 @@ struct SidebarView: View {
         }
     }
 
+    // MARK: - Footer (quiet status strip, cf. the desktop-app references)
+
+    private static let appVersion: String = {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(v) (\(b))"
+    }()
+
+    private var sidebarFooter: some View {
+        VStack(spacing: 0) {
+            Divider().opacity(0.5)
+            HStack(spacing: 6) {
+                Text("Cherminal \(Self.appVersion)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.quaternary)
+                Spacer(minLength: 6)
+                let tabs = coordinator.tabCount
+                let parked = coordinator.detachedAgents.count
+                Text(parked > 0 ? "\(tabs) tab\(tabs == 1 ? "" : "s") · \(parked) parked"
+                                : "\(tabs) tab\(tabs == 1 ? "" : "s")")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, CHM.Space.md)
+            .padding(.vertical, 5)
+        }
+    }
+
     // MARK: - Top utility ("New chat"-style)
 
     /// The Claude-desktop-style action row at the very top of the list.
@@ -198,7 +250,8 @@ struct SidebarView: View {
 
     /// Workspaces (the folders you work in), collapsible. Pinned ones are
     /// lifted into the Pinned section, so a workspace shows only its
-    /// un-pinned conversations.
+    /// un-pinned conversations. Headers carry a live/awaiting status dot, and
+    /// expanded workspaces show their git branch (fetched once on expand).
     @ViewBuilder private var workspaceSections: some View {
         ForEach(filteredRooms) { room in
             let convos = room.conversations.filter { !pins.isPinned($0.id) }
@@ -218,11 +271,24 @@ struct SidebarView: View {
                     RoomDisclosureHeader(
                         name: room.name,
                         count: convos.count,
-                        isExpanded: roomIsExpanded(room)
+                        isExpanded: roomIsExpanded(room),
+                        status: workspaceStatus(room),
+                        branch: roomIsExpanded(room) ? roomBranches[room.id] : nil
                     ) { toggleRoom(room) }
                 }
             }
         }
+    }
+
+    /// A workspace's at-a-glance status: an agent inside is waiting on you
+    /// (attention) > something is live (working) > quiet.
+    private func workspaceStatus(_ room: Room) -> RoomDisclosureHeader.Status {
+        var live = false
+        for convo in room.conversations {
+            if coordinator.awaitingTurnIDs.contains(convo.id) { return .awaiting }
+            if coordinator.liveConversationIDs.contains(convo.id) { live = true }
+        }
+        return live ? .live : .none
     }
 
     /// Recent across all workspaces, capped with "Show more".
@@ -690,30 +756,47 @@ private struct ModeToggle: View {
 // MARK: - Row + section header
 
 private struct RoomDisclosureHeader: View {
+    /// At-a-glance workspace state: an agent waiting on you beats merely live.
+    enum Status { case none, live, awaiting }
+
     let name: String
     let count: Int
     let isExpanded: Bool
+    var status: Status = .none
+    /// git branch, shown when expanded (empty/nil = not a repo / unknown).
+    var branch: String? = nil
     let toggle: () -> Void
 
     var body: some View {
         Button(action: toggle) {
-            HStack(spacing: 6) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.tertiary)
-                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                Text(name)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.7)
-                Spacer(minLength: CHM.Space.xs)
-                Text("\(count)")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    Text(name)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                        .tracking(0.7)
+                    statusDot
+                    Spacer(minLength: CHM.Space.xs)
+                    Text("\(count)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
+                if let branch, !branch.isEmpty, isExpanded {
+                    Text(branch)
+                        .font(CHM.Font.monoSmall)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.leading, 15)   // aligns under the name
+                }
             }
-            // Generous space above each room header so sections read as
+            // Generous space above each workspace header so sections read as
             // distinct groups (cf. ChatGPT/Claude sidebars).
             .padding(.top, 12)
             .padding(.bottom, 4)
@@ -721,6 +804,21 @@ private struct RoomDisclosureHeader: View {
         }
         .buttonStyle(.plain)
         .animation(.easeOut(duration: 0.18), value: isExpanded)
+    }
+
+    /// Quiet roll-up of the workspace's agents (cf. the spaces rail pattern):
+    /// blue = something here is waiting on you; dim = live and working.
+    @ViewBuilder private var statusDot: some View {
+        switch status {
+        case .awaiting:
+            Circle().fill(CHM.Color.attention).frame(width: 5, height: 5)
+                .help("An agent here is waiting for you")
+        case .live:
+            Circle().fill(CHM.Color.attention.opacity(0.3)).frame(width: 5, height: 5)
+                .help("An agent here is running")
+        case .none:
+            EmptyView()
+        }
     }
 }
 

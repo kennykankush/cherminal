@@ -925,13 +925,17 @@ final class TabWindowCoordinator: ObservableObject {
                 // where a set name wins).
                 if let name = original.name {
                     controller.workspace.name = name
-                    controller.refreshTitle()
                 }
                 if firstPlan.isLiveAttach { attachedLive = true }
+                preAdoptIfLiveAttach(first, plan: firstPlan,
+                                     pane: controller.workspace.panes.first)
+                controller.refreshTitle()
                 for pane in filtered.panes.dropFirst() {
                     let plan = ConversationLedger.restorePlan(for: pane, masterAlive: alive)
                     if plan.isLiveAttach { attachedLive = true }
                     addPane(restoredConversation(for: pane, plan: plan), to: controller, role: pane.role)
+                    preAdoptIfLiveAttach(pane, plan: plan,
+                                         pane: controller.workspace.panes.last)
                 }
             } else if let first = original.panes.first {
                 // Everything in this saved tab is already open (a group whose
@@ -939,15 +943,37 @@ final class TabWindowCoordinator: ObservableObject {
                 focusExistingPane(conversationID: first.conversationID)
             }
         }
-        // A reattached shell holds a live agent the pane doesn't know it is yet
-        // (its identity re-adopts via the reconcile). Kick one early reconcile
-        // — after the async surface spawns settle — so badges/title/sidebar
-        // flip to the agent in seconds, not at the next 8s tick.
+        // The reconcile still re-verifies against the REAL process state (the
+        // pre-adoption above is the snapshot's promise; this is the truth).
         if attachedLive {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 Task { @MainActor in await self?.reconcileLiveSessions() }
             }
         }
+    }
+
+    /// A live-attach pane spawns as its wrapped SHELL (the socket the
+    /// surviving master holds) but IS the persisted agent — flip its effective
+    /// identity immediately instead of waiting ~8s for the reconcile to
+    /// re-detect it. Until that window closed, the pane showed as "Terminal"
+    /// and a sidebar click on the conversation could open a duplicate
+    /// cold-resume. Safe to do here: spawnSurface captured the shell config
+    /// (and therefore the right socket) synchronously before this runs, so the
+    /// adoption changes what the pane REPORTS, not what it spawns. The next
+    /// reconcile re-verifies against the real process and corrects if the
+    /// agent actually exited while the app was closed.
+    private func preAdoptIfLiveAttach(
+        _ persisted: PersistedPane,
+        plan: ConversationLedger.RestorePlan,
+        pane: Pane?
+    ) {
+        guard plan.isLiveAttach, let pane else { return }
+        let agent = registry.conversation(id: persisted.conversationID)
+            ?? Conversation.restoredAgent(
+                id: persisted.conversationID,
+                agent: AgentKind(rawValue: persisted.agentRaw) ?? .unknown,
+                room: URL(fileURLWithPath: persisted.roomPath))
+        pane.applyDetectedSession(agent)
     }
 
     /// The workspaces persisted by the last run (V2), migrating the older
