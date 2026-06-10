@@ -74,6 +74,7 @@ xcodebuild -project Cherminal.xcodeproj -scheme Cherminal -configuration Release
     CODE_SIGN_IDENTITY="$IDENTITY" \
     DEVELOPMENT_TEAM="$TEAM" \
     ENABLE_HARDENED_RUNTIME=YES \
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
     OTHER_CODE_SIGN_FLAGS="--timestamp" \
     build >"$BUILD_LOG" 2>&1 \
     || { tail -30 "$BUILD_LOG"; fail "build failed (full log: $BUILD_LOG)"; }
