@@ -15,6 +15,8 @@ final class AppEnvironment {
     let coordinator: TabWindowCoordinator
     let ports: PortsManager
     let caffeine = CaffeineManager()
+    /// Supervisor-registered claude sessions (background + other-terminal).
+    let backgroundAgents = BackgroundAgentsMonitor()
     let metrics: MetricsRecorder
 
     private init() {

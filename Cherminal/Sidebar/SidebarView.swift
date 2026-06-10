@@ -25,6 +25,7 @@ struct SidebarView: View {
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var pins: PinsManager
     @EnvironmentObject private var bookmarks: BookmarksManager
+    @EnvironmentObject private var backgroundAgents: BackgroundAgentsMonitor
     @Binding var mode: Mode
     @Binding var selection: Conversation.ID?
 
@@ -174,6 +175,7 @@ struct SidebarView: View {
                     newTabRow
                     groupsSection
                     pinnedSection
+                    backgroundSection
                     switch mode {
                     case .byRoom:   workspaceSections
                     case .byRecent: recentRows
@@ -244,6 +246,44 @@ struct SidebarView: View {
             DispatchQueue.main.async { coordinator.openFreshShell() }
         }
         .help("Open a new terminal tab")
+    }
+
+    // MARK: - Background (supervisor sessions you can't see in a pane)
+
+    /// Sessions registered with claude's background-agent supervisor that
+    /// AREN'T already open in this app — headless dispatched agents and
+    /// sessions running in other terminals. Click to attach into a tab
+    /// (`claude attach`; the session keeps running, ^Z detaches).
+    @ViewBuilder private var backgroundSection: some View {
+        let visible = backgroundAgents.sessions.filter {
+            !coordinator.isShowing(conversationID: $0.sessionId)
+        }
+        if !visible.isEmpty {
+            Section {
+                ForEach(visible) { session in
+                    BackgroundSessionRow(session: session)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            DispatchQueue.main.async {
+                                coordinator.attachBackgroundSession(session)
+                            }
+                        }
+                        .contextMenu {
+                            Button("Attach in New Tab") {
+                                DispatchQueue.main.async {
+                                    coordinator.attachBackgroundSession(session)
+                                }
+                            }
+                        }
+                }
+            } header: {
+                Text("Background")
+                    .font(CHM.Font.eyebrow)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+            }
+        }
     }
 
     // MARK: - Mode content (rows inside the one shared List)
@@ -929,6 +969,49 @@ private struct ConversationRow: View {
         .padding(.vertical, 6)
         .opacity(isSuperseded ? 0.5 : 1)
         .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+    }
+}
+
+/// A supervisor session running outside this app (headless, or in another
+/// terminal). Same row anatomy as ConversationRow: mark, title, context line,
+/// quiet status dot — blue when it's blocked waiting on you.
+private struct BackgroundSessionRow: View {
+    let session: BackgroundSession
+
+    var body: some View {
+        HStack(alignment: .top, spacing: CHM.Space.sm) {
+            AgentBadge(agent: .claudeCode, size: 17)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    if session.needsYou {
+                        Circle().fill(CHM.Color.attention).frame(width: 6, height: 6)
+                    } else if session.isBusy {
+                        Circle().fill(CHM.Color.attention.opacity(0.3)).frame(width: 6, height: 6)
+                    }
+                    Text(session.name?.isEmpty == false ? session.name! : "Untitled session")
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                HStack(spacing: 4) {
+                    Text(session.roomName)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text("·").foregroundStyle(.quaternary)
+                    Text(session.needsYou ? (session.waitingFor ?? "waiting for you")
+                                          : session.status)
+                        .foregroundStyle(session.needsYou ? AnyShapeStyle(CHM.Color.attention)
+                                                          : AnyShapeStyle(.tertiary))
+                        .lineLimit(1)
+                }
+                .font(.system(size: 11))
+            }
+            Spacer(minLength: CHM.Space.xs)
+        }
+        .padding(.vertical, 6)
+        .listRowInsets(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+        .help("Running under the supervisor — click to attach (^Z detaches, it keeps running)")
     }
 }
 

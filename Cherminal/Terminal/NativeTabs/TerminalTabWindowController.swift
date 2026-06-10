@@ -33,10 +33,11 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
         registry: ConversationRegistry,
         ghostty: Ghostty.App,
         bookmarks: BookmarksManager,
-        coordinator: TabWindowCoordinator
+        coordinator: TabWindowCoordinator,
+        spawnCommandOverride: String? = nil
     ) {
         self.base = conversation
-        let pane = Pane(conversation: conversation)
+        let pane = Pane(conversation: conversation, spawnCommandOverride: spawnCommandOverride)
         let workspace = Workspace(panes: [pane])
         self.workspace = workspace
         self.coordinator = coordinator
@@ -80,6 +81,7 @@ final class TerminalTabWindowController: NSWindowController, NSWindowDelegate {
             .environmentObject(ghostty)
             .environmentObject(bookmarks)
             .environmentObject(AppEnvironment.shared.pins)
+            .environmentObject(AppEnvironment.shared.backgroundAgents)
             .environmentObject(AppEnvironment.shared.labels)
             .environmentObject(AppEnvironment.shared.ports)
             .environmentObject(AppEnvironment.shared.caffeine)

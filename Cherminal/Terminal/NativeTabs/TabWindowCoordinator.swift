@@ -312,8 +312,11 @@ final class TabWindowCoordinator: ObservableObject {
     }
 
     /// Open `conversation` in a new native tab, or select its existing tab.
+    /// `spawnCommandOverride` replaces the conversation-derived resume command
+    /// for a NEW tab's first pane (the background-attach path).
     @discardableResult
-    func openOrFocus(_ conversation: Conversation, forceNew: Bool = false) -> TerminalTabWindowController? {
+    func openOrFocus(_ conversation: Conversation, forceNew: Bool = false,
+                     spawnCommandOverride: String? = nil) -> TerminalTabWindowController? {
         clog("tabs", "openOrFocus id=\(conversation.id) agent=\(conversation.agent.rawValue) room=\(conversation.roomName) path=\(conversation.roomPath.path)")
         // Focus an existing tab/pane already running this conversation — searching
         // ALL panes (preferring opened identity over adopted, see findOpenPane),
@@ -337,7 +340,8 @@ final class TabWindowCoordinator: ObservableObject {
             registry: registry,
             ghostty: ghostty,
             bookmarks: bookmarks,
-            coordinator: self
+            coordinator: self,
+            spawnCommandOverride: spawnCommandOverride
         )
 
         // Join the existing tab group, or stand alone as the first tab.
@@ -377,8 +381,10 @@ final class TabWindowCoordinator: ObservableObject {
         // The async block below clears it (guarded so an empty tray never
         // persists), and parking is suppressed during a quit decision anyway.
         let conversation = pane.conversation
+        let commandOverride = pane.spawnCommandOverride
         Task.detached(priority: .userInitiated) {
-            let config = TerminalCommand.surfaceConfig(for: conversation)
+            let config = TerminalCommand.surfaceConfig(for: conversation,
+                                                       commandOverride: commandOverride)
             await MainActor.run { [weak self, weak controller, weak pane] in
                 guard let self, let controller, let pane,
                       self.controllers.contains(where: { $0 === controller }),
@@ -441,6 +447,27 @@ final class TabWindowCoordinator: ObservableObject {
         if focusExistingPane(conversationID: conversation.id) { return }
         guard let controller = activeController else { openOrFocus(conversation); return }
         addPane(conversation, to: controller)
+    }
+
+    /// Open a supervisor-registered background session in a new tab (the
+    /// sidebar's BACKGROUND section): the pane runs `claude attach <id>` —
+    /// the session keeps running under the supervisor, ^Z detaches. Dedups
+    /// against an already-open pane for the same conversation.
+    func attachBackgroundSession(_ session: BackgroundSession) {
+        if focusExistingPane(conversationID: session.sessionId) { return }
+        guard let command = TerminalCommand.attachBackground(claudeSessionID: session.sessionId) else { return }
+        let convo = registry.conversation(id: session.sessionId)
+            ?? Conversation.restoredAgent(id: session.sessionId, agent: .claudeCode,
+                                          room: URL(fileURLWithPath: session.cwd))
+        openOrFocus(convo, forceNew: true, spawnCommandOverride: command)
+    }
+
+    /// Is this conversation already visible in the app — open in a pane (by
+    /// either identity) or parked in the tray? The BACKGROUND section hides
+    /// sessions you can already see.
+    func isShowing(conversationID id: String) -> Bool {
+        ConversationLedger.openIDs(panes: paneFacts()).contains(id)
+            || detachedAgents.contains { $0.id == id }
     }
 
     /// Find a live pane already running `conversationID` (by effective or opened

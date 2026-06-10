@@ -129,6 +129,47 @@ struct TerminalCommandTests {
         // Unknown agents spawn a plain shell (no command override).
         #expect(TerminalCommand.resume(for: convo("12345678-aaaa-bbbb-cccc-1234567890ab", agent: .unknown)) == nil)
     }
+
+    @Test func backgroundAttachIsWrappedAndInjectionGuarded() throws {
+        let id = "abcdef12-3456-7890-abcd-ef1234567890"
+        let cmd = try #require(TerminalCommand.attachBackground(claudeSessionID: id))
+        #expect(cmd.contains(" attach \(id)"))
+        #expect(cmd.contains("\(id).sock"))            // same socket the resume path would use
+        #expect(!cmd.contains("--resume"))
+        #expect(TerminalCommand.attachBackground(claudeSessionID: "x; rm -rf /") == nil)
+    }
+}
+
+/// `claude agents --json` parsing — fixture mirrors the live supervisor output.
+struct BackgroundAgentsParseTests {
+
+    @Test func parsesSupervisorSessions() throws {
+        let json = """
+        [{"pid":4175,"cwd":"/Users/x/dev/hadimulia","kind":"interactive",
+          "startedAt":1780913967567,"sessionId":"b5077523-2375-4fbc-a897-78216af29609",
+          "name":"HADIMULIA HOOK","status":"busy"},
+         {"pid":68624,"cwd":"/Users/x/dev/huh","kind":"interactive",
+          "startedAt":1780950134204,"sessionId":"b8f082d3-dc70-4d3a-885d-50dbc58f5523",
+          "name":"pivot-mic","status":"waiting","waitingFor":"permission prompt"}]
+        """
+        let sessions = try #require(BackgroundAgentsMonitor.parse(json))
+        #expect(sessions.count == 2)
+        #expect(sessions[0].sessionId == "b5077523-2375-4fbc-a897-78216af29609")
+        #expect(sessions[0].isBusy && !sessions[0].needsYou)
+        #expect(sessions[0].roomName == "hadimulia")
+        #expect(sessions[1].needsYou)
+        #expect(sessions[1].waitingFor == "permission prompt")
+    }
+
+    @Test func toleratesUnknownFieldsAndRejectsGarbage() {
+        // Future supervisor fields must not break parsing; rows missing the
+        // essentials are dropped, not fatal.
+        let json = #"[{"sessionId":"s1","cwd":"/r","future":42},{"noid":true}]"#
+        let sessions = BackgroundAgentsMonitor.parse(json)
+        #expect(sessions?.count == 1)
+        #expect(sessions?.first?.status == "unknown")
+        #expect(BackgroundAgentsMonitor.parse("not json") == nil)
+    }
 }
 
 /// Pins + bookmarks round-trips through the SQLite cache (the conversations
