@@ -67,6 +67,7 @@ echo ":: version $VERSION ($NEW_BUILD)"
 # ---- 2. build, signed ---------------------------------------------------------
 echo ":: xcodegen + Release build (arm64, hardened runtime)"
 xcodegen generate >/dev/null
+BUILD_LOG="$(mktemp -t cherminal-release-build-XXXX.log)"
 xcodebuild -project Cherminal.xcodeproj -scheme Cherminal -configuration Release \
     -derivedDataPath "$BUILD_DIR" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
     CODE_SIGN_STYLE=Manual \
@@ -74,16 +75,19 @@ xcodebuild -project Cherminal.xcodeproj -scheme Cherminal -configuration Release
     DEVELOPMENT_TEAM="$TEAM" \
     ENABLE_HARDENED_RUNTIME=YES \
     OTHER_CODE_SIGN_FLAGS="--timestamp" \
-    build | grep -E "error|warning: Cherminal/|BUILD" || true
+    build >"$BUILD_LOG" 2>&1 \
+    || { tail -30 "$BUILD_LOG"; fail "build failed (full log: $BUILD_LOG)"; }
+grep -E "warning: .*Cherminal/" "$BUILD_LOG" || true
 
 APP="$BUILD_DIR/Build/Products/Release/$APP_NAME.app"
 [[ -d "$APP" ]] || fail "build produced no app at $APP"
 
 # ---- 3. verify signature ------------------------------------------------------
-codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | tail -2
-codesign -dv "$APP" 2>&1 | grep -E "Authority=Developer ID" >/dev/null \
+codesign --verify --deep --strict "$APP" || fail "signature does not verify"
+# Authority lines only print at -dvv (two v's) — -dv shows none at all.
+codesign -dvv "$APP" 2>&1 | grep -E "Authority=Developer ID Application" >/dev/null \
     || fail "app is not Developer ID signed"
-echo "✓ signature verified"
+echo "✓ signature verified (Developer ID, hardened runtime)"
 
 # ---- 4. dmg -------------------------------------------------------------------
 echo ":: packaging dmg"

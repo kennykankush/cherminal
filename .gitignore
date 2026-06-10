@@ -27,3 +27,7 @@ vendor/zig/
 
 # Local research notes
 /research
+
+# Release artifacts (scripts/release.sh)
+build-release/
+dist/
