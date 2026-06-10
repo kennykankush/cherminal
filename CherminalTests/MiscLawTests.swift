@@ -30,6 +30,99 @@ struct GridLayoutTests {
     }
 }
 
+/// The workspace focus/zoom laws. Zoom is pure view-state (never persisted);
+/// these pin its invariants: a new pane is always visible, removing the
+/// zoomed pane returns to the grid, and zoom follows focus so a hidden pane
+/// can never hold the keyboard.
+@MainActor
+struct WorkspaceZoomTests {
+
+    private func makeWorkspace(panes count: Int) -> Workspace {
+        let panes = (0..<count).map { i in
+            Pane(conversation: .shellConversation(cwd: URL(fileURLWithPath: "/tmp"),
+                                                  id: "ws-test-\(i)"))
+        }
+        let ws = Workspace(panes: panes, layout: GridLayout.fit(count))
+        ws.activePaneID = panes.first?.id
+        return ws
+    }
+
+    @Test func toggleZoomsAndUnzoomsTheActivePane() {
+        let ws = makeWorkspace(panes: 3)
+        let second = ws.panes[1].id
+        ws.focus(second)
+        ws.toggleZoom()
+        #expect(ws.zoomedPaneID == second)
+        ws.toggleZoom()
+        #expect(ws.zoomedPaneID == nil)
+    }
+
+    @Test func singlePaneNeverZooms() {
+        let ws = makeWorkspace(panes: 1)
+        ws.toggleZoom()
+        #expect(ws.zoomedPaneID == nil)
+    }
+
+    @Test func zoomFollowsFocusOnlyWhileZoomed() {
+        let ws = makeWorkspace(panes: 3)
+        let (a, b) = (ws.panes[0].id, ws.panes[1].id)
+        // Not zoomed: focus moves, zoom stays off.
+        ws.focus(b)
+        #expect(ws.zoomedPaneID == nil)
+        // Zoomed: focusing another pane re-targets the zoom.
+        ws.toggleZoom()
+        #expect(ws.zoomedPaneID == b)
+        ws.focus(a)
+        #expect(ws.activePaneID == a)
+        #expect(ws.zoomedPaneID == a)
+        // Focusing an unknown id is a no-op.
+        ws.focus(UUID())
+        #expect(ws.activePaneID == a)
+    }
+
+    @Test func focusNextCarriesTheZoom() {
+        let ws = makeWorkspace(panes: 3)
+        ws.toggleZoom()
+        let first = ws.zoomedPaneID
+        ws.focusNext()
+        #expect(ws.activePaneID == ws.panes[1].id)
+        #expect(ws.zoomedPaneID == ws.panes[1].id)
+        #expect(ws.zoomedPaneID != first)
+    }
+
+    @Test func addPaneUnzooms() {
+        let ws = makeWorkspace(panes: 2)
+        ws.toggleZoom()
+        #expect(ws.zoomedPaneID != nil)
+        ws.addPane(Pane(conversation: .shellConversation(cwd: URL(fileURLWithPath: "/tmp"),
+                                                         id: "ws-test-new")))
+        #expect(ws.zoomedPaneID == nil)              // the new pane must be visible
+        #expect(ws.layout == GridLayout.fit(3))      // grid re-fit to the new count
+        #expect(ws.activePaneID == ws.panes.last?.id)
+    }
+
+    @Test func removingTheZoomedPaneUnzooms() {
+        let ws = makeWorkspace(panes: 3)
+        let zoomed = ws.panes[0].id
+        ws.focus(zoomed)
+        ws.toggleZoom()
+        ws.removePane(id: zoomed)
+        #expect(ws.zoomedPaneID == nil)
+        #expect(ws.panes.count == 2)
+    }
+
+    @Test func removingAHiddenSiblingKeepsTheZoom() {
+        let ws = makeWorkspace(panes: 3)
+        let zoomed = ws.panes[0].id
+        ws.focus(zoomed)
+        ws.toggleZoom()
+        ws.removePane(id: ws.panes[2].id)
+        #expect(ws.zoomedPaneID == zoomed)           // still 2 panes — zoom survives
+        ws.removePane(id: ws.panes[1].id)
+        #expect(ws.zoomedPaneID == nil)              // down to 1 — nothing to zoom over
+    }
+}
+
 /// git status --porcelain parsing — the helpers were split out as testable
 /// but never tested.
 struct GitStatusParseTests {

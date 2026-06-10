@@ -289,6 +289,7 @@ private struct MiniPaneCell: View {
             .onTapGesture { coordinator.reveal(pane) }
             .contextMenu {
                 Button("Jump Here") { coordinator.reveal(pane) }
+                Button("Zoom Pane") { coordinator.toggleZoom(pane) }
                 Divider()
                 Button("Close Pane", role: .destructive) { coordinator.close(pane) }
             }

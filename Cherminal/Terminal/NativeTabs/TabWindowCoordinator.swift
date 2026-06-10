@@ -531,6 +531,27 @@ final class TabWindowCoordinator: ObservableObject {
         if let pane = ws.activePane { focusPane(pane, in: ws) }
     }
 
+    /// Toggle full-window zoom on the active pane (⇧⌘↩, the name-bar button,
+    /// or the minimap's "Zoom Pane"). Zoom is the workspace's law — pure
+    /// layout, surfaces untouched; re-assert focus so the zoomed surface
+    /// holds the keyboard.
+    func toggleZoomActivePane() {
+        guard let ws = activeController?.workspace else { return }
+        ws.toggleZoom()
+        if let pane = ws.activePane { focusPane(pane, in: ws) }
+    }
+
+    /// Zoom a specific pane (the minimap's context action) — jump to it, then
+    /// toggle. Zooming the already-zoomed pane unzooms.
+    func toggleZoom(_ pane: Pane) {
+        guard let controller = controllers.first(where: { c in
+            c.workspace.panes.contains { $0 === pane }
+        }) else { return }
+        select(controller)
+        focusPane(pane, in: controller.workspace)
+        controller.workspace.toggleZoom()
+    }
+
     /// Activate a pane programmatically (⌘`, spawn, tab select, rail reattach).
     /// Sets the active-pane border AND moves the AppKit first responder to the
     /// pane's surface — these must stay in lockstep. Plain mouse clicks don't come
@@ -541,13 +562,12 @@ final class TabWindowCoordinator: ObservableObject {
     /// reach the surface, the cell's SwiftUI overlays are non-interactive and the
     /// per-cell focus gesture is disabled on live panes (see TerminalGridView).
     func focusPane(_ pane: Pane, in workspace: Workspace) {
-        // Keep the @Published activePaneID write idempotent — the click
-        // recognizer (mouse-down DragGesture) fires on every drag-change, and we
-        // don't want to re-publish (re-render) on each one.
+        // Workspace.focus is the law (idempotent — the click recognizer fires
+        // per drag-change — and zoom-follows-focus while zoomed).
         if workspace.activePaneID != pane.id {
-            workspace.activePaneID = pane.id
             pane.lastActiveAt = Date()
         }
+        workspace.focus(pane.id)
         // Always route through moveFocus, even when this surface is ALREADY first
         // responder: a click must refresh the surface's focus "recency ticket"
         // (focusAppliedSeq) so a still-pending spawn/tab retry for another

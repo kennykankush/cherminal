@@ -31,6 +31,10 @@ struct CherminalApp: App {
                         AppEnvironment.shared.coordinator.renameActiveTab()
                     }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                    Button("Zoom Pane") {
+                        AppEnvironment.shared.coordinator.toggleZoomActivePane()
+                    }
+                    .keyboardShortcut(.return, modifiers: [.command, .shift])
                     Divider()
                     Button("Show Next Tab") {
                         AppEnvironment.shared.coordinator.selectNextTab()
@@ -390,6 +394,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
             if chars == "]" || chars == "}" { coordinator.selectNextTab(); return true }
             if chars == "[" || chars == "{" { coordinator.selectPreviousTab(); return true }
             if chars == "w" || chars == "W" { coordinator.closeActivePane(); return true }   // close pane
+            if chars == "\r" { coordinator.toggleZoomActivePane(); return true }             // zoom pane
         }
         return false
     }

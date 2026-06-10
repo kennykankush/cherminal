@@ -24,3 +24,6 @@ vendor/.build-cache/
 
 # Vendored Zig toolchain (downloaded by scripts/build-libghostty.sh)
 vendor/zig/
+
+# Local research notes
+/research

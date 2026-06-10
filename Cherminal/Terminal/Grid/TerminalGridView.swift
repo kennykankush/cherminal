@@ -2,27 +2,72 @@ import SwiftUI
 import GhosttyKit
 
 /// Renders a workspace's panes as an equal-split grid (rows × cols from
-/// `workspace.layout`). Explicit nested stacks (not LazyVGrid) so each cell gets
-/// a real pixel frame — surfaces need their true size at spawn. Reading order:
-/// pane index = row*cols + col.
+/// `workspace.layout`), placed by `PaneGridLayout`. Reading order: pane
+/// index = row*cols + col.
+///
+/// THE IDENTITY LAW (this is what fixed ">4 panes corrupts the grid"): cells
+/// are keyed by `pane.id` — one flat ForEach, one stable view per pane,
+/// forever. The vendored `SurfaceRepresentable.updateOSView` only handles
+/// size; it can NEVER swap one pane's NSView for another's. So cell identity
+/// must follow the pane, not the grid slot. The old nested
+/// ForEach(row)/ForEach(col) keyed cells by position — the first layout
+/// boundary that changes `cols` with a second row present (4→5 panes:
+/// 2×2→2×3, again at 9→10) remapped every row-1 slot to a different pane,
+/// SwiftUI re-bound the cells, and surfaces ended up glued to the wrong
+/// panes / reparented into two wrappers at once. With pane-keyed identity a
+/// layout change only moves frames; surfaces never re-bind or reparent.
+///
+/// Zoom: the zoomed pane is placed over the full grid area; the hidden
+/// siblings KEEP their grid frames (so their PTYs never resize/reflow) and
+/// drop to opacity 0 + no hit testing.
 struct TerminalGridView: View {
     @ObservedObject var workspace: Workspace
 
     var body: some View {
-        let layout = workspace.layout
-        VStack(spacing: 2) {
-            ForEach(0..<max(1, layout.rows), id: \.self) { row in
-                HStack(spacing: 2) {
-                    ForEach(0..<max(1, layout.cols), id: \.self) { col in
-                        let index = row * layout.cols + col
-                        if index < workspace.panes.count {
-                            PaneCellView(pane: workspace.panes[index], workspace: workspace)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                }
+        let zoomedID = workspace.zoomedPaneID
+        PaneGridLayout(layout: workspace.layout,
+                       zoomedIndex: zoomedID.flatMap { id in
+                           workspace.panes.firstIndex { $0.id == id }
+                       }) {
+            ForEach(workspace.panes) { pane in
+                let hidden = zoomedID != nil && pane.id != zoomedID
+                PaneCellView(pane: pane, workspace: workspace)
+                    .opacity(hidden ? 0 : 1)
+                    .allowsHitTesting(!hidden)
             }
+        }
+    }
+}
+
+/// Equal-cell grid placement (reading order, 2pt gutters), with an optional
+/// zoom override: the zoomed child gets the full bounds, every other child
+/// keeps its normal grid frame (invisible, but never resized — resizing a
+/// hidden pane would reflow its PTY and garble TUIs mid-zoom).
+private struct PaneGridLayout: Layout {
+    let layout: GridLayout
+    let zoomedIndex: Int?
+    private let spacing: CGFloat = 2
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        proposal.replacingUnspecifiedDimensions()
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = CGFloat(max(1, layout.rows))
+        let cols = CGFloat(max(1, layout.cols))
+        let cellW = max(1, (bounds.width - spacing * (cols - 1)) / cols)
+        let cellH = max(1, (bounds.height - spacing * (rows - 1)) / rows)
+        for (i, subview) in subviews.enumerated() {
+            let rect: CGRect
+            if i == zoomedIndex {
+                rect = bounds
+            } else {
+                let pos = layout.position(for: i)
+                rect = CGRect(x: bounds.minX + CGFloat(pos.col) * (cellW + spacing),
+                              y: bounds.minY + CGFloat(pos.row) * (cellH + spacing),
+                              width: cellW, height: cellH)
+            }
+            subview.place(at: rect.origin, proposal: ProposedViewSize(rect.size))
         }
     }
 }
@@ -36,12 +81,16 @@ struct PaneCellView: View {
     @ObservedObject var workspace: Workspace
 
     private var isActive: Bool { workspace.activePaneID == pane.id }
-    private var showBorder: Bool { isActive && workspace.panes.count > 1 }
+    // No border while zoomed — a full-window pane doesn't need "which pane
+    // has focus" disambiguation, and an edge-to-edge accent ring reads as noise.
+    private var showBorder: Bool {
+        isActive && workspace.panes.count > 1 && workspace.zoomedPaneID == nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             surfaceArea
-            PaneNameBar(pane: pane)   // editable name strip at the bottom of the pane
+            PaneNameBar(pane: pane, workspace: workspace)   // editable name strip at the bottom of the pane
         }
     }
 
@@ -120,8 +169,11 @@ struct PaneCellView: View {
 private struct PaneNameBar: View {
     @EnvironmentObject private var labels: ConversationLabelsManager
     @ObservedObject var pane: Pane
+    @ObservedObject var workspace: Workspace
+    @State private var hoveringZoom = false
 
     private var id: String { pane.conversation.id }
+    private var isZoomed: Bool { workspace.zoomedPaneID == pane.id }
 
     var body: some View {
         HStack(spacing: 5) {
@@ -140,6 +192,9 @@ private struct PaneNameBar: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 11))
                 .lineLimit(1)
+            if workspace.panes.count > 1 {
+                zoomButton
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
@@ -147,5 +202,23 @@ private struct PaneNameBar: View {
         .background(CHM.Color.fillSubtle)
         .overlay(alignment: .top) { Divider().opacity(0.4) }
         .help("Name this conversation")
+    }
+
+    /// Zoom toggle for this pane. While zoomed it's the only visible escape
+    /// hatch besides ⇧⌘↩, so it stays on the bar (not hover-only).
+    private var zoomButton: some View {
+        Button {
+            workspace.focus(pane.id)
+            workspace.toggleZoom()
+        } label: {
+            Image(systemName: isZoomed
+                  ? "arrow.down.right.and.arrow.up.left"
+                  : "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(hoveringZoom ? .secondary : .tertiary)
+        }
+        .buttonStyle(.plain)
+        .onHover { hoveringZoom = $0 }
+        .help(isZoomed ? "Unzoom — back to the grid (⇧⌘↩)" : "Zoom this pane (⇧⌘↩)")
     }
 }

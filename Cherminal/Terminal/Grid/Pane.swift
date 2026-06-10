@@ -69,6 +69,10 @@ final class Workspace: ObservableObject {
     @Published var panes: [Pane]
     @Published var layout: GridLayout
     @Published var activePaneID: Pane.ID?
+    /// Full-window zoom: when set, that pane takes the whole grid area and the
+    /// others hide (surfaces stay live at their grid sizes — no PTY reflow).
+    /// Runtime-only: never persisted, a restored session comes back unzoomed.
+    @Published var zoomedPaneID: Pane.ID?
     /// User-set tab name (double-click the tab / Tabs → Rename Tab). nil =
     /// automatic title (the active pane's room). Persisted with the workspace,
     /// so it survives relaunch and travels with saved Groups.
@@ -85,25 +89,52 @@ final class Workspace: ObservableObject {
 
     func pane(id: Pane.ID) -> Pane? { panes.first { $0.id == id } }
 
+    /// The focus law: activate a pane, and if the workspace is zoomed, the
+    /// zoom follows the focus (jumping to a pane while zoomed shows THAT pane
+    /// full-window — never a hidden pane holding the keyboard). Idempotent:
+    /// publishes only on change (the click recognizer fires per drag-change).
+    func focus(_ id: Pane.ID) {
+        guard panes.contains(where: { $0.id == id }) else { return }
+        if activePaneID != id { activePaneID = id }
+        if zoomedPaneID != nil, zoomedPaneID != id { zoomedPaneID = id }
+    }
+
+    /// Toggle full-window zoom on the active pane. A single-pane grid is
+    /// already "zoomed" — no-op.
+    func toggleZoom() {
+        guard panes.count > 1, let target = activePaneID ?? panes.first?.id else {
+            zoomedPaneID = nil
+            return
+        }
+        zoomedPaneID = (zoomedPaneID == target) ? nil : target
+    }
+
     /// Append a pane, re-fit the grid to the new count, and focus it.
+    /// A new pane must be visible — unzoom.
     func addPane(_ pane: Pane) {
         panes.append(pane)
         layout = GridLayout.fit(panes.count)
         reindex()
         activePaneID = pane.id
+        zoomedPaneID = nil
     }
 
     /// Remove a pane, re-fit, and move focus to the last remaining pane.
+    /// Removing the zoomed pane unzooms (back to the grid); removing a hidden
+    /// sibling keeps the zoom.
     func removePane(id: Pane.ID) {
         panes.removeAll { $0.id == id }
         layout = GridLayout.fit(max(1, panes.count))
         reindex()
         if activePaneID == id { activePaneID = panes.last?.id }
+        if zoomedPaneID == id || panes.count < 2 { zoomedPaneID = nil }
     }
 
-    /// Cycle the active pane by `delta` (wraps).
+    /// Cycle the active pane by `delta` (wraps). While zoomed, the zoom
+    /// follows — ⌘` cycles panes full-window.
     func focusNext(_ delta: Int = 1) {
         guard !panes.isEmpty else { return }
+        defer { if zoomedPaneID != nil, let a = activePaneID { zoomedPaneID = a } }
         guard let cur = activePaneID, let i = panes.firstIndex(where: { $0.id == cur }) else {
             activePaneID = panes.first?.id
             return
