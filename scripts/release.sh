@@ -11,7 +11,7 @@
 #     (Xcode → Settings → Accounts → Manage Certificates… → + → Developer ID Application)
 #   • A stored notary credential:
 #     xcrun notarytool store-credentials cherminal-notary \
-#       --apple-id <apple-id-email> --team-id 29CYQWJSMF --password <app-specific-password>
+#       --apple-id <apple-id-email> --team-id 483LU3J5WJ --password <app-specific-password>
 #   • gh auth (for the release upload)
 #
 # What it does, in order:
@@ -31,7 +31,9 @@ VERSION="${1:-}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Usage: scripts/release.sh <version>  (e.g. 0.2.0)" >&2; exit 2; }
 
 NOTARY_PROFILE="cherminal-notary"
-TEAM="29CYQWJSMF"
+# The paid Developer Program team (the Developer ID cert's team) — NOT the
+# old free personal team 29CYQWJSMF that the Apple Development cert is on.
+TEAM="483LU3J5WJ"
 APP_NAME="Cherminal"
 BUILD_DIR="build-release"
 DMG="dist/${APP_NAME}-${VERSION}.dmg"
