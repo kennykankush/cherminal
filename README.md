@@ -25,9 +25,23 @@ Cherminal watches agents the way a window manager watches windows — by reading
 
 ## Install
 
-### From a release (signed + notarized)
+All binary paths ship the same signed + notarized `.dmg` (Apple Silicon, macOS 26+).
 
-Grab the latest `.dmg` from [Releases](https://github.com/kennykankush/cherminal/releases), open it, drag **Cherminal** to Applications. (Homebrew cask + a curl installer follow once the first signed release is out.)
+### Homebrew
+
+```sh
+brew install --cask kennykankush/tap/cherminal
+```
+
+### curl
+
+```sh
+curl -fsSL https://cherminal.com/install.sh | sh
+```
+
+### Manually
+
+Grab the latest `.dmg` from [Releases](https://github.com/kennykankush/cherminal/releases), open it, drag **Cherminal** to Applications.
 
 ### From source
 
