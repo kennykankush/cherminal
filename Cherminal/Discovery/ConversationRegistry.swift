@@ -33,7 +33,10 @@ final class ConversationRegistry: ObservableObject {
     @Published private(set) var lastError: String?
 
     let cache: SessionCache?
-    private var watcher: FilesystemWatcher?
+    /// The app-wide shared FSEvents fan-out (one kernel stream for all
+    /// consumers); nil in tests. We hold a subscription, not a stream.
+    private let sessionEvents: FilesystemWatcher?
+    private var watcherSubscription: UUID?
     private var didBootstrap = false
     private var didLoadCache = false
     private var refreshInFlight: Task<Void, Never>?
@@ -41,7 +44,8 @@ final class ConversationRegistry: ObservableObject {
     /// loop runs once more and never drops a change that arrived mid-scan.
     private var pendingRefresh = false
 
-    init(cache: SessionCache? = nil) {
+    init(cache: SessionCache? = nil, sessionEvents: FilesystemWatcher? = nil) {
+        self.sessionEvents = sessionEvents
         if let cache {
             self.cache = cache
         } else {
@@ -289,29 +293,22 @@ final class ConversationRegistry: ObservableObject {
     // MARK: - Watcher
 
     private func startWatcher() {
-        guard watcher == nil else { return }
-        let home = URL(fileURLWithPath: NSHomeDirectory())
-        let paths = [
-            home.appendingPathComponent(".claude/projects", isDirectory: true).path,
-            home.appendingPathComponent(".codex/sessions", isDirectory: true).path,
-        ].filter { FileManager.default.fileExists(atPath: $0) }
-
-        guard !paths.isEmpty else { return }
-
+        guard watcherSubscription == nil, let sessionEvents else { return }
         // 2.5s coalescing batches an agent turn's write-burst into one fire;
-        // each fire is now an INCREMENTAL refresh of just the changed files
+        // each fire is an INCREMENTAL refresh of just the changed files
         // (refresh(changedPaths:)), not a full re-scan of every session — the
         // old full-scan-per-fire burned ~18% CPU under an active agent. The
-        // watcher's max-latency bound guarantees a fire at least every ~10s
-        // even mid-burst, so a long continuous turn can't starve the sidebar.
-        let watcher = FilesystemWatcher(paths: paths, debounce: 2.5) { [weak self] changed in
+        // max-latency bound guarantees a fire at least every ~10s even
+        // mid-burst, so a long continuous turn can't starve the sidebar.
+        // One SUBSCRIPTION on the shared stream — the coordinator's faster
+        // "your turn" consumer rides the same kernel stream.
+        watcherSubscription = sessionEvents.subscribe(debounce: 2.5) { [weak self] changed in
             // FSEvents callback fires on a background queue; hop to main
             // before touching @Published state.
             Task { @MainActor [weak self] in
                 await self?.refresh(changedPaths: changed)
             }
         }
-        watcher.start()
-        self.watcher = watcher
+        sessionEvents.start()
     }
 }

@@ -4,7 +4,21 @@ All notable changes to Cherminal. Newest first.
 
 ## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
 
+### Added
+- **Claude burst detection is live.** The exact banner family was extracted
+  from the installed Claude Code binary (its composer is literally
+  `` `You've hit your ${limit}` `` with session/weekly/Opus/Sonnet labels,
+  plus a "usage limit reached — check plan" status variant) — no more waiting
+  to observe a real burst. The "You're close to your usage limit"
+  approaching-warning and transient "rate limited" deliberately do NOT trip.
+  Pinned by tests.
+
 ### Changed
+- **One FSEvents stream instead of two.** The registry (2.5s sidebar refresh)
+  and the coordinator (~0.3s "your turn" light) now share a single kernel
+  stream via a multi-subscriber `FilesystemWatcher` — each consumer keeps its
+  own debounce + max-latency cadence, subscriptions attach/detach
+  independently (integration-tested).
 - **Sessions pane matured.** The minimap now follows the user's VISIBLE tab
   order (drag-reordering tabs reorders it; it used to follow open order), each
   tab row shows its ⌘n index + a proper frontmost/hover treatment, and both

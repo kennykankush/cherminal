@@ -145,11 +145,14 @@ final class TabWindowCoordinator: ObservableObject {
 
     /// Polls the live-session linker while any tab is open.
     private var linkTimer: Timer?
-    /// Drives the "your turn" light off FSEvents — the OS tells us the instant
-    /// an agent writes its turn-ending line, so there's no polling: idle costs
-    /// nothing and the light follows turn completion in ~0.3s. (The 8s reconcile
-    /// still handles the agent-exited case, where no write occurs.)
-    private var awaitWatcher: FilesystemWatcher?
+    /// The app-wide shared FSEvents fan-out — drives the "your turn" light:
+    /// the OS tells us the instant an agent writes its turn-ending line, so
+    /// there's no polling. We hold a SUBSCRIPTION at our own fast cadence
+    /// (~0.3s); the registry's slower sidebar-refresh consumer rides the same
+    /// kernel stream. (The 8s reconcile still handles the agent-exited case,
+    /// where no write occurs.)
+    private let sessionEvents: FilesystemWatcher
+    private var awaitSubscription: UUID?
     /// Reentrancy guard: an `lsof` poll can outlast the 3s interval, so the
     /// next tick must not start a second overlapping reconcile (which would
     /// double-write tab identities / the live set).
@@ -164,10 +167,12 @@ final class TabWindowCoordinator: ObservableObject {
     /// Created lazily and reused.
     private var placeholder: PlaceholderWindowController?
 
-    init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager) {
+    init(registry: ConversationRegistry, ghostty: Ghostty.App, bookmarks: BookmarksManager,
+         sessionEvents: FilesystemWatcher) {
         self.registry = registry
         self.ghostty = ghostty
         self.bookmarks = bookmarks
+        self.sessionEvents = sessionEvents
 
         // "Your turn" attention light clears the instant you focus a tab; it's
         // *set* by the session-file poll in reconcileLiveSessions (no bell).
@@ -1371,8 +1376,10 @@ final class TabWindowCoordinator: ObservableObject {
         if controllers.isEmpty && detachedAgents.isEmpty {
             linkTimer?.invalidate()
             linkTimer = nil
-            awaitWatcher?.stop()
-            awaitWatcher = nil
+            if let sub = awaitSubscription {
+                sessionEvents.unsubscribe(sub)
+                awaitSubscription = nil
+            }
             if !liveConversationIDs.isEmpty { liveConversationIDs = [] }
             if !awaitingTurnIDs.isEmpty { awaitingTurnIDs = [] }
             if !awaitingPaneIDs.isEmpty { awaitingPaneIDs = [] }
@@ -1393,23 +1400,14 @@ final class TabWindowCoordinator: ObservableObject {
         }
     }
 
-    /// Watch the agent session roots so a turn-ending write flips the "your
-    /// turn" light within the debounce window — no polling. FSEvents coalesces
-    /// a turn's burst of writes into one callback; we then re-read only the
-    /// live agent tabs' tails (cheap). Idle sessions trigger nothing.
+    /// Subscribe to the shared session-events stream so a turn-ending write
+    /// flips the "your turn" light within the debounce window — no polling.
+    /// Changed paths aren't needed here — this only re-reads the tails of
+    /// panes that are already live (O(live), cheap); the max-latency bound
+    /// guarantees the light fires even mid-burst. Idle sessions trigger nothing.
     private func startAwaitWatcher() {
-        guard awaitWatcher == nil else { return }
-        let home = URL(fileURLWithPath: NSHomeDirectory())
-        let paths = [
-            home.appendingPathComponent(".claude/projects", isDirectory: true).path,
-            home.appendingPathComponent(".codex/sessions", isDirectory: true).path,
-        ].filter { FileManager.default.fileExists(atPath: $0) }
-        guard !paths.isEmpty else { return }
-
-        // Changed paths aren't needed here — this only re-reads the tails of
-        // panes that are already live (O(live), cheap). The watcher's
-        // max-latency bound now guarantees the light fires even mid-burst.
-        let watcher = FilesystemWatcher(paths: paths) { [weak self] _ in
+        guard awaitSubscription == nil else { return }
+        awaitSubscription = sessionEvents.subscribe(debounce: 0.3) { [weak self] _ in
             // FSEvents fires on a background queue; hop to main for @Published state.
             Task { @MainActor [weak self] in
                 guard let self else { return }
@@ -1417,8 +1415,7 @@ final class TabWindowCoordinator: ObservableObject {
                 self.refreshDetachedStates()   // a background agent's turn lights its rail cell
             }
         }
-        watcher.start()
-        awaitWatcher = watcher
+        sessionEvents.start()
     }
 
     /// Detect which agent session (if any) each tab is running and adopt it as
