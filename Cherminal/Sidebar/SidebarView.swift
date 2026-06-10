@@ -2,17 +2,29 @@ import SwiftUI
 
 struct SidebarView: View {
     enum Mode: String, CaseIterable, Identifiable {
+        // Raw values are the PERSISTED @AppStorage tokens — keep them stable
+        // ("By room" predates the workspaces naming); `label` is what renders.
         case byRoom = "By room"
         case byRecent = "Recent"
-        case deep = "Deep"   // recent (≤7d) + high message volume — the intensive sessions
+        case deep = "Deep"   // recent (≤7d) + high session volume — the intensive sessions
         var id: String { rawValue }
+
+        /// User-facing name. "Rooms" are called WORKSPACES in the UI (the
+        /// folder you work in); the pane-grid type that happens to be named
+        /// `Workspace` in code is never user-visible.
+        var label: String {
+            switch self {
+            case .byRoom: "Workspaces"
+            case .byRecent: "Recent"
+            case .deep: "Deep"
+            }
+        }
     }
 
     @EnvironmentObject private var registry: ConversationRegistry
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @EnvironmentObject private var pins: PinsManager
     @EnvironmentObject private var bookmarks: BookmarksManager
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Binding var mode: Mode
     @Binding var selection: Conversation.ID?
 
@@ -34,12 +46,15 @@ struct SidebarView: View {
         VStack(spacing: 0) {
             topControls
             Divider().opacity(0.5)
+            // ONE persistent List for every mode. Each mode used to be its own
+            // List, and switching slid the whole NSTableView out with a
+            // move-transition while another slid in — heavy, and any registry
+            // publish mid-flight re-laid-out the in-flight transition (the
+            // stutter), multiplied across every open tab's sidebar copy. Now
+            // the table view persists and mode just swaps its CONTENT,
+            // instantly — the toggle thumb's slide is the feedback (Raycast
+            // rule: high-frequency switches shouldn't animate content).
             list
-                // Animate only mode-driven swaps (value-scoped, so search/load
-                // transitions are untouched). Pairs with the per-list
-                // pushTransition; .animation(value:) supplies the transaction
-                // the @AppStorage write otherwise loses.
-                .animation(CHM.Motion.modeSwitch, value: mode)
         }
         .background(AppEnvironment.shared.ghostty.config.backgroundColor)
         // Debounced full-text body search. Title/room filtering stays instant
@@ -62,10 +77,16 @@ struct SidebarView: View {
             bodyHits = Dictionary(hits.map { ($0.path, $0.snippet) }, uniquingKeysWith: { a, _ in a })
             searchingBodies = false
         }
-        // Stat the recent subset for Deep mode's size ranking — only while Deep
-        // is shown; re-runs when the conversation set changes.
-        .task(id: "\(mode == .deep)-\(registry.conversations.count)") {
+        // Stat the recent subset for Deep mode's size ranking when Deep opens.
+        // Keyed on the MODE only — the old key also included
+        // registry.conversations.count, so every incremental publish restarted
+        // this task while Deep was visible (more churn during switches).
+        .task(id: mode) {
             if mode == .deep { await loadDeepSizes() }
+        }
+        // New sessions appearing while Deep is open still get sized.
+        .onChange(of: registry.conversations.count) {
+            if mode == .deep { Task { await loadDeepSizes() } }
         }
         // Reset the "Show more" cap when the list's scope changes.
         .onChange(of: mode) { displayLimit = 50 }
@@ -119,97 +140,158 @@ struct SidebarView: View {
             ProgressView()
                 .controlSize(.small)
                 .frame(maxHeight: .infinity)
-        } else if !search.isEmpty {
-            searchResultsList
-        } else if filteredConversations.isEmpty {
+        } else if search.isEmpty && registry.conversations.isEmpty {
             emptyState
         } else {
-            switch mode {
-            case .byRoom:
-                List(selection: $selection) {
-                    groupsSection
-                    pinnedSection
-                    ForEach(filteredRooms) { room in
-                        // Pinned ones are lifted into the Pinned section, so a
-                        // room shows only its un-pinned conversations.
-                        let convos = room.conversations.filter { !pins.isPinned($0.id) }
-                        if !convos.isEmpty {
-                            Section {
-                                if roomIsExpanded(room) {
-                                    ForEach(convos) { convo in
-                                        ConversationRow(conversation: convo,
-                                                        isLive: coordinator.liveConversationIDs.contains(convo.id),
-                                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                                                        isSuperseded: registry.supersededIDs.contains(convo.id))
-                                            .tag(convo.id as Conversation.ID?)
-                                            .contextMenu { rowMenu(convo) }
-                                    }
-                                }
-                            } header: {
-                                RoomDisclosureHeader(
-                                    name: room.name,
-                                    count: convos.count,
-                                    isExpanded: roomIsExpanded(room)
-                                ) { toggleRoom(room) }
-                            }
-                        }
-                    }
-                }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
-                .onChange(of: selection) { _, newID in
-                    guard let newID, let convo = registry.conversation(id: newID) else { return }
-                    // Defer the section-expansion mutation off the selection
-                    // commit to avoid re-entering the NSTableView delegate.
-                    DispatchQueue.main.async { expandedRooms.insert(convo.roomPath.path) }
-                }
-                .onAppear(perform: seedExpandedRoom)
-                .transition(pushTransition(towards: .leading))
-            case .byRecent:
-                List(selection: $selection) {
-                    groupsSection
-                    pinnedSection
-                    // Pinned ones live in the Pinned section above — don't repeat
-                    // them here. Capped to `displayLimit` with a "Show more" footer.
-                    let all = filteredConversations.filter { !pins.isPinned($0.id) }
-                    ForEach(all.prefix(displayLimit)) { convo in
-                        ConversationRow(conversation: convo, showRoom: true,
-                                        isLive: coordinator.liveConversationIDs.contains(convo.id),
-                                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                                        isSuperseded: registry.supersededIDs.contains(convo.id))
-                            .tag(convo.id as Conversation.ID?)
-                            .contextMenu { rowMenu(convo) }
-                    }
-                    showMoreRow(total: all.count)
-                }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
-                .transition(pushTransition(towards: .trailing))
-            case .deep:
-                if deepSizes.isEmpty {
-                    ProgressView().controlSize(.small).frame(maxHeight: .infinity)
-                } else if deepConversations.isEmpty {
-                    deepEmptyState
+            // ONE List, always mounted — mode/search swap its CONTENT only.
+            List(selection: $selection) {
+                if !search.isEmpty {
+                    searchSection
                 } else {
-                    let all = deepConversations.filter { !pins.isPinned($0.id) }
-                    List(selection: $selection) {
-                        pinnedSection
-                        ForEach(all.prefix(displayLimit)) { convo in
-                            ConversationRow(conversation: convo, showRoom: true,
-                                            volume: formatBytes(deepSizes[convo.id] ?? 0),
+                    newTabRow
+                    groupsSection
+                    pinnedSection
+                    switch mode {
+                    case .byRoom:   workspaceSections
+                    case .byRecent: recentRows
+                    case .deep:     deepRows
+                    }
+                }
+            }
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .onChange(of: selection) { _, newID in
+                guard let newID, let convo = registry.conversation(id: newID) else { return }
+                // Defer the section-expansion mutation off the selection
+                // commit to avoid re-entering the NSTableView delegate. (Also
+                // means a pick made in Recent lands on an open workspace.)
+                DispatchQueue.main.async { expandedRooms.insert(convo.roomPath.path) }
+            }
+            .onAppear(perform: seedExpandedRoom)
+        }
+    }
+
+    // MARK: - Top utility ("New chat"-style)
+
+    /// The Claude-desktop-style action row at the very top of the list.
+    private var newTabRow: some View {
+        HStack(spacing: CHM.Space.sm) {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 17)
+            Text("New Tab")
+                .font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 6)
+            Text("⌘T")
+                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            DispatchQueue.main.async { coordinator.openFreshShell() }
+        }
+        .help("Open a new terminal tab")
+    }
+
+    // MARK: - Mode content (rows inside the one shared List)
+
+    /// Workspaces (the folders you work in), collapsible. Pinned ones are
+    /// lifted into the Pinned section, so a workspace shows only its
+    /// un-pinned conversations.
+    @ViewBuilder private var workspaceSections: some View {
+        ForEach(filteredRooms) { room in
+            let convos = room.conversations.filter { !pins.isPinned($0.id) }
+            if !convos.isEmpty {
+                Section {
+                    if roomIsExpanded(room) {
+                        ForEach(convos) { convo in
+                            ConversationRow(conversation: convo,
                                             isLive: coordinator.liveConversationIDs.contains(convo.id),
                                             isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
                                             isSuperseded: registry.supersededIDs.contains(convo.id))
                                 .tag(convo.id as Conversation.ID?)
                                 .contextMenu { rowMenu(convo) }
                         }
-                        showMoreRow(total: all.count)
                     }
-                    .listStyle(.sidebar)
-                    .scrollContentBackground(.hidden)
-                    .transition(pushTransition(towards: .trailing))
+                } header: {
+                    RoomDisclosureHeader(
+                        name: room.name,
+                        count: convos.count,
+                        isExpanded: roomIsExpanded(room)
+                    ) { toggleRoom(room) }
                 }
             }
+        }
+    }
+
+    /// Recent across all workspaces, capped with "Show more".
+    @ViewBuilder private var recentRows: some View {
+        let all = filteredConversations.filter { !pins.isPinned($0.id) }
+        ForEach(all.prefix(displayLimit)) { convo in
+            ConversationRow(conversation: convo, showRoom: true,
+                            isLive: coordinator.liveConversationIDs.contains(convo.id),
+                            isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
+                            isSuperseded: registry.supersededIDs.contains(convo.id))
+                .tag(convo.id as Conversation.ID?)
+                .contextMenu { rowMenu(convo) }
+        }
+        showMoreRow(total: all.count)
+    }
+
+    /// Deep: recent intensive sessions ranked by size. Loading/empty render as
+    /// calm in-list rows so the List itself never swaps out.
+    @ViewBuilder private var deepRows: some View {
+        if deepSizes.isEmpty {
+            HStack {
+                Spacer(); ProgressView().controlSize(.small); Spacer()
+            }
+            .listRowInsets(EdgeInsets(top: 24, leading: 8, bottom: 8, trailing: 8))
+        } else if deepConversations.isEmpty {
+            deepEmptyRow
+        } else {
+            let all = deepConversations.filter { !pins.isPinned($0.id) }
+            ForEach(all.prefix(displayLimit)) { convo in
+                ConversationRow(conversation: convo, showRoom: true,
+                                volume: formatBytes(deepSizes[convo.id] ?? 0),
+                                isLive: coordinator.liveConversationIDs.contains(convo.id),
+                                isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
+                                isSuperseded: registry.supersededIDs.contains(convo.id))
+                    .tag(convo.id as Conversation.ID?)
+                    .contextMenu { rowMenu(convo) }
+            }
+            showMoreRow(total: all.count)
+        }
+    }
+
+    /// Search results as in-list rows (title/room matches instantly, body
+    /// matches streaming in behind the debounce).
+    @ViewBuilder private var searchSection: some View {
+        if searchingBodies {
+            Label("Searching conversations…", systemImage: "magnifyingglass")
+                .font(CHM.Font.caption)
+                .foregroundStyle(.tertiary)
+                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 6, trailing: 8))
+        }
+        let results = searchResults
+        if results.isEmpty && !searchingBodies {
+            Text("No matches — try a shorter query.")
+                .font(CHM.Font.caption)
+                .foregroundStyle(.tertiary)
+                .listRowInsets(EdgeInsets(top: 12, leading: 8, bottom: 8, trailing: 8))
+        }
+        ForEach(results) { convo in
+            ConversationRow(
+                conversation: convo,
+                showRoom: true,
+                snippet: bodyHits[convo.sessionFile.path],
+                isLive: coordinator.liveConversationIDs.contains(convo.id),
+                isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
+                isPinned: pins.isPinned(convo.id),
+                isSuperseded: registry.supersededIDs.contains(convo.id)
+            )
+            .tag(convo.id as Conversation.ID?)
+            .contextMenu { rowMenu(convo) }
         }
     }
 
@@ -283,33 +365,24 @@ struct SidebarView: View {
         }
     }
 
-    private var deepEmptyState: some View {
+    /// Deep's calm empty state, as an in-list row (the List never swaps out).
+    private var deepEmptyRow: some View {
         VStack(spacing: CHM.Space.sm) {
             Image(systemName: "flame")
-                .font(.system(size: 30, weight: .light))
+                .font(.system(size: 24, weight: .light))
                 .foregroundStyle(.tertiary)
             Text("No intensive sessions")
-                .font(CHM.Font.bodyEmphasis)
+                .font(CHM.Font.captionEmphasis)
+                .foregroundStyle(.secondary)
             Text(deepMinBytes > 0
                  ? "Nothing over \(formatBytes(Int64(deepMinBytes))) in the last 7 days. Try a smaller cutoff."
                  : "Nothing heavy in the last 7 days yet.")
                 .font(CHM.Font.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
-                .padding(.horizontal, CHM.Space.xl)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.bottom, CHM.Space.xxl)
-    }
-
-    /// Direction-aware transition for the mode swap: content enters/leaves on
-    /// the side its toggle lives (By room = leading, Recent = trailing), so the
-    /// list pushes in the same direction the selector moves. Plus a fade so the
-    /// heavy List swap reads smoothly. Reduce Motion → a plain crossfade.
-    private func pushTransition(towards edge: Edge) -> AnyTransition {
-        reduceMotion
-            ? .opacity
-            : .move(edge: edge).combined(with: .opacity)
+        .frame(maxWidth: .infinity)
+        .listRowInsets(EdgeInsets(top: 28, leading: 12, bottom: 8, trailing: 12))
     }
 
     // MARK: - Groups (saved tab sets, surfaced in-sidebar)
@@ -373,10 +446,12 @@ struct SidebarView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 17)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Save this workspace")
+                        // "Group", not "workspace" — workspaces are the FOLDERS
+                        // in the sidebar; this saves the open tab set.
+                        Text("Save tabs as group")
                             .font(.system(size: 13, weight: .medium))
                             .foregroundStyle(.primary)
-                        Text("Reopen these \(n) \(tabWord) anytime")
+                        Text("Reopen these \(n) \(tabWord) — every pane — anytime")
                             .font(.system(size: 11))
                             .foregroundStyle(.tertiary)
                     }
@@ -487,7 +562,7 @@ struct SidebarView: View {
             Text(search.isEmpty ? "No conversations yet" : "No matches")
                 .font(CHM.Font.bodyEmphasis)
             Text(search.isEmpty
-                 ? "Start a Claude Code or Codex session in any ~/dev folder — it'll show up here."
+                 ? "Start a Claude Code or Codex session in any workspace folder — it'll show up here."
                  : "Try a shorter query.")
                 .font(CHM.Font.caption)
                 .foregroundStyle(.secondary)
@@ -499,42 +574,6 @@ struct SidebarView: View {
     }
 
     // MARK: - Search results (title/room + full-text body)
-
-    @ViewBuilder
-    private var searchResultsList: some View {
-        let results = searchResults
-        if results.isEmpty {
-            if searchingBodies {
-                ProgressView().controlSize(.small).frame(maxHeight: .infinity)
-            } else {
-                emptyState
-            }
-        } else {
-            List(selection: $selection) {
-                if searchingBodies {
-                    Label("Searching conversations…", systemImage: "magnifyingglass")
-                        .font(CHM.Font.caption)
-                        .foregroundStyle(.tertiary)
-                        .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 6, trailing: 8))
-                }
-                ForEach(results) { convo in
-                    ConversationRow(
-                        conversation: convo,
-                        showRoom: true,
-                        snippet: bodyHits[convo.sessionFile.path],
-                        isLive: coordinator.liveConversationIDs.contains(convo.id),
-                        isAwaiting: coordinator.awaitingTurnIDs.contains(convo.id),
-                        isPinned: pins.isPinned(convo.id),
-                        isSuperseded: registry.supersededIDs.contains(convo.id)
-                    )
-                    .tag(convo.id as Conversation.ID?)
-                    .contextMenu { rowMenu(convo) }
-                }
-            }
-            .listStyle(.sidebar)
-            .scrollContentBackground(.hidden)
-        }
-    }
 
     /// Conversations matching the query by title/room OR body, most recent
     /// first. Body matches come from the debounced full-text searcher.
@@ -619,7 +658,7 @@ private struct ModeToggle: View {
         HStack(spacing: 2) {
             ForEach(SidebarView.Mode.allCases) { option in
                 let selected = mode == option
-                Text(option.rawValue)
+                Text(option.label)
                     .font(.system(size: 12, weight: selected ? .semibold : .medium))
                     .foregroundStyle(selected ? Color.primary : Color.secondary)
                     .frame(maxWidth: .infinity)

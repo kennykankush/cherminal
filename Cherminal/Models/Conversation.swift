@@ -19,9 +19,19 @@ enum AgentKind: String, Codable, Hashable, Sendable, CaseIterable {
         }
     }
 
-    /// Single-glyph mark used in the sidebar chip. SF Symbol names chosen
-    /// to be evocative of each agent's visual identity without literally
-    /// reproducing the brand's official mark.
+    /// Asset-catalog name of the agent's REAL brand mark (lobe-icons dark
+    /// variants, vendored into Assets.xcassets); nil falls back to the SF
+    /// Symbol below. Real marks make the sidebar scannable the way the
+    /// Claude/ChatGPT desktop sidebars are.
+    var markImageName: String? {
+        switch self {
+        case .claudeCode: "AgentMark-ClaudeCode"
+        case .codex: "AgentMark-Codex"
+        case .shell, .unknown: nil
+        }
+    }
+
+    /// SF Symbol fallback for kinds without a brand mark.
     var markSymbol: String {
         switch self {
         case .claudeCode: "sparkle"
@@ -43,19 +53,30 @@ enum AgentKind: String, Codable, Hashable, Sendable, CaseIterable {
     }
 }
 
-/// Small circular chip rendered next to every conversation row and in the
-/// terminal header. Designed to be glanceable at 18pt.
+/// The agent's mark, rendered next to every conversation row and in the
+/// terminal header. Claude Code and Codex show their REAL logos, bare (no
+/// chip) — the way the Claude/ChatGPT desktop sidebars present icons; kinds
+/// without a brand mark keep the subtle circled SF Symbol. Glanceable at 18pt.
 struct AgentBadge: View {
     let agent: AgentKind
     var size: CGFloat = 18
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(agent.tint.opacity(0.16))
-            Image(systemName: agent.markSymbol)
-                .font(.system(size: size * 0.55, weight: .semibold))
-                .foregroundStyle(agent.tint)
+        Group {
+            if let name = agent.markImageName {
+                Image(name)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+            } else {
+                ZStack {
+                    Circle()
+                        .fill(agent.tint.opacity(0.16))
+                    Image(systemName: agent.markSymbol)
+                        .font(.system(size: size * 0.55, weight: .semibold))
+                        .foregroundStyle(agent.tint)
+                }
+            }
         }
         .frame(width: size, height: size)
         .accessibilityLabel(Text(agent.displayName))
