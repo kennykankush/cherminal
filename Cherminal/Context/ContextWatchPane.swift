@@ -429,7 +429,7 @@ struct ContextWatchPane: View {
                     metaRow("Started", first.formatted(date: .abbreviated, time: .shortened))
                 }
                 metaRow("Last activity", convo.lastActivityAt.formatted(date: .abbreviated, time: .shortened))
-                metaRow("Folder", convo.roomName)
+                metaRow("Workspace", convo.roomName)
                 metaRow("Path", convo.roomPath.path, mono: true)
             }
         }

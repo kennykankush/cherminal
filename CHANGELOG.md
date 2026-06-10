@@ -4,6 +4,18 @@ All notable changes to Cherminal. Newest first.
 
 ## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
 
+### Changed
+- **Sidebar revitalized (and the mode-switch stutter fixed).** Workspaces /
+  Recent / Deep now share ONE persistent list whose content swaps instantly —
+  each mode used to be its own table view, slid in/out with a move-transition
+  that any mid-flight registry publish re-laid-out (the stutter), duplicated
+  across every open tab. "Rooms" are now called **Workspaces** everywhere
+  user-facing. Claude Code and Codex rows show their **real brand marks**
+  (lobe-icons, vendored into the asset catalog) instead of stand-in symbols.
+  New Claude-desktop-style "New Tab ⌘T" action row at the top; search results
+  render in-list; the group-save row says "Save tabs as group" (workspaces
+  are folders now — groups are tab sets).
+
 ### Added
 - **Claude burst detection is live.** The exact banner family was extracted
   from the installed Claude Code binary (its composer is literally
