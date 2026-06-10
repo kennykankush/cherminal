@@ -119,4 +119,44 @@ struct FilesystemWatcherIntegrationTests {
         _ = before
         #expect(during >= 1, "max-latency must force at least one mid-burst delivery")
     }
+
+    /// One kernel stream, many consumers: two subscribers at different
+    /// cadences both receive a write, and unsubscribing one leaves the other
+    /// alive — the contract that lets the registry (2.5s) and the coordinator
+    /// (0.3s) share a single FSEventStream.
+    @Test func fanOutServesAndDetachesSubscribersIndependently() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chm-fan-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let fast = DeliveryBox(), slow = DeliveryBox()
+        let watcher = FilesystemWatcher(paths: [dir.path])
+        let fastSub = watcher.subscribe(debounce: 0.15) { fast.record($0) }
+        watcher.subscribe(debounce: 0.5) { slow.record($0) }
+        watcher.start()
+        defer { watcher.stop() }
+        try await Task.sleep(for: .milliseconds(400))   // stream warm-up
+
+        try "x\n".write(to: dir.appendingPathComponent("one.jsonl"),
+                        atomically: true, encoding: .utf8)
+        for _ in 0..<40 where !(fast.all().count >= 1 && slow.all().count >= 1) {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(fast.all().count >= 1, "fast subscriber must receive")
+        #expect(slow.all().count >= 1, "slow subscriber must receive")
+
+        // Detach the fast one; only the slow one keeps receiving.
+        watcher.unsubscribe(fastSub)
+        try await Task.sleep(for: .milliseconds(200))   // let the unsubscribe land
+        let fastBefore = fast.all().count
+        let slowBefore = slow.all().count
+        try "y\n".write(to: dir.appendingPathComponent("two.jsonl"),
+                        atomically: true, encoding: .utf8)
+        for _ in 0..<40 where slow.all().count == slowBefore {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        #expect(slow.all().count > slowBefore, "remaining subscriber keeps receiving")
+        #expect(fast.all().count == fastBefore, "unsubscribed consumer receives nothing")
+    }
 }

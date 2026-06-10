@@ -19,12 +19,20 @@ final class AppEnvironment {
 
     private init() {
         let cache = try? SessionCache()
-        let registry = ConversationRegistry(cache: cache)
+        // ONE kernel FSEventStream over the agent session roots, fanned out to
+        // every consumer at its own cadence (registry 2.5s, coordinator 0.3s).
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        let sessionEvents = FilesystemWatcher(paths: [
+            home.appendingPathComponent(".claude/projects", isDirectory: true).path,
+            home.appendingPathComponent(".codex/sessions", isDirectory: true).path,
+        ].filter { FileManager.default.fileExists(atPath: $0) })
+        let registry = ConversationRegistry(cache: cache, sessionEvents: sessionEvents)
         let ghostty = Ghostty.App()
         let bookmarks = BookmarksManager(cache: cache)
         let pins = PinsManager(cache: cache)
         let coordinator = TabWindowCoordinator(
-            registry: registry, ghostty: ghostty, bookmarks: bookmarks)
+            registry: registry, ghostty: ghostty, bookmarks: bookmarks,
+            sessionEvents: sessionEvents)
         self.registry = registry
         self.ghostty = ghostty
         self.bookmarks = bookmarks

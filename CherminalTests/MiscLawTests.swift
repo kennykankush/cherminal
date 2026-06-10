@@ -64,11 +64,34 @@ struct BurstDetectorTests {
         #expect(BurstDetector.isBursting(agent: .codex, visibleText: "HIT YOUR USAGE LIMIT now"))
     }
 
+    /// Claude's banners, verified against the installed binary's composer
+    /// (`You've hit your ${label}…` + the "— check plan" status variant).
+    @Test func claudeBannerFamilyTrips() {
+        #expect(BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "You've hit your weekly limit · resets 3am"))
+        #expect(BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "You've hit your session limit"))
+        #expect(BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "You\u{2019}ve hit your Opus limit"))   // curly apostrophe
+        #expect(BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "status: usage limit reached — check plan"))
+    }
+
+    @Test func claudeApproachingWarningAndDiscussionDoNotTrip() {
+        // The APPROACHING warning is not a burst.
+        #expect(!BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "You're close to your usage limit"))
+        // Transient rate limiting is not a burst.
+        #expect(!BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "rate limited — wait and retry"))
+        // Talking ABOUT limits isn't a burst.
+        #expect(!BurstDetector.isBursting(agent: .claudeCode,
+            visibleText: "let's discuss the usage limit semantics"))
+    }
+
     @Test func discussionAndOtherAgentsDoNotTrip() {
         // Talking ABOUT limits isn't a burst.
         #expect(!BurstDetector.isBursting(agent: .codex, visibleText: "let's discuss usage limits in the API"))
-        // Claude detection is deliberately disabled pending its exact wording.
-        #expect(!BurstDetector.isBursting(agent: .claudeCode, visibleText: "You've hit your usage limit."))
         #expect(!BurstDetector.isBursting(agent: .shell, visibleText: "hit your usage limit"))
     }
 }

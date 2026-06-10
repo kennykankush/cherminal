@@ -55,6 +55,24 @@ enum BurstDetector {
         }
     }
 
+    /// Claude Code's banner family, extracted from the installed binary
+    /// (2026-06-10): the composer is literally
+    /// `function h9H(H,_){return`You've hit your ${H}${_}`}` with H ∈
+    /// {"session limit","weekly limit","Opus limit","Sonnet limit"}, plus a
+    /// "usage limit reached — check plan" status-line variant. The
+    /// "You're close to your usage limit" APPROACHING warning must not trip.
+    /// Both straight and curly apostrophes, since terminals render either.
+    private static let claudeBurstMarkers: [String] = {
+        var out: [String] = ["usage limit reached — check plan"]
+        for apostrophe in ["'", "\u{2019}"] {
+            for label in ["session limit", "weekly limit", "opus limit",
+                          "sonnet limit", "usage limit"] {
+                out.append("you\(apostrophe)ve hit your \(label)")
+            }
+        }
+        return out
+    }()
+
     static func isBursting(agent: AgentKind, visibleText: String) -> Bool {
         let t = visibleText.lowercased()
         switch agent {
@@ -63,11 +81,7 @@ enum BurstDetector {
             // credits or try again at <date>." — distinctive enough to be safe.
             return t.contains("hit your usage limit")
         case .claudeCode:
-            // TODO: Claude Code's exact plan-limit wording isn't confirmed yet
-            // (its logged "Rate limited" is the transient case, not a burst).
-            // Disabled until we have the literal banner text — guessing here
-            // would risk flagging a chat that just discusses usage limits.
-            return false
+            return claudeBurstMarkers.contains { t.contains($0) }
         default:
             return false
         }
