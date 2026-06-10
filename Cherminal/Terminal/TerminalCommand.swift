@@ -57,6 +57,18 @@ enum TerminalCommand {
         }
     }
 
+    /// The plain resume line — no dtach wrap, PATH binary names — for the
+    /// inspector's "Copy resume command": paste into any terminal anywhere.
+    /// Same bypass flags as resume(); same injection guard.
+    static func copyableResume(for conversation: Conversation) -> String? {
+        guard let id = safeSessionID(conversation.id) else { return nil }
+        switch conversation.agent {
+        case .claudeCode: return "claude --dangerously-skip-permissions --resume \(id)"
+        case .codex:      return "codex --dangerously-bypass-approvals-and-sandbox resume \(id)"
+        default:          return nil
+        }
+    }
+
     /// Attach to a session registered with claude's background-agent
     /// supervisor (`claude attach <id>` — ^Z detaches, the session keeps
     /// running). dtach-wrapped on the session's own socket like every agent

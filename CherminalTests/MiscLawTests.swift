@@ -223,6 +223,19 @@ struct TerminalCommandTests {
         #expect(TerminalCommand.resume(for: convo("12345678-aaaa-bbbb-cccc-1234567890ab", agent: .unknown)) == nil)
     }
 
+    @Test func copyableResumeIsPlainAndGuarded() throws {
+        let id = "12345678-aaaa-bbbb-cccc-1234567890ab"
+        let claude = try #require(TerminalCommand.copyableResume(for: convo(id, agent: .claudeCode)))
+        #expect(claude == "claude --dangerously-skip-permissions --resume \(id)")
+        let codex = try #require(TerminalCommand.copyableResume(for: convo(id, agent: .codex)))
+        #expect(codex == "codex --dangerously-bypass-approvals-and-sandbox resume \(id)")
+        // Plain lines for pasting elsewhere — never dtach-wrapped.
+        #expect(!claude.contains(".sock") && !codex.contains(".sock"))
+        // Same injection guard as resume(); shells have nothing to copy.
+        #expect(TerminalCommand.copyableResume(for: convo("x; rm -rf /", agent: .claudeCode)) == nil)
+        #expect(TerminalCommand.copyableResume(for: convo(id, agent: .shell)) == nil)
+    }
+
     @Test func backgroundAttachIsWrappedAndInjectionGuarded() throws {
         let id = "abcdef12-3456-7890-abcd-ef1234567890"
         let cmd = try #require(TerminalCommand.attachBackground(claudeSessionID: id))

@@ -16,6 +16,8 @@ struct ContextWatchPane: View {
     @EnvironmentObject private var labels: ConversationLabelsManager
 
     @State private var usage: ConversationUsage?
+    @State private var pulse: SessionPulse.Pulse?
+    @State private var procFacts: TabWindowCoordinator.ProcessFacts?
     @State private var showTokenDetails = false
     @State private var portsExpanded = false
     @State private var gitStatus: GitStatus?
@@ -47,6 +49,13 @@ struct ContextWatchPane: View {
                             BurstBanner(agents: [convo.agent])
                         }
                         labelSection(convo)
+                        // The conversation itself, before the machine vitals:
+                        // what the agent is working through, and the last
+                        // exchange — the "catch up in two seconds" glance.
+                        if let pulse, !pulse.todos.isEmpty { planSection(pulse) }
+                        if let pulse, pulse.lastUserText != nil || pulse.lastAssistantText != nil {
+                            latestSection(pulse, convo)
+                        }
                         if let usage {
                             // 5H / Weekly account windows sit ABOVE the context
                             // window — glanceable rate-limit headroom first.
@@ -55,6 +64,7 @@ struct ContextWatchPane: View {
                             tokensSection(usage)
                         }
                         if let gitStatus { gitSection(gitStatus) }
+                        processSection(convo)
                         sessionSection(convo)
                     }
                     .padding(CHM.Space.xl)
@@ -76,6 +86,8 @@ struct ContextWatchPane: View {
         // visibility flip, which would blank the gauge on every tab switch).
         .onChange(of: conversation?.id) {
             usage = nil
+            pulse = nil
+            procFacts = nil
             showTokenDetails = false
             accumulators = [:]
         }
@@ -107,11 +119,22 @@ struct ContextWatchPane: View {
                     // stale and the Usage limits section vanishes). Claude appends to
                     // its tracked file, so liveFile is nil there — no change.
                     let file = (agent == .codex ? coordinator.liveFile(for: convo.id) : nil) ?? convo.sessionFile
-                    var parsed = await Task.detached(priority: .utility) {
-                        agent == .codex
+                    // One detached hop reads everything off-main: usage, the
+                    // pulse (plan + last exchange, same file), and the shared
+                    // ProcTable snapshot (TTL-cached; capture blocks ~60ms).
+                    let (parsedUsage, parsedPulse, table) = await Task.detached(priority: .utility)
+                    { () -> (ConversationUsage?, SessionPulse.Pulse?, ProcTable?) in
+                        let u = agent == .codex
                             ? ConversationUsageParser.parseCodex(sessionFile: file)
                             : accumulator.ingest(file: file)
+                        let p = SessionPulse.read(sessionFile: file, agent: agent)
+                        return (u, p, ProcTable.cached(socketDir: Dtach.directory))
                     }.value
+                    var parsed = parsedUsage
+                    // Equatable-guarded writes — no re-render churn on quiet ticks.
+                    if let parsedPulse, parsedPulse != pulse { pulse = parsedPulse }
+                    let facts = coordinator.processFacts(for: convo.id, table: table)
+                    if facts != procFacts { procFacts = facts }
                     // Codex carries its 5H/Weekly windows in-file; Claude's only come
                     // from the OAuth usage API (cached/throttled). Merge them in.
                     if agent == .claudeCode {
@@ -178,6 +201,106 @@ struct ContextWatchPane: View {
             .help(pins.isPinned(convo.id) ? "Unpin this conversation" : "Pin this conversation")
         }
         .padding(.top, 24)   // clear the traffic-light overlay (hiddenTitleBar)
+    }
+
+    // MARK: - Plan (the agent's live todo list, read from the session file)
+
+    private func planSection(_ p: SessionPulse.Pulse) -> some View {
+        // Long plans collapse their leading completed steps into one summary
+        // row — the glance is "what's current + what's left", not history.
+        let todos = p.todos
+        let collapse = todos.count > 10
+        let visible = collapse ? todos.filter { $0.status != .completed } : todos
+        return section("Plan", detail: "\(p.todosDone)/\(todos.count) done") {
+            VStack(alignment: .leading, spacing: CHM.Space.xs) {
+                if collapse, p.todosDone > 0 {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Text("\(p.todosDone) completed")
+                            .font(CHM.Font.caption).foregroundStyle(.tertiary)
+                    }
+                }
+                ForEach(Array(visible.prefix(10).enumerated()), id: \.offset) { _, todo in
+                    todoRow(todo)
+                }
+                if visible.count > 10 {
+                    Text("+\(visible.count - 10) more")
+                        .font(CHM.Font.caption).foregroundStyle(.tertiary)
+                }
+            }
+        }
+    }
+
+    private func todoRow(_ t: SessionPulse.Todo) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            switch t.status {
+            case .completed:
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            case .inProgress:
+                Image(systemName: "circle.inset.filled")
+                    .font(.system(size: 10)).foregroundStyle(CHM.Color.accent)
+            case .pending:
+                Image(systemName: "circle")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+            Text(t.text)
+                .font(CHM.Font.caption)
+                .foregroundStyle(t.status == .inProgress ? AnyShapeStyle(.primary)
+                                 : t.status == .pending ? AnyShapeStyle(.secondary)
+                                 : AnyShapeStyle(.tertiary))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - Latest (the last exchange + turn state)
+
+    private func latestSection(_ p: SessionPulse.Pulse, _ convo: Conversation) -> some View {
+        let (word, color) = turnChip(convo)
+        return VStack(alignment: .leading, spacing: CHM.Space.sm) {
+            HStack(spacing: CHM.Space.xs) {
+                Text("Latest")
+                    .font(CHM.Font.eyebrow)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+                Spacer(minLength: 0)
+                HStack(spacing: 4) {
+                    Circle().fill(color).frame(width: 5, height: 5)
+                    Text(word).font(CHM.Font.caption).foregroundStyle(color)
+                }
+            }
+            if let you = p.lastUserText {
+                exchangeRow("You", you, lines: 2, primary: false)
+            }
+            if let agent = p.lastAssistantText {
+                exchangeRow(convo.agent.displayName, agent, lines: 4, primary: true)
+            }
+        }
+    }
+
+    private func exchangeRow(_ label: String, _ text: String, lines: Int, primary: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.tertiary)
+                .textCase(.uppercase)
+                .tracking(0.5)
+            Text(text)
+                .font(CHM.Font.caption)
+                .foregroundStyle(primary ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .lineLimit(lines)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// Same semantics as the minimap's cell state — one vocabulary everywhere.
+    private func turnChip(_ convo: Conversation) -> (String, Color) {
+        if coordinator.awaitingPaneIDs.contains(convo.id) { return ("your turn", CHM.Color.attention) }
+        if coordinator.liveConversationIDs.contains(convo.id) { return ("working…", CHM.Color.accent) }
+        return ("idle", Color.secondary)
     }
 
     // MARK: - Gauge (the centerpiece)
@@ -416,6 +539,50 @@ struct ContextWatchPane: View {
     /// best in conventional colors, kept desaturated to match the calm palette).
     private static let gitAdd = Color(red: 0.38, green: 0.72, blue: 0.47)
 
+    // MARK: - Process (state + pid + RAM/CPU, from the shared ProcTable)
+
+    @ViewBuilder private func processSection(_ convo: Conversation) -> some View {
+        if convo.agent == .claudeCode || convo.agent == .codex, let f = procFacts,
+           f.state != .unknown {
+            section("Process") {
+                VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                    HStack(spacing: 6) {
+                        Circle().fill(processColor(f.state)).frame(width: 5, height: 5)
+                        Text(processLabel(f.state))
+                            .font(CHM.Font.caption).foregroundStyle(.secondary)
+                    }
+                    if let pid = f.pid { metaRow("PID", "\(pid)", mono: true) }
+                    if let rss = f.rssBytes { metaRow("Memory", formatBytes(rss)) }
+                    if let cpu = f.cpuPercent { metaRow("CPU", String(format: "%.1f%%", cpu)) }
+                }
+            }
+        }
+    }
+
+    private func processLabel(_ s: TabWindowCoordinator.ProcessFacts.State) -> String {
+        switch s {
+        case .live:       return "Running in a pane"
+        case .parked:     return "Parked — running in the background"
+        case .notRunning: return "Not running"
+        case .unknown:    return "—"
+        }
+    }
+
+    private func processColor(_ s: TabWindowCoordinator.ProcessFacts.State) -> Color {
+        switch s {
+        case .live:       return CHM.Color.accent
+        case .parked:     return CHM.Color.attention
+        case .notRunning: return Color.secondary.opacity(0.5)
+        case .unknown:    return Color.secondary.opacity(0.3)
+        }
+    }
+
+    private func formatBytes(_ bytes: UInt64) -> String {
+        let mb = Double(bytes) / 1_048_576
+        if mb >= 1024 { return String(format: "%.1f GB", mb / 1024) }
+        return String(format: "%.0f MB", mb)
+    }
+
     // MARK: - Session (identity + room, merged)
 
     private func sessionSection(_ convo: Conversation) -> some View {
@@ -431,8 +598,23 @@ struct ContextWatchPane: View {
                 metaRow("Last activity", convo.lastActivityAt.formatted(date: .abbreviated, time: .shortened))
                 metaRow("Workspace", convo.roomName)
                 metaRow("Path", convo.roomPath.path, mono: true)
+                HStack(spacing: CHM.Space.xs) {
+                    ActionChip(label: "Copy ID") { copyToPasteboard(convo.id) }
+                    if let cmd = TerminalCommand.copyableResume(for: convo) {
+                        ActionChip(label: "Copy resume") { copyToPasteboard(cmd) }
+                    }
+                    ActionChip(label: "Show file") {
+                        NSWorkspace.shared.activateFileViewerSelecting([convo.sessionFile])
+                    }
+                }
+                .padding(.top, 2)
             }
         }
+    }
+
+    private func copyToPasteboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
     }
 
     private func metaRow(_ key: String, _ value: String, mono: Bool = false) -> some View {
@@ -537,13 +719,23 @@ struct ContextWatchPane: View {
         .padding(.bottom, CHM.Space.xxl)
     }
 
-    private func section(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+    private func section(_ title: String, detail: String? = nil,
+                         @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: CHM.Space.sm) {
-            Text(title)
-                .font(CHM.Font.eyebrow)
-                .foregroundStyle(.secondary)
-                .textCase(.uppercase)
-                .tracking(0.6)
+            HStack(spacing: CHM.Space.xs) {
+                Text(title)
+                    .font(CHM.Font.eyebrow)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .tracking(0.6)
+                if let detail {
+                    Spacer(minLength: 0)
+                    Text(detail)
+                        .font(CHM.Font.caption)
+                        .foregroundStyle(.tertiary)
+                        .monospacedDigit()
+                }
+            }
             content()
         }
     }
@@ -585,6 +777,28 @@ private struct BurstBanner: View {
                 )
             }
         }
+    }
+}
+
+/// A small utility chip (Copy ID / Copy resume / Show file) — same quiet
+/// fill-and-hover treatment as the port rows.
+private struct ActionChip: View {
+    let label: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(CHM.Font.caption)
+                .foregroundStyle(hovering ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .padding(.horizontal, CHM.Space.sm)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: CHM.Radius.chip)
+                    .fill(hovering ? CHM.Color.hoverFill : CHM.Color.fillSubtle))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
     }
 }
 

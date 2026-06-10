@@ -34,11 +34,12 @@ struct ProcTableTests {
     /// ps columns are right-aligned with space padding; tpgid can be 0 (a
     /// daemonized master has no controlling terminal); argv[0] may start with
     /// "-" (login process) and contain spaces — all must survive parsing.
+    /// rss (KB → bytes) and pcpu (decimal) sit between tpgid and command.
     @Test func psParseHandlesPaddingDashesAndSpaces() {
         let raw = """
-            4093  4092     0 -/Applications/Cherminal.app/Contents/MacOS/dtach -A /tmp/x.sock -z /bin/sh -c claude --resume abc-123
-              77     1   500 /usr/libexec/something
-           88888 77777 88888 node /Users/me/dev/my app/server.js
+            4093  4092     0    896   0.0 -/Applications/Cherminal.app/Contents/MacOS/dtach -A /tmp/x.sock -z /bin/sh -c claude --resume abc-123
+              77     1   500  84512   3.2 /usr/libexec/something
+           88888 77777 88888 204800  12.5 node /Users/me/dev/my app/server.js
         """
         let ps = ProcTable.parsePS(raw)
         #expect(ps.parent[4093] == 4092)
@@ -48,6 +49,10 @@ struct ProcTableTests {
         #expect(ps.children[77777] == [88888])
         #expect(ps.argv[4093]?.hasPrefix("-/Applications") == true)
         #expect(ps.argv[88888] == "node /Users/me/dev/my app/server.js")
+        #expect(ps.rss[77] == 84_512 * 1024)        // KB → bytes
+        #expect(ps.rss[88888] == 204_800 * 1024)
+        #expect(ps.cpu[4093] == 0.0)
+        #expect(ps.cpu[88888] == 12.5)
     }
 
     /// The master-vs-client law: with two holders, the one WITH a child is the

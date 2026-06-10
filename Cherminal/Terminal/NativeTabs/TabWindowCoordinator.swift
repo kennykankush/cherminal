@@ -825,6 +825,46 @@ final class TabWindowCoordinator: ObservableObject {
         clog("tabs", "tray: reaped \(reap.count) stale/over-cap shell session(s)")
     }
 
+    // MARK: - Process facts (inspector)
+
+    /// Process facts for the inspector's Process section — state, pid, RAM,
+    /// CPU, all answered from one pre-captured ProcTable (capture blocks
+    /// ~60ms; do it off-main and pass it in). nil table = probes failed →
+    /// `.unknown`, never "not running" (the unknown-is-not-dead law).
+    struct ProcessFacts: Equatable {
+        enum State: Equatable { case live, parked, notRunning, unknown }
+        let state: State
+        let pid: pid_t?
+        let rssBytes: UInt64?
+        let cpuPercent: Double?
+    }
+
+    func processFacts(for conversationID: String, table: ProcTable?) -> ProcessFacts {
+        func facts(_ state: ProcessFacts.State, _ pid: pid_t?) -> ProcessFacts {
+            ProcessFacts(state: state, pid: pid,
+                         rssBytes: pid.flatMap { table?.rss[$0] },
+                         cpuPercent: pid.flatMap { table?.cpu[$0] })
+        }
+        // Open in a pane: resolve the inner foreground through the pane's
+        // socket (the agent under the dtach master; the shell at a prompt),
+        // falling back to the surface's own foreground pid.
+        if let (_, pane) = findOpenPane(forConversationID: conversationID) {
+            var pid = table.flatMap { Dtach.innerForegroundPID(id: pane.base.id, table: $0) }
+            if pid == nil, let surface = pane.surfaceView?.surface {
+                let fg = ghostty_surface_foreground_pid(surface)
+                if fg > 0 { pid = pid_t(fg) }
+            }
+            return facts(.live, pid)
+        }
+        guard let table else {
+            return facts(detachedAgents.contains { $0.id == conversationID } ? .parked : .unknown, nil)
+        }
+        if Dtach.isMasterAlive(id: conversationID, table: table) {
+            return facts(.parked, Dtach.innerForegroundPID(id: conversationID, table: table))
+        }
+        return facts(.notRunning, nil)
+    }
+
     // MARK: - Ports
 
     /// Cheap per-pane refs (NO subprocess, main-actor safe) for the port watcher
