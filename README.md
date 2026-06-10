@@ -23,13 +23,38 @@ Cherminal watches agents the way a window manager watches windows — by reading
 - **Details readout.** Context-window fill, token breakdown, 5h/Weekly usage-limit meters, dev-server ports — plus **live git state** for the room (branch, ahead/behind, ±diff, changed files), read-only.
 - **Persistent sessions.** Every pane runs under `dtach` (on by default), so agents — including ones you hand-launch by typing `claude` in any tab — survive quit/relaunch and pane-close (parked + reattachable); the full pane-grid layout restores on launch and live masters reattach to the same processes. Opt out with `defaults write dev.hamulia.Cherminal cherminal.persistentSessions -bool false`.
 
+## Install
+
+### From a release (signed + notarized)
+
+Grab the latest `.dmg` from [Releases](https://github.com/kennykankush/cherminal/releases), open it, drag **Cherminal** to Applications. (Homebrew cask + a curl installer follow once the first signed release is out.)
+
+### From source
+
+```sh
+git clone https://github.com/kennykankush/cherminal.git && cd cherminal
+brew install xcodegen
+scripts/fetch-ghostty.sh   # downloads the pinned libghostty xcframework (~33 MB)
+scripts/install.sh         # builds Release (arm64) → /Applications/Cherminal.app
+```
+
+### Cutting a release (maintainer)
+
+```sh
+scripts/release.sh 0.2.0   # bump → build → sign → dmg → notarize → staple → tag → GitHub Release
+```
+
+Needs a **Developer ID Application** cert in the keychain and a stored notary
+credential (`xcrun notarytool store-credentials cherminal-notary …`) — the
+script's preflight tells you exactly what's missing.
+
 ## Requirements
 
 - **Apple Silicon Mac (arm64).** The app is arm64-only (the vendored libghostty is arm64-only).
 - **macOS 26+** (deployment target).
 - **Xcode 26+**.
 - **[XcodeGen](https://github.com/yonaskolb/XcodeGen)** — `brew install xcodegen`. The `.xcodeproj` is generated from `project.yml`.
-- `vendor/GhosttyKit.xcframework` (libghostty) is **not** committed (134 MB) — grab it once with `gh release download $(grep -v '^#' vendor/GhosttyKit.version | tr -d '[:space:]') -p 'GhosttyKit.xcframework.zip' -O /tmp/g.zip && unzip /tmp/g.zip -d vendor/`, or rebuild it via `scripts/build-libghostty.sh`. CI fetches the same pinned release asset automatically.
+- `vendor/GhosttyKit.xcframework` (libghostty) is **not** committed (134 MB) — `scripts/fetch-ghostty.sh` downloads the pinned release asset (no auth needed; same one CI uses), or rebuild from source via `scripts/build-libghostty.sh`.
 
 ## Build & run
 
@@ -118,4 +143,4 @@ vendor/GhosttyKit.xcframework libghostty
 
 ## Status
 
-A personal, single-user tool, tightly coupled to one stack (Claude Code, Codex, Ghostty, `~/dev/*`). Not packaged for general distribution.
+A personal tool first — built for one user and one workflow (Claude Code, Codex, Ghostty, `~/dev/*`) — now packaged as signed releases for anyone who shares it.
