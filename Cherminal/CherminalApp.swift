@@ -103,6 +103,7 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         guard !isRunningTests else { return }
         let env = AppEnvironment.shared
         env.metrics.startIfEnabled()   // headless perf CSV (off unless cherminal.metrics)
+        env.backgroundAgents.start()   // supervisor session list for the sidebar
         installTabShortcutMonitor()
 
         // Fleet alerts: notify + Dock-badge when an agent finishes in a pane you're

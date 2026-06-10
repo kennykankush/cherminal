@@ -25,14 +25,19 @@ final class Pane: ObservableObject, Identifiable {
     var gridPosition: GridPosition
     /// Last time this pane was focused/spawned — drives LRU suspension.
     var lastActiveAt = Date()
+    /// Replaces the conversation-derived resume command at spawn (the
+    /// background-attach path: `claude attach <id>`). nil = normal spawn.
+    let spawnCommandOverride: String?
 
     init(conversation: Conversation,
          role: PaneRole? = nil,
-         gridPosition: GridPosition = GridPosition(row: 0, col: 0)) {
+         gridPosition: GridPosition = GridPosition(row: 0, col: 0),
+         spawnCommandOverride: String? = nil) {
         self.base = conversation
         self.conversation = conversation
         self.role = role
         self.gridPosition = gridPosition
+        self.spawnCommandOverride = spawnCommandOverride
         LiveCount.inc("pane")   // leak tripwire: → 0 when all panes close/suspend
     }
 

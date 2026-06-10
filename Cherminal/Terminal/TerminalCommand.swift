@@ -57,6 +57,18 @@ enum TerminalCommand {
         }
     }
 
+    /// Attach to a session registered with claude's background-agent
+    /// supervisor (`claude attach <id>` — ^Z detaches, the session keeps
+    /// running). dtach-wrapped on the session's own socket like every agent
+    /// pane, so the attach VIEW also survives quit/park — and if the user
+    /// later opens the same conversation normally, `dtach -A` reattaches this
+    /// same master instead of spawning a competitor.
+    static func attachBackground(claudeSessionID id: String) -> String? {
+        guard let id = safeSessionID(id) else { return nil }
+        let bin = Subprocess.quote(BinaryResolver.shared.path(for: "claude"))
+        return Dtach.wrap("\(bin) attach \(id)", id: id)
+    }
+
     /// Session IDs are agent-issued UUIDs that we interpolate into a shell
     /// command string. Reject anything outside the UUID alphabet so a malformed
     /// id can never inject shell metacharacters; nil falls back to a bare shell.
@@ -69,7 +81,12 @@ enum TerminalCommand {
         return id
     }
 
-    static func surfaceConfig(for conversation: Conversation) -> Ghostty.SurfaceConfiguration {
+    /// `commandOverride` replaces the conversation-derived resume command —
+    /// the background-attach path uses it (same cwd/env handling either way).
+    static func surfaceConfig(
+        for conversation: Conversation,
+        commandOverride: String? = nil
+    ) -> Ghostty.SurfaceConfiguration {
         var cfg = Ghostty.SurfaceConfiguration()
 
         // Guard against stale conversations whose room folder has since been
@@ -85,7 +102,7 @@ enum TerminalCommand {
             clog("tabs", "stale room — \(roomPath) missing; cwd → $HOME")
         }
 
-        cfg.command = resume(for: conversation)
+        cfg.command = commandOverride ?? resume(for: conversation)
         cfg.environmentVariables = BinaryResolver.shared.environment()
         return cfg
     }

@@ -312,8 +312,11 @@ final class TabWindowCoordinator: ObservableObject {
     }
 
     /// Open `conversation` in a new native tab, or select its existing tab.
+    /// `spawnCommandOverride` replaces the conversation-derived resume command
+    /// for a NEW tab's first pane (the background-attach path).
     @discardableResult
-    func openOrFocus(_ conversation: Conversation, forceNew: Bool = false) -> TerminalTabWindowController? {
+    func openOrFocus(_ conversation: Conversation, forceNew: Bool = false,
+                     spawnCommandOverride: String? = nil) -> TerminalTabWindowController? {
         clog("tabs", "openOrFocus id=\(conversation.id) agent=\(conversation.agent.rawValue) room=\(conversation.roomName) path=\(conversation.roomPath.path)")
         // Focus an existing tab/pane already running this conversation — searching
         // ALL panes (preferring opened identity over adopted, see findOpenPane),
@@ -337,7 +340,8 @@ final class TabWindowCoordinator: ObservableObject {
             registry: registry,
             ghostty: ghostty,
             bookmarks: bookmarks,
-            coordinator: self
+            coordinator: self,
+            spawnCommandOverride: spawnCommandOverride
         )
 
         // Join the existing tab group, or stand alone as the first tab.
@@ -377,8 +381,10 @@ final class TabWindowCoordinator: ObservableObject {
         // The async block below clears it (guarded so an empty tray never
         // persists), and parking is suppressed during a quit decision anyway.
         let conversation = pane.conversation
+        let commandOverride = pane.spawnCommandOverride
         Task.detached(priority: .userInitiated) {
-            let config = TerminalCommand.surfaceConfig(for: conversation)
+            let config = TerminalCommand.surfaceConfig(for: conversation,
+                                                       commandOverride: commandOverride)
             await MainActor.run { [weak self, weak controller, weak pane] in
                 guard let self, let controller, let pane,
                       self.controllers.contains(where: { $0 === controller }),
@@ -441,6 +447,27 @@ final class TabWindowCoordinator: ObservableObject {
         if focusExistingPane(conversationID: conversation.id) { return }
         guard let controller = activeController else { openOrFocus(conversation); return }
         addPane(conversation, to: controller)
+    }
+
+    /// Open a supervisor-registered background session in a new tab (the
+    /// sidebar's BACKGROUND section): the pane runs `claude attach <id>` —
+    /// the session keeps running under the supervisor, ^Z detaches. Dedups
+    /// against an already-open pane for the same conversation.
+    func attachBackgroundSession(_ session: BackgroundSession) {
+        if focusExistingPane(conversationID: session.sessionId) { return }
+        guard let command = TerminalCommand.attachBackground(claudeSessionID: session.sessionId) else { return }
+        let convo = registry.conversation(id: session.sessionId)
+            ?? Conversation.restoredAgent(id: session.sessionId, agent: .claudeCode,
+                                          room: URL(fileURLWithPath: session.cwd))
+        openOrFocus(convo, forceNew: true, spawnCommandOverride: command)
+    }
+
+    /// Is this conversation already visible in the app — open in a pane (by
+    /// either identity) or parked in the tray? The BACKGROUND section hides
+    /// sessions you can already see.
+    func isShowing(conversationID id: String) -> Bool {
+        ConversationLedger.openIDs(panes: paneFacts()).contains(id)
+            || detachedAgents.contains { $0.id == id }
     }
 
     /// Find a live pane already running `conversationID` (by effective or opened
@@ -925,13 +952,17 @@ final class TabWindowCoordinator: ObservableObject {
                 // where a set name wins).
                 if let name = original.name {
                     controller.workspace.name = name
-                    controller.refreshTitle()
                 }
                 if firstPlan.isLiveAttach { attachedLive = true }
+                preAdoptIfLiveAttach(first, plan: firstPlan,
+                                     pane: controller.workspace.panes.first)
+                controller.refreshTitle()
                 for pane in filtered.panes.dropFirst() {
                     let plan = ConversationLedger.restorePlan(for: pane, masterAlive: alive)
                     if plan.isLiveAttach { attachedLive = true }
                     addPane(restoredConversation(for: pane, plan: plan), to: controller, role: pane.role)
+                    preAdoptIfLiveAttach(pane, plan: plan,
+                                         pane: controller.workspace.panes.last)
                 }
             } else if let first = original.panes.first {
                 // Everything in this saved tab is already open (a group whose
@@ -939,15 +970,37 @@ final class TabWindowCoordinator: ObservableObject {
                 focusExistingPane(conversationID: first.conversationID)
             }
         }
-        // A reattached shell holds a live agent the pane doesn't know it is yet
-        // (its identity re-adopts via the reconcile). Kick one early reconcile
-        // — after the async surface spawns settle — so badges/title/sidebar
-        // flip to the agent in seconds, not at the next 8s tick.
+        // The reconcile still re-verifies against the REAL process state (the
+        // pre-adoption above is the snapshot's promise; this is the truth).
         if attachedLive {
             DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                 Task { @MainActor in await self?.reconcileLiveSessions() }
             }
         }
+    }
+
+    /// A live-attach pane spawns as its wrapped SHELL (the socket the
+    /// surviving master holds) but IS the persisted agent — flip its effective
+    /// identity immediately instead of waiting ~8s for the reconcile to
+    /// re-detect it. Until that window closed, the pane showed as "Terminal"
+    /// and a sidebar click on the conversation could open a duplicate
+    /// cold-resume. Safe to do here: spawnSurface captured the shell config
+    /// (and therefore the right socket) synchronously before this runs, so the
+    /// adoption changes what the pane REPORTS, not what it spawns. The next
+    /// reconcile re-verifies against the real process and corrects if the
+    /// agent actually exited while the app was closed.
+    private func preAdoptIfLiveAttach(
+        _ persisted: PersistedPane,
+        plan: ConversationLedger.RestorePlan,
+        pane: Pane?
+    ) {
+        guard plan.isLiveAttach, let pane else { return }
+        let agent = registry.conversation(id: persisted.conversationID)
+            ?? Conversation.restoredAgent(
+                id: persisted.conversationID,
+                agent: AgentKind(rawValue: persisted.agentRaw) ?? .unknown,
+                room: URL(fileURLWithPath: persisted.roomPath))
+        pane.applyDetectedSession(agent)
     }
 
     /// The workspaces persisted by the last run (V2), migrating the older

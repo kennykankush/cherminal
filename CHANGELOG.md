@@ -4,6 +4,31 @@ All notable changes to Cherminal. Newest first.
 
 ## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
 
+### Added
+- **Background sessions in the sidebar.** A new **Background** section lists
+  every claude session registered with the background-agent supervisor that
+  isn't already open in a pane — headless dispatched agents and sessions
+  running in other terminals — with live status (blue = blocked waiting on
+  you, incl. the reason, e.g. "permission prompt"). Click to attach into a
+  tab (`claude attach`; ^Z detaches, the session keeps running). Pure
+  observation: one bounded `claude agents --json` poll every 15s, foreground
+  only.
+- **scripts/e2e-dtach.sh** — the dtach survival loop (foreign-socket
+  reattach, same-pid across ⌘Q, wrap-by-default) as a one-command harness
+  against the real dev app: 7 assertions, self-cleaning.
+
+### Changed
+- **Live-attach panes know who they are instantly.** A reattached
+  hand-launched agent showed as "Terminal" for up to ~8s (and a sidebar click
+  during that window could duplicate the session); restore now pre-adopts the
+  persisted identity the moment the pane exists.
+- **Workspace headers** carry live/awaiting status dots and show their git
+  branch when expanded (fetched once, never polled); a quiet footer shows
+  version + tab/parked counts.
+- **Stricter concurrency checking** (`SWIFT_STRICT_CONCURRENCY: targeted`) —
+  zero first-party diagnostics; latent actor-isolation bugs now surface at
+  compile time.
+
 ### Changed
 - **Sidebar revitalized (and the mode-switch stutter fixed).** Workspaces /
   Recent / Deep now share ONE persistent list whose content swaps instantly —
