@@ -360,7 +360,13 @@ struct ContextWatchPane: View {
                     .monospacedDigit()
             }
             usageBar(percent: w.usedPercent)
-            if let resets = w.resetsAt {
+            if let detail = w.detail {
+                // The extra-usage meter's spend footnote ("$27.63 of $100").
+                Text(detail)
+                    .font(CHM.Font.caption)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+            } else if let resets = w.resetsAt {
                 HStack(spacing: 3) {
                     Image(systemName: "clock").font(.system(size: 9))
                     Text("in \(Self.compactCountdown(to: resets))")

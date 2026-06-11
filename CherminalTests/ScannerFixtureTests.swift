@@ -133,4 +133,76 @@ struct CodexUsageTests {
         try #"{"payload":{"type":"agent_message"}}"#.write(to: url, atomically: true, encoding: .utf8)
         #expect(ConversationUsageParser.parseCodex(sessionFile: url) == nil)
     }
+
+    /// The 2026-06 "premium" account shape: token_count records can carry
+    /// info:null, and rate_limits with primary/secondary null. The parser must
+    /// read info and rate_limits INDEPENDENTLY — the newest record with each
+    /// wins — instead of requiring both on one record (which blanked the
+    /// whole usage section).
+    @Test func premiumShapeReadsInfoAndLimitsIndependently() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chm-codex-usage-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try ([
+            // Older record: real numbers + real windows.
+            #"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"cached_input_tokens":100,"output_tokens":20},"last_token_usage":{"total_tokens":80000},"model_context_window":256000},"rate_limits":{"primary":{"used_percent":39,"resets_at":1779097471},"secondary":{"used_percent":14,"resets_at":1779576700}}}}"#,
+            // Newest record: the premium shape — info null, windows null.
+            #"{"payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":"premium","primary":null,"secondary":null,"credits":{"has_credits":false,"balance":"0"}}}}"#,
+        ].joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+
+        let usage = ConversationUsageParser.parseCodex(sessionFile: url)
+        #expect(usage?.contextUsedTokens == 80_000)            // from the older info
+        #expect(usage?.rateWindows.map(\.label) == ["5h", "Weekly"])  // from the older limits
+        #expect(usage?.rateWindows.first?.usedPercent == 39)
+    }
+
+    /// info present but windows never populated (premium plans don't report
+    /// 5h/weekly) — numbers still show, limits section just stays absent.
+    @Test func premiumWithNumbersButNoWindows() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chm-codex-usage-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try (#"{"payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5},"last_token_usage":{"total_tokens":1000},"model_context_window":256000},"rate_limits":{"limit_id":"premium","primary":null,"secondary":null}}}"# + "\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+        let usage = ConversationUsageParser.parseCodex(sessionFile: url)
+        #expect(usage?.contextUsedTokens == 1_000)
+        #expect(usage?.rateWindows.isEmpty == true)
+    }
+
+    /// A tail that's ALL info:null but has live windows still shows the
+    /// limits (zeroed gauge beats a blank pane).
+    @Test func allNullInfoStillSurfacesWindows() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chm-codex-usage-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try (#"{"payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":62,"resets_at":1779097471},"secondary":{"used_percent":9,"resets_at":1779576700}}}}"# + "\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+        let usage = ConversationUsageParser.parseCodex(sessionFile: url)
+        #expect(usage?.contextUsedTokens == 0)
+        #expect(usage?.rateWindows.first?.usedPercent == 62)
+    }
+}
+
+/// The Claude OAuth usage payload — pinned against a REAL captured response
+/// (2026-06-11). The account runs Anthropic's extra-usage credits model:
+/// five_hour sits at 0 while the spend meter is the number actually moving,
+/// so `extra_usage` must surface as its own meter.
+struct ClaudeUsageResponseTests {
+
+    @Test func parsesRealResponseIncludingExtraUsage() {
+        let json = #"{"five_hour":{"utilization":0.0,"resets_at":null},"seven_day":{"utilization":85.0,"resets_at":"2026-06-14T18:00:00.288459+00:00"},"seven_day_oauth_apps":null,"seven_day_opus":null,"seven_day_sonnet":{"utilization":0.0,"resets_at":null},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":2763.0,"utilization":27.63,"currency":"USD","disabled_reason":null}}"#
+        let windows = ClaudeRateLimits.parseUsageResponse(Data(json.utf8))
+        #expect(windows.map(\.label) == ["5h", "Weekly", "Extra"])
+        #expect(windows[0].usedPercent == 0.0)
+        #expect(windows[1].usedPercent == 85.0)
+        #expect(windows[1].resetsAt != nil)
+        #expect(windows[2].usedPercent == 27.63)
+        #expect(windows[2].detail == "$27.63 of $100")
+    }
+
+    @Test func extraUsageHiddenWhenDisabledAndGarbageYieldsNothing() {
+        let disabled = #"{"five_hour":{"utilization":5.0,"resets_at":null},"extra_usage":{"is_enabled":false,"utilization":0}}"#
+        #expect(ClaudeRateLimits.parseUsageResponse(Data(disabled.utf8)).map(\.label) == ["5h"])
+        #expect(ClaudeRateLimits.parseUsageResponse(Data("not json".utf8)).isEmpty)
+    }
 }

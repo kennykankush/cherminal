@@ -26,9 +26,12 @@ struct ConversationUsage: Sendable, Equatable {
     var rateWindows: [RateWindow] = []
 
     struct RateWindow: Sendable, Equatable, Identifiable {
-        let label: String        // "5h" / "Weekly"
+        let label: String        // "5h" / "Weekly" / "Extra"
         let usedPercent: Double  // 0–100
         let resetsAt: Date?
+        /// Optional footnote shown where the reset countdown would go —
+        /// the extra-usage meter uses it for "$27.63 of $100".
+        var detail: String? = nil
         var id: String { label }
     }
 
@@ -247,46 +250,69 @@ enum ConversationUsageParser {
         try? handle.seek(toOffset: size > tailLen ? size - tailLen : 0)
         guard let data = try? handle.readToEnd() else { return nil }
 
-        // Scan lines from the end for the latest token_count with populated info.
+        // Scan from the end. `info` and `rate_limits` are read INDEPENDENTLY:
+        // newer codex ("premium" accounts, observed 2026-06) emits token_count
+        // records with info:null, and/or rate_limits whose primary/secondary
+        // are null — requiring both on one record made the whole usage section
+        // vanish. Numbers come from the newest record that HAS info; windows
+        // from the newest record with populated primary/secondary.
         let newline = UInt8(ascii: "\n")
         let lines = data.split(separator: newline, omittingEmptySubsequences: true)
+        var usage: ConversationUsage?
+        var windows: [ConversationUsage.RateWindow]?
         for line in lines.reversed() {
+            if usage != nil && windows != nil { break }
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
                   let payload = obj["payload"] as? [String: Any],
-                  (payload["type"] as? String) == "token_count",
-                  let info = payload["info"] as? [String: Any] else { continue }
+                  (payload["type"] as? String) == "token_count" else { continue }
 
-            let total = info["total_token_usage"] as? [String: Any] ?? [:]
-            let last = info["last_token_usage"] as? [String: Any] ?? [:]
-            let window = intValue(info["model_context_window"])
-
-            // Codex's input_tokens already includes cached_input_tokens; split
-            // them so cache-hit math matches Claude's (fresh input vs cached).
-            let cached = intValue(total["cached_input_tokens"])
-            let freshInput = max(0, intValue(total["input_tokens"]) - cached)
-            let used = intValue(last["total_tokens"])
-            var usage = ConversationUsage(
-                model: "Codex",
-                contextUsedTokens: used,
-                // Never let the window read smaller than what's already used, so
-                // the gauge can't show "260k / 256k" (Claude self-corrects via
-                // inferContextWindow; Codex needs this clamp).
-                contextWindowTokens: max(window > 0 ? window : 256_000, used),
-                totalInputTokens: freshInput,
-                totalOutputTokens: intValue(total["output_tokens"]),
-                cacheReadTokens: cached,
-                cacheCreateTokens: 0
-            )
-
-            if let limits = payload["rate_limits"] as? [String: Any] {
-                usage.rateWindows = [
+            if windows == nil, let limits = payload["rate_limits"] as? [String: Any] {
+                let parsed = [
                     rateWindow(limits["primary"], label: "5h"),
                     rateWindow(limits["secondary"], label: "Weekly"),
                 ].compactMap { $0 }
+                if !parsed.isEmpty { windows = parsed }
             }
-            return usage
+
+            if usage == nil, let info = payload["info"] as? [String: Any] {
+                let total = info["total_token_usage"] as? [String: Any] ?? [:]
+                let last = info["last_token_usage"] as? [String: Any] ?? [:]
+                let window = intValue(info["model_context_window"])
+
+                // Codex's input_tokens already includes cached_input_tokens; split
+                // them so cache-hit math matches Claude's (fresh input vs cached).
+                let cached = intValue(total["cached_input_tokens"])
+                let freshInput = max(0, intValue(total["input_tokens"]) - cached)
+                let used = intValue(last["total_tokens"])
+                usage = ConversationUsage(
+                    model: "Codex",
+                    contextUsedTokens: used,
+                    // Never let the window read smaller than what's already used, so
+                    // the gauge can't show "260k / 256k" (Claude self-corrects via
+                    // inferContextWindow; Codex needs this clamp).
+                    contextWindowTokens: max(window > 0 ? window : 256_000, used),
+                    totalInputTokens: freshInput,
+                    totalOutputTokens: intValue(total["output_tokens"]),
+                    cacheReadTokens: cached,
+                    cacheCreateTokens: 0
+                )
+            }
         }
-        return nil
+
+        if var out = usage {
+            out.rateWindows = windows ?? []
+            return out
+        }
+        // No numbers in the tail (a fresh premium session can be all
+        // info:null) — if windows exist, still show the limits over a zeroed
+        // gauge; with neither there's nothing to render.
+        guard let windows else { return nil }
+        var zero = ConversationUsage(
+            model: "Codex", contextUsedTokens: 0, contextWindowTokens: 256_000,
+            totalInputTokens: 0, totalOutputTokens: 0,
+            cacheReadTokens: 0, cacheCreateTokens: 0)
+        zero.rateWindows = windows
+        return zero
     }
 
     private static func rateWindow(_ any: Any?, label: String) -> ConversationUsage.RateWindow? {

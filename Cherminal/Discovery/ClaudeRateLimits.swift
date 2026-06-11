@@ -56,14 +56,30 @@ actor ClaudeRateLimits {
         guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return [] }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 { invalidateToken() }   // stale token → re-read source next time
-        guard code == 200, let usage = try? JSONDecoder().decode(UsageResponse.self, from: data) else { return [] }
+        guard code == 200 else { return [] }
+        return Self.parseUsageResponse(data)
+    }
 
+    /// Decode the usage payload into meters. Static + internal so the real
+    /// captured response shape is pinned by tests. Besides the 5h/weekly
+    /// windows, accounts on the extra-usage credits model (observed 2026-06)
+    /// report `extra_usage` — the live spend meter ("$27.63 of $100") that is
+    /// often the number that's actually moving while 5h sits at 0.
+    static func parseUsageResponse(_ data: Data) -> [ConversationUsage.RateWindow] {
+        guard let usage = try? JSONDecoder().decode(UsageResponse.self, from: data) else { return [] }
         var out: [ConversationUsage.RateWindow] = []
         if let w = usage.five_hour, let pct = w.utilization {
-            out.append(.init(label: "5h", usedPercent: pct, resetsAt: Self.isoDate(w.resets_at)))
+            out.append(.init(label: "5h", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
         }
         if let w = usage.seven_day, let pct = w.utilization {
-            out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: Self.isoDate(w.resets_at)))
+            out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+        }
+        if let e = usage.extra_usage, e.is_enabled == true, let pct = e.utilization {
+            var detail: String?
+            if let used = e.used_credits, let limit = e.monthly_limit, limit > 0 {
+                detail = String(format: "$%.2f of $%.0f", used / 100, limit / 100)
+            }
+            out.append(.init(label: "Extra", usedPercent: pct, resetsAt: nil, detail: detail))
         }
         return out
     }
@@ -82,7 +98,14 @@ actor ClaudeRateLimits {
     private struct UsageResponse: Decodable {
         let five_hour: Window?
         let seven_day: Window?
+        let extra_usage: Extra?
         struct Window: Decodable { let utilization: Double?; let resets_at: String? }
+        struct Extra: Decodable {
+            let is_enabled: Bool?
+            let utilization: Double?
+            let used_credits: Double?     // cents
+            let monthly_limit: Double?    // cents
+        }
     }
 
     // MARK: - Token resolution (cache → file → Keychain)
