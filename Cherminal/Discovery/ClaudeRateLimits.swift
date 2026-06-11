@@ -19,25 +19,38 @@ actor ClaudeRateLimits {
 
     private var cachedWindows: [ConversationUsage.RateWindow] = []
     private var lastFetch = Date.distantPast
+    private var lastSuccess = Date.distantPast
     private let windowTTL: TimeInterval = 60
+    /// How long last-good values may stand in for failed refreshes. Beyond
+    /// this the meters HIDE rather than show hours-old numbers as live — a
+    /// 429 storm or a revoked token must read as "unknown", not as a frozen
+    /// 85% (the stuck-meter bug, 2026-06-11).
+    private let staleAfter: TimeInterval = 15 * 60
 
     private var token: (value: String, expiresAt: Date)?
     private let tokenCacheURL = URL(fileURLWithPath:
         (NSHomeDirectory() as NSString).appendingPathComponent(".cherminal/claude-oauth.json"))
 
     /// Cached windows, refreshed at most once a minute. Empty if no token /
-    /// offline / plan doesn't report limits.
+    /// offline / plan doesn't report limits / values too stale to trust.
     func windows() async -> [ConversationUsage.RateWindow] {
         // Throttle every fetch attempt — including empty/failed ones — so an
         // account that legitimately reports no windows (or a persistent non-200)
         // can't turn this into an unthrottled 8s-per-tab poll. Stamp lastFetch
         // *before* the await so a concurrent caller also short-circuits, and keep
-        // the last-good windows on an empty/failed result.
-        if Date().timeIntervalSince(lastFetch) < windowTTL { return cachedWindows }
+        // the last-good windows on an empty/failed result (bounded by staleAfter).
+        if Date().timeIntervalSince(lastFetch) < windowTTL { return current() }
         lastFetch = Date()
         let fresh = await fetch()
-        if !fresh.isEmpty { cachedWindows = fresh }
-        return cachedWindows
+        if !fresh.isEmpty {
+            cachedWindows = fresh
+            lastSuccess = Date()
+        }
+        return current()
+    }
+
+    private func current() -> [ConversationUsage.RateWindow] {
+        Date().timeIntervalSince(lastSuccess) < staleAfter ? cachedWindows : []
     }
 
     // MARK: - Fetch
