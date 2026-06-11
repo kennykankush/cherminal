@@ -113,9 +113,19 @@ echo "✓ notarized + stapled"
 spctl -a -t open --context context:primary-signature -v "$DMG" 2>&1 | head -1
 echo "✓ Gatekeeper accepts the dmg"
 
-# ---- 7. tag + publish -----------------------------------------------------------
+# ---- 7. bump the in-repo cask, then tag + publish -------------------------------
+# The Homebrew tap lives IN THIS REPO (Casks/cherminal.rb) — the same repo is
+# both the source and the tap (see README; `brew tap kennykankush/cherminal
+# <url>`). So the cask bump is just part of the release commit — atomic, one
+# push, no second repo to clone or fall out of sync.
 SHA256="$(shasum -a 256 "$DMG" | cut -d' ' -f1)"
-git add project.yml Cherminal/Info.plist
+CASK="Casks/cherminal.rb"
+sed -i '' "s|^  version \".*\"|  version \"$VERSION\"|" "$CASK"
+sed -i '' "s|^  sha256 \".*\"|  sha256 \"$SHA256\"|" "$CASK"
+grep -q "version \"$VERSION\"" "$CASK" && grep -q "sha256 \"$SHA256\"" "$CASK" \
+    || fail "cask bump didn't take — check $CASK before publishing"
+
+git add project.yml Cherminal/Info.plist "$CASK"
 git commit -m "Release $VERSION (build $NEW_BUILD)" >/dev/null
 git tag "v$VERSION"
 git push origin main "v$VERSION"
@@ -124,28 +134,4 @@ gh release create "v$VERSION" "$DMG" \
     --generate-notes
 echo
 echo "✓ released: https://github.com/kennykankush/cherminal/releases/tag/v$VERSION"
-
-# ---- 8. bump the Homebrew cask --------------------------------------------------
-# The release is ALREADY live above — a cask failure must not read as a
-# release failure, so this step warns-and-continues instead of dying.
-bump_cask() {
-    local tap_dir
-    tap_dir="$(mktemp -d -t cherminal-tap-XXXX)"
-    git clone --quiet --depth 1 "https://github.com/kennykankush/homebrew-tap.git" "$tap_dir"
-    local cask="$tap_dir/Casks/cherminal.rb"
-    sed -i '' "s/^  version \".*\"/  version \"$VERSION\"/" "$cask"
-    sed -i '' "s/^  sha256 \".*\"/  sha256 \"$SHA256\"/" "$cask"
-    grep -q "version \"$VERSION\"" "$cask" && grep -q "sha256 \"$SHA256\"" "$cask" \
-        || { rm -rf "$tap_dir"; return 1; }
-    git -C "$tap_dir" commit -aqm "cherminal $VERSION"
-    git -C "$tap_dir" push -q
-    rm -rf "$tap_dir"
-}
-if bump_cask; then
-    echo "✓ brew cask bumped — brew install --cask kennykankush/tap/cherminal serves $VERSION"
-else
-    echo "⚠ cask bump FAILED — the release is live, but the tap still serves the old version."
-    echo "  Bump manually in github.com/kennykankush/homebrew-tap/Casks/cherminal.rb:"
-    echo "    version \"$VERSION\""
-    echo "    sha256  \"$SHA256\""
-fi
+echo "✓ in-repo cask bumped — brew upgrade serves $VERSION (sha $SHA256)"

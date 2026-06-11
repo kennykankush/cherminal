@@ -29,8 +29,11 @@ All binary paths ship the same signed + notarized `.dmg` (Apple Silicon, macOS 2
 
 ### Homebrew
 
+The tap lives in this repo (no separate `homebrew-tap`), so the first install taps it by URL:
+
 ```sh
-brew install --cask kennykankush/tap/cherminal
+brew tap kennykankush/cherminal https://github.com/kennykankush/cherminal
+brew install --cask kennykankush/cherminal/cherminal
 ```
 
 ### curl
