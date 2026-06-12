@@ -35,6 +35,10 @@ struct UsageAccumulatorTests {
         // (cacheCreate is m2's actual 0, not m1's stale 2 — see fold().)
         #expect(u?.contextUsedTokens == 255)
         #expect(u?.contextWindowTokens == 1_000_000)   // [1m] model
+        // Claude Code's own gauge denominator: window − 20k output reserve −
+        // 13k auto-compact buffer (extracted from the installed binary).
+        #expect(u?.contextBudgetTokens == 967_000)
+        #expect(u?.contextBudgetUsedTokens == 255)
     }
 
     @Test func incrementalIngestDoesNotDoubleCount() {

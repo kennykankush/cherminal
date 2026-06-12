@@ -11,6 +11,18 @@ struct ConversationUsage: Sendable, Equatable {
     /// The most recent assistant turn's footprint — i.e. current context size.
     var contextUsedTokens: Int
     var contextWindowTokens: Int
+    /// The display denominator the AGENT'S OWN gauge uses — smaller than the
+    /// raw window, which is why Cherminal used to read 3–4% behind Claude
+    /// Code's "% until auto-compact". Set by the parsers via
+    /// `ContextBudgetLaw`; 0 means unknown (fall back to the raw window).
+    var contextBudgetTokens: Int = 0
+    /// The numerator against that budget (codex subtracts its 12k baseline
+    /// from the used side too; claude counts everything).
+    var contextBudgetUsedTokens: Int = 0
+    /// Codex's in-file `rate_limits.rate_limit_reached_type` — non-null means
+    /// the account is at its limit RIGHT NOW per the newest token_count
+    /// record. Authoritative where the terminal-banner scrape is stale.
+    var limitReached: Bool = false
     var totalInputTokens: Int
     var totalOutputTokens: Int
     var cacheReadTokens: Int
@@ -35,13 +47,23 @@ struct ConversationUsage: Sendable, Equatable {
         var id: String { label }
     }
 
+    /// % full as the AGENT itself would report it (used/budget). This is the
+    /// number that must match what the user sees inside claude/codex — the
+    /// raw-window percentage systematically under-reads (claude reserves
+    /// 20k output + 13k auto-compact buffer; codex nets out a 12k baseline).
     var contextUsedPercent: Double {
-        guard contextWindowTokens > 0 else { return 0 }
-        return min(100, Double(contextUsedTokens) / Double(contextWindowTokens) * 100)
+        let denom = contextBudgetTokens > 0 ? contextBudgetTokens : contextWindowTokens
+        guard denom > 0 else { return 0 }
+        let used = contextBudgetTokens > 0 ? contextBudgetUsedTokens : contextUsedTokens
+        return min(100, max(0, Double(used) / Double(denom) * 100))
     }
 
+    /// Tokens until the agent's own ceiling (claude: the auto-compact
+    /// threshold; codex: the effective window) — the honest "left" number.
     var contextRemainingTokens: Int {
-        max(0, contextWindowTokens - contextUsedTokens)
+        let denom = contextBudgetTokens > 0 ? contextBudgetTokens : contextWindowTokens
+        let used = contextBudgetTokens > 0 ? contextBudgetUsedTokens : contextUsedTokens
+        return max(0, denom - used)
     }
 
     /// Share of input that was served from cache — high is good (cheaper, faster).
@@ -191,16 +213,47 @@ final class ClaudeUsageAccumulator: @unchecked Sendable {
             totalCacheCreate += row.cacheCreate
         }
         let contextUsed = lastInput + lastCacheRead + lastCacheCreate + lastOutput
+        let window = ConversationUsageParser.inferContextWindow(model: model, observedUsed: contextUsed)
+        let budget = ContextBudgetLaw.claude(window: window, used: contextUsed)
         return ConversationUsage(
             model: model,
             contextUsedTokens: contextUsed,
-            contextWindowTokens: ConversationUsageParser.inferContextWindow(model: model, observedUsed: contextUsed),
+            contextWindowTokens: window,
+            contextBudgetTokens: budget.budget,
+            contextBudgetUsedTokens: budget.used,
             totalInputTokens: totalInput,
             totalOutputTokens: totalOutput,
             cacheReadTokens: totalCacheRead,
             cacheCreateTokens: totalCacheCreate,
             messageCount: userMessages
         )
+    }
+}
+
+/// Each agent's own context-gauge math, mirrored exactly so Cherminal's %
+/// agrees with the number the user sees inside the agent.
+///
+/// Claude Code (extracted from the installed binary, 2026-06-13 — the
+/// `qpK`/`Kb_`/`JKH` family): effective window = configured window −
+/// min(model max output, 20_000); auto-compact threshold = effective −
+/// 13_000; the displayed "% until auto-compact" = (threshold − used)/threshold.
+///
+/// Codex (codex-rs `TokenUsage::percent_of_context_window_remaining`):
+/// a 12_000-token baseline is subtracted from BOTH sides — % left =
+/// ((window−12k) − max(0, used−12k)) / (window−12k).
+enum ContextBudgetLaw {
+    static let claudeOutputReserve = 20_000
+    static let claudeCompactBuffer = 13_000
+    static let codexBaseline = 12_000
+
+    /// (budget, budgetUsed) for a Claude session.
+    static func claude(window: Int, used: Int) -> (budget: Int, used: Int) {
+        (max(1, window - claudeOutputReserve - claudeCompactBuffer), used)
+    }
+
+    /// (budget, budgetUsed) for a Codex session.
+    static func codex(window: Int, used: Int) -> (budget: Int, used: Int) {
+        (max(1, window - codexBaseline), max(0, used - codexBaseline))
     }
 }
 
@@ -260,6 +313,7 @@ enum ConversationUsageParser {
         let lines = data.split(separator: newline, omittingEmptySubsequences: true)
         var usage: ConversationUsage?
         var windows: [ConversationUsage.RateWindow]?
+        var limitReached: Bool?
         for line in lines.reversed() {
             if usage != nil && windows != nil { break }
             guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
@@ -272,6 +326,13 @@ enum ConversationUsageParser {
                     rateWindow(limits["secondary"], label: "Weekly"),
                 ].compactMap { $0 }
                 if !parsed.isEmpty { windows = parsed }
+                // `rate_limit_reached_type` rides on the same record: a string
+                // while the account is limited, JSON null once it isn't. Take
+                // it from the NEWEST record carrying rate_limits only.
+                if limitReached == nil {
+                    let reached = limits["rate_limit_reached_type"]
+                    limitReached = reached != nil && !(reached is NSNull)
+                }
             }
 
             if usage == nil, let info = payload["info"] as? [String: Any] {
@@ -284,13 +345,17 @@ enum ConversationUsageParser {
                 let cached = intValue(total["cached_input_tokens"])
                 let freshInput = max(0, intValue(total["input_tokens"]) - cached)
                 let used = intValue(last["total_tokens"])
+                // Never let the window read smaller than what's already used, so
+                // the gauge can't show "260k / 256k" (Claude self-corrects via
+                // inferContextWindow; Codex needs this clamp).
+                let win = max(window > 0 ? window : 256_000, used)
+                let budget = ContextBudgetLaw.codex(window: win, used: used)
                 usage = ConversationUsage(
                     model: "Codex",
                     contextUsedTokens: used,
-                    // Never let the window read smaller than what's already used, so
-                    // the gauge can't show "260k / 256k" (Claude self-corrects via
-                    // inferContextWindow; Codex needs this clamp).
-                    contextWindowTokens: max(window > 0 ? window : 256_000, used),
+                    contextWindowTokens: win,
+                    contextBudgetTokens: budget.budget,
+                    contextBudgetUsedTokens: budget.used,
                     totalInputTokens: freshInput,
                     totalOutputTokens: intValue(total["output_tokens"]),
                     cacheReadTokens: cached,
@@ -301,6 +366,7 @@ enum ConversationUsageParser {
 
         if var out = usage {
             out.rateWindows = windows ?? []
+            out.limitReached = limitReached ?? false
             return out
         }
         // No numbers in the tail (a fresh premium session can be all
@@ -312,6 +378,7 @@ enum ConversationUsageParser {
             totalInputTokens: 0, totalOutputTokens: 0,
             cacheReadTokens: 0, cacheCreateTokens: 0)
         zero.rateWindows = windows
+        zero.limitReached = limitReached ?? false
         return zero
     }
 

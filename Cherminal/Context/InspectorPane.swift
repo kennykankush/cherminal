@@ -6,7 +6,10 @@ import SwiftUI
 /// segment carries a count + breathing dot when a pane needs you, so it stays
 /// glanceable even from the Details tab.
 struct InspectorPane: View {
-    let conversation: Conversation?
+    /// The active pane — observed one level down (ObservedPaneDetails) so an
+    /// identity adoption or a pendingAgent flip re-renders the Details tab
+    /// directly, without waiting for a coordinator-level republish.
+    let pane: Pane?
     @EnvironmentObject private var coordinator: TabWindowCoordinator
     @AppStorage("cherminal.inspectorTab") private var tab: Tab = .context
 
@@ -26,7 +29,12 @@ struct InspectorPane: View {
             header
             Divider()
             switch tab {
-            case .context:  ContextWatchPane(conversation: conversation)
+            case .context:
+                if let pane {
+                    ObservedPaneDetails(pane: pane)
+                } else {
+                    ContextWatchPane(conversation: nil, pendingAgent: nil)
+                }
             case .sessions: SessionsPane()
             }
         }
@@ -72,6 +80,17 @@ struct InspectorPane: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Observation shim: holds the @ObservedObject so Pane's @Published identity
+/// (adoption flips) and pendingAgent (new-chat detection) drive the Details
+/// tab live.
+private struct ObservedPaneDetails: View {
+    @ObservedObject var pane: Pane
+
+    var body: some View {
+        ContextWatchPane(conversation: pane.conversation, pendingAgent: pane.pendingAgent)
     }
 }
 

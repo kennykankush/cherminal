@@ -320,6 +320,58 @@ struct ConversationLedgerTests {
         #expect(ConversationLedger.detectConversation(info: nil, candidates: candidates) == nil)
     }
 
+    /// The freshness guard on rule 3: a bare `claude` (NEW conversation, no
+    /// session file until the first message) must NOT inherit the room's
+    /// previous conversation — only one written since the process started
+    /// may be adopted. `--continue` opts back into pure recency: there the
+    /// room's latest IS the user's selection.
+    @Test func detectionRefusesConversationsOlderThanTheProcess() {
+        let room = "/Users/x/dev/room"
+        let older = timed("c-old", room: room, at: 100)
+        let newer = timed("c-new", room: room, at: 200)
+        let candidates = [older, newer]
+
+        // Process started AFTER both conversations' last activity → nothing
+        // to adopt: this is a brand-new chat (the "BELVEDERE FABLE" bug).
+        let freshProcess = LiveSessionLinker.ProcessInfo(
+            command: "claude", cwd: room, openSessionFile: nil, resumeID: nil,
+            launchArgv: "claude --dangerously-skip-permissions",
+            startedAt: Date(timeIntervalSince1970: 500))
+        #expect(ConversationLedger.detectConversation(info: freshProcess, candidates: candidates) == nil)
+
+        // Once a conversation is written AFTER the start, it adopts (and the
+        // pre-existing one still doesn't win despite being in the room).
+        let typed = timed("c-typed", room: room, at: 600)
+        #expect(ConversationLedger.detectConversation(
+            info: freshProcess, candidates: candidates + [typed])?.id == "c-typed")
+
+        // Activity slightly BEFORE start survives the ±5s slack (ps etime is
+        // whole seconds; the snapshot is TTL-cached).
+        let justBefore = timed("c-edge", room: room, at: 497)
+        #expect(ConversationLedger.detectConversation(
+            info: freshProcess, candidates: [justBefore])?.id == "c-edge")
+
+        // --continue: the room's latest is exactly what the user asked for.
+        let continued = LiveSessionLinker.ProcessInfo(
+            command: "claude", cwd: room, openSessionFile: nil, resumeID: nil,
+            launchArgv: "claude --continue",
+            startedAt: Date(timeIntervalSince1970: 500))
+        #expect(ConversationLedger.detectConversation(info: continued, candidates: candidates)?.id == "c-new")
+
+        // No start-time data (ps fallback path) → old recency rule, no regression.
+        let unknownStart = LiveSessionLinker.ProcessInfo(
+            command: "claude", cwd: room, openSessionFile: nil, resumeID: nil)
+        #expect(ConversationLedger.detectConversation(info: unknownStart, candidates: candidates)?.id == "c-new")
+    }
+
+    @Test func continueFlagParsing() {
+        #expect(ConversationLedger.hasContinueFlag("claude --continue"))
+        #expect(ConversationLedger.hasContinueFlag("claude -c --verbose"))
+        #expect(!ConversationLedger.hasContinueFlag("claude --dangerously-skip-permissions"))
+        // Substrings must not match (-c inside another token).
+        #expect(!ConversationLedger.hasContinueFlag("claude --settings=-c.json"))
+    }
+
     // MARK: - Tray anti-leak (parked shells)
 
     @Test func trayReapsAgedAndOverCapShellsKeepingNewest() {

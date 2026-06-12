@@ -34,14 +34,16 @@ struct ProcTableTests {
     /// ps columns are right-aligned with space padding; tpgid can be 0 (a
     /// daemonized master has no controlling terminal); argv[0] may start with
     /// "-" (login process) and contain spaces — all must survive parsing.
-    /// rss (KB → bytes) and pcpu (decimal) sit between tpgid and command.
+    /// rss (KB → bytes), pcpu (decimal), and etime sit between tpgid and
+    /// command; etime becomes an absolute start Date against `now`.
     @Test func psParseHandlesPaddingDashesAndSpaces() {
         let raw = """
-            4093  4092     0    896   0.0 -/Applications/Cherminal.app/Contents/MacOS/dtach -A /tmp/x.sock -z /bin/sh -c claude --resume abc-123
-              77     1   500  84512   3.2 /usr/libexec/something
-           88888 77777 88888 204800  12.5 node /Users/me/dev/my app/server.js
+            4093  4092     0    896   0.0      03:25 -/Applications/Cherminal.app/Contents/MacOS/dtach -A /tmp/x.sock -z /bin/sh -c claude --resume abc-123
+              77     1   500  84512   3.2   01:02:03 /usr/libexec/something
+           88888 77777 88888 204800  12.5 2-01:02:03 node /Users/me/dev/my app/server.js
         """
-        let ps = ProcTable.parsePS(raw)
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let ps = ProcTable.parsePS(raw, now: now)
         #expect(ps.parent[4093] == 4092)
         #expect(ps.tpgid[4093] == nil)              // 0 → no foreground group
         #expect(ps.tpgid[77] == 500)
@@ -53,6 +55,22 @@ struct ProcTableTests {
         #expect(ps.rss[88888] == 204_800 * 1024)
         #expect(ps.cpu[4093] == 0.0)
         #expect(ps.cpu[88888] == 12.5)
+        #expect(ps.startedAt[4093] == now.addingTimeInterval(-(3 * 60 + 25)))
+        #expect(ps.startedAt[77] == now.addingTimeInterval(-(1 * 3600 + 2 * 60 + 3)))
+        #expect(ps.startedAt[88888] == now.addingTimeInterval(-Double(2 * 86_400 + 1 * 3600 + 2 * 60 + 3)))
+    }
+
+    /// `ps etime=` shapes: mm:ss, hh:mm:ss, dd-hh:mm:ss; garbage → nil
+    /// (never a bogus start date).
+    @Test func elapsedParsing() {
+        #expect(ProcTable.parseElapsed("00:42") == 42)
+        #expect(ProcTable.parseElapsed("05:00") == 300)
+        #expect(ProcTable.parseElapsed("01:02:03") == 3_723)
+        #expect(ProcTable.parseElapsed("3-00:00:10") == TimeInterval(3 * 86_400 + 10))
+        #expect(ProcTable.parseElapsed("") == nil)
+        #expect(ProcTable.parseElapsed("42") == nil)            // bare seconds never happens
+        #expect(ProcTable.parseElapsed("-/Applications/x") == nil)
+        #expect(ProcTable.parseElapsed("a:b") == nil)
     }
 
     /// The master-vs-client law: with two holders, the one WITH a child is the

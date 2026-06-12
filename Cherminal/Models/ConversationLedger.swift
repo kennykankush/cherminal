@@ -220,7 +220,12 @@ enum ConversationLedger {
     ///   2. codex's open rollout file — codex holds it open, an exact match
     ///   3. claude's cwd + recency — claude doesn't hold its file open, so the
     ///      most-recently-active claude conversation in the room is the best
-    ///      precise-enough signal (inherently approximate with several)
+    ///      precise-enough signal… but ONLY among conversations written since
+    ///      this process started. A fresh `claude` has no session file until
+    ///      the first message, and without the freshness guard it inherited
+    ///      the room's PREVIOUS conversation (the "BELVEDERE FABLE on a brand
+    ///      new chat" bug, 2026-06-13). `claude --continue` is the exception:
+    ///      there, "the room's latest" IS the user's selection.
     static func detectConversation(
         info: LiveSessionLinker.ProcessInfo?,
         candidates: [Conversation]
@@ -234,9 +239,23 @@ enum ConversationLedger {
             return match
         }
         guard info.command.lowercased().hasPrefix("claude"), let cwd = info.cwd else { return nil }
-        return candidates
-            .filter { $0.agent == .claudeCode && $0.roomPath.path == cwd }
-            .max { $0.lastActivityAt < $1.lastActivityAt }
+        let inRoom = candidates.filter { $0.agent == .claudeCode && $0.roomPath.path == cwd }
+        let wantsLatest = info.launchArgv.map(hasContinueFlag) ?? false
+        if !wantsLatest, let started = info.startedAt {
+            // ps etime is whole seconds and the snapshot is TTL-cached — a
+            // small slack keeps a just-written file from being rejected.
+            let cutoff = started.addingTimeInterval(-5)
+            return inRoom
+                .filter { $0.lastActivityAt >= cutoff }
+                .max { $0.lastActivityAt < $1.lastActivityAt }
+        }
+        // --continue, or no start-time data (ps fallback path): old recency rule.
+        return inRoom.max { $0.lastActivityAt < $1.lastActivityAt }
+    }
+
+    /// `claude --continue` / `claude -c` — resume the room's latest conversation.
+    static func hasContinueFlag(_ argv: String) -> Bool {
+        argv.split(separator: " ").contains { $0 == "--continue" || $0 == "-c" }
     }
 
     // MARK: - Tray anti-leak (parked shells)

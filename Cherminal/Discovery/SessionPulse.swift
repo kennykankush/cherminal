@@ -188,6 +188,7 @@ enum SessionPulse {
         return lowered.hasPrefix("<command") || lowered.hasPrefix("<local-command")
             || lowered.hasPrefix("<system-reminder") || lowered.hasPrefix("<environment_context")
             || lowered.hasPrefix("<permissions") || lowered.hasPrefix("<user_instructions")
+            || lowered.hasPrefix("<task-notification") || lowered.hasPrefix("<task-")
             || lowered.hasPrefix("caveat:") || text.hasPrefix("[Request interrupted")
     }
 }

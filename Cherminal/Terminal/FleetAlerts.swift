@@ -37,6 +37,68 @@ enum FleetAlerts {
     }
 
     private static func id(for conversationID: String) -> String { "chm.done.\(conversationID)" }
+
+    // MARK: - Usage-limit awareness (UsageWatch → here)
+
+    /// "5h limit at 92% — resets in 1h 04m" / "Weekly limit refreshed".
+    /// One stable id per agent+window, so an updated % replaces the banner.
+    static func notifyUsage(agent: AgentKind, alert: UsageAlertLaw.Alert) {
+        let name = BurstDetector.label(for: agent).capitalized
+        switch alert.kind {
+        case .approaching:
+            var body = "\(alert.label) limit at \(alert.percent)%"
+            if let resets = alert.resetsAt {
+                body += " — resets in \(countdown(to: resets))"
+            }
+            post(id: "chm.usage.\(agent.rawValue).\(alert.label)",
+                 title: "\(name) usage limit approaching", body: body)
+        case .refreshed:
+            post(id: "chm.usage.\(agent.rawValue).\(alert.label)",
+                 title: "\(name) \(alert.label) limit refreshed",
+                 body: "Back to \(alert.percent)% used — clear to run.")
+        }
+    }
+
+    /// The burst flipping on/off — "hit its usage limit" / "limit lifted".
+    static func notifyBurst(_ agent: AgentKind, began: Bool, resetsAt: Date?) {
+        let name = BurstDetector.label(for: agent).capitalized
+        if began {
+            var body = "Agents are blocked until the limit resets."
+            if let resets = resetsAt { body = "Blocked until reset in \(countdown(to: resets))." }
+            post(id: "chm.burst.\(agent.rawValue)",
+                 title: "\(name) hit its usage limit", body: body)
+        } else {
+            post(id: "chm.burst.\(agent.rawValue)",
+                 title: "\(name) usage limit lifted",
+                 body: "Agents can run again.")
+        }
+    }
+
+    /// The active conversation's context window crossed 90% of the agent's
+    /// own ceiling — compaction (or a wall) is imminent.
+    static func notifyContextHigh(agent: AgentKind, room: String, percent: Double) {
+        post(id: "chm.context.\(agent.rawValue).\(room)",
+             title: "\(agent.displayName) · \(room)",
+             body: "Context window \(Int(percent))% full — auto-compact soon.")
+    }
+
+    private static func post(id: String, title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        UNUserNotificationCenter.current()
+            .add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
+    }
+
+    /// "1h 04m" / "2d 1h" — same two-unit shape the Details countdowns use.
+    private static func countdown(to date: Date) -> String {
+        let secs = Int(max(0, date.timeIntervalSinceNow))
+        let d = secs / 86_400, h = (secs % 86_400) / 3_600, m = (secs % 3_600) / 60
+        if d > 0 { return "\(d)d \(h)h" }
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
 }
 
 /// Detects a "burst" — an agent that has hit its account usage/plan limit and is

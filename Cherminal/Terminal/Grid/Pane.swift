@@ -17,6 +17,12 @@ final class Pane: ObservableObject, Identifiable {
     /// linker detects a hand-launched agent. Views observe this.
     @Published var conversation: Conversation
 
+    /// An agent PROCESS is running in this pane but no conversation could be
+    /// linked yet — a brand-new chat that hasn't written its session file
+    /// (claude writes nothing until the first message). The inspector shows
+    /// a "new conversation" state instead of guessing an old one.
+    @Published private(set) var pendingAgent: AgentKind?
+
     /// The identity the pane was opened with; adoption falls back to this.
     let base: Conversation
 
@@ -54,8 +60,13 @@ final class Pane: ObservableObject, Identifiable {
     deinit { LiveCount.dec("pane") }
 
     /// Adopt a detected live agent as the effective identity, or revert to base.
-    /// Idempotent. (Window title is updated by the owning controller.)
-    func applyDetectedSession(_ detected: Conversation?) {
+    /// `runningAgent` is the kind of agent process seen in the pane regardless
+    /// of whether a conversation could be linked — a running agent WITHOUT a
+    /// linkable conversation is a new chat (pendingAgent). Idempotent.
+    /// (Window title is updated by the owning controller.)
+    func applyDetectedSession(_ detected: Conversation?, runningAgent: AgentKind? = nil) {
+        let pending = detected == nil ? runningAgent : nil
+        if pendingAgent != pending { pendingAgent = pending }
         let target = detected ?? base
         guard conversation.id != target.id else { return }
         clog("tabs", "adopt id=\(target.id) agent=\(target.agent.rawValue) (was \(conversation.id))")

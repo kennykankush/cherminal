@@ -53,6 +53,9 @@ struct SessionPulseTests {
             #"{"type":"user","message":{"content":"<system-reminder>hook output</system-reminder>"}}"#,
             #"{"type":"user","message":{"content":"Caveat: the messages below were generated..."}}"#,
             #"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#,
+            // Background-task notifications the harness injects as "user"
+            // turns (showed up as "YOU: <task-notification>…" in Details).
+            #"{"type":"user","message":{"content":"<task-notification>\n<task-id>bfmk4b1m8</task-id>done</task-notification>"}}"#,
             // A pure tool_use assistant record must not blank the last text.
             #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{}}]}}"#,
         ]

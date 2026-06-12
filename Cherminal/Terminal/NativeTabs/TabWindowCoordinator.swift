@@ -1664,7 +1664,8 @@ final class TabWindowCoordinator: ObservableObject {
                 }
             }
             let info = LiveSessionLinker.inspect(pids: resolved.map { $0.pid },
-                                                 argvByPID: table.argv)
+                                                 argvByPID: table.argv,
+                                                 startedByPID: table.startedAt)
             return (resolved, info)
         }.value
         guard let (resolved, info) = probed else { return }
@@ -1684,10 +1685,12 @@ final class TabWindowCoordinator: ObservableObject {
                 // A bare shell pane: adopt the agent it hand-launched (or revert
                 // to shell when none runs). If another pane already claimed this
                 // conversation this pass, keep this one a shell — two panes must
-                // not share one identity.
+                // not share one identity. The running agent KIND travels along
+                // even when no conversation matched, so a brand-new chat reads
+                // as "new conversation", not as the room's previous one.
                 var detected = detectConversation(for: info[pid])
                 if let d = detected, adopted.contains(d.id) { detected = nil }
-                pane.applyDetectedSession(detected)
+                pane.applyDetectedSession(detected, runningAgent: runningAgentKind(info[pid]))
                 if let detected {
                     adopted.insert(detected.id); live.insert(detected.id)
                     if let openFile { liveFiles[detected.id] = openFile }
@@ -1704,21 +1707,34 @@ final class TabWindowCoordinator: ObservableObject {
         if liveConversationIDs != live { liveConversationIDs = live }
         liveSessionFile = liveFiles   // codex's live rollout, for done/working detection
 
+        // Account usage refresh — claude's OAuth windows (60s-cached actor)
+        // and codex's newest rollout tail (30s-throttled). Feeds the Details
+        // meters, the burst arbitration below, and the limit notifications.
+        await UsageWatch.shared.refresh(newestCodexFile: newestCodexSessionFile())
+
         // Burst scan: read each agent pane's visible terminal banner (cheap —
-        // 500ms-cached viewport text) and flag the whole agent type if any pane
-        // has hit its usage limit. Stops scanning an agent once it's flagged.
-        var bursting: Set<AgentKind> = []
+        // 500ms-cached viewport text). The banner alone is no longer the law —
+        // it lingers in the viewport long after a limit resets — so BurstLaw
+        // (via UsageWatch) arbitrates it against the account windows, and can
+        // also flag a burst the banner never showed (limit hit elsewhere).
+        var textSeen: Set<AgentKind> = []
         for c in controllers {
             for pane in c.workspace.panes {
                 let agent = pane.conversation.agent
-                guard agent == .codex || agent == .claudeCode, !bursting.contains(agent),
+                guard agent == .codex || agent == .claudeCode, !textSeen.contains(agent),
                       let surface = pane.surfaceView else { continue }
                 if BurstDetector.isBursting(agent: agent, visibleText: surface.cachedVisibleContents.get()) {
-                    bursting.insert(agent)
+                    textSeen.insert(agent)
                 }
             }
         }
+        var bursting: Set<AgentKind> = []
+        for agent in [AgentKind.claudeCode, .codex]
+        where UsageWatch.shared.isLimited(agent, textSeen: textSeen.contains(agent)) {
+            bursting.insert(agent)
+        }
         if burstingAgents != bursting { burstingAgents = bursting }
+        UsageWatch.shared.reportBursting(bursting)
         // Keep each window's title current (adoption may have flipped the
         // active pane's identity) — through the one title law, so a user
         // rename always wins over the automatic room title.
@@ -1796,6 +1812,30 @@ final class TabWindowCoordinator: ObservableObject {
     /// ledger's law — see ConversationLedger.detectConversation.
     private func detectConversation(for info: LiveSessionLinker.ProcessInfo?) -> Conversation? {
         ConversationLedger.detectConversation(info: info, candidates: registry.conversations)
+    }
+
+    /// The KIND of agent process running in a pane, conversation or not —
+    /// what makes "agent running, no session file yet" distinguishable from
+    /// "plain shell" (Pane.pendingAgent).
+    private func runningAgentKind(_ info: LiveSessionLinker.ProcessInfo?) -> AgentKind? {
+        guard let c = info?.command.lowercased() else { return nil }
+        if c.hasPrefix("claude") { return .claudeCode }
+        if c.hasPrefix("codex") { return .codex }
+        return nil
+    }
+
+    /// The codex rollout most worth reading for ACCOUNT-level rate limits:
+    /// a live pane's open file (freshest), else the registry's most recent
+    /// codex conversation. nil when codex has never run here.
+    private func newestCodexSessionFile() -> URL? {
+        for (id, url) in liveSessionFile
+        where registry.conversation(id: id)?.agent == .codex {
+            return url
+        }
+        return registry.conversations
+            .filter { $0.agent == .codex }
+            .max { $0.lastActivityAt < $1.lastActivityAt }?
+            .sessionFile
     }
 }
 

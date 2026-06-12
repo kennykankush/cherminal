@@ -29,7 +29,7 @@ struct TabWindowRootView: View {
             TerminalGridView(workspace: workspace)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .inspector(isPresented: $showContext) {
-                    InspectorPane(conversation: conversation)
+                    InspectorPane(pane: workspace.activePane)
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 460)
                 }
                 // Top-right cluster: coffee (keep-awake), then Context.

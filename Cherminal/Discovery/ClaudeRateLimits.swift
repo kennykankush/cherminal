@@ -87,6 +87,19 @@ actor ClaudeRateLimits {
         if let w = usage.seven_day, let pct = w.utilization {
             out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
         }
+        // Model-scoped weekly windows (Max plans report these; shape pinned
+        // from a real payload). They matter twice: the meters, and BurstLaw —
+        // an "Opus limit" burst is confirmed/cleared by seven_day_opus, not
+        // by the generic windows above. DORMANT ones (0% and no reset
+        // running) stay hidden — a permanent "Sonnet 0%" meter is clutter.
+        if let w = usage.seven_day_opus, let pct = w.utilization,
+           pct > 0 || w.resets_at != nil {
+            out.append(.init(label: "Opus", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+        }
+        if let w = usage.seven_day_sonnet, let pct = w.utilization,
+           pct > 0 || w.resets_at != nil {
+            out.append(.init(label: "Sonnet", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+        }
         if let e = usage.extra_usage, e.is_enabled == true, let pct = e.utilization {
             var detail: String?
             if let used = e.used_credits, let limit = e.monthly_limit, limit > 0 {
@@ -111,6 +124,8 @@ actor ClaudeRateLimits {
     private struct UsageResponse: Decodable {
         let five_hour: Window?
         let seven_day: Window?
+        let seven_day_opus: Window?
+        let seven_day_sonnet: Window?
         let extra_usage: Extra?
         struct Window: Decodable { let utilization: Double?; let resets_at: String? }
         struct Extra: Decodable {

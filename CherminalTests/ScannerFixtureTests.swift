@@ -124,6 +124,32 @@ struct CodexUsageTests {
         #expect(usage?.totalOutputTokens == 50)
         #expect(usage?.rateWindows.map(\.label) == ["5h", "Weekly"])
         #expect(usage?.rateWindows.first?.usedPercent == 42.5)
+        // Codex's own % math: 12k baseline off both sides (codex-rs
+        // percent_of_context_window_remaining) — (120k−12k)/(256k−12k).
+        #expect(usage?.contextBudgetTokens == 244_000)
+        #expect(usage?.contextBudgetUsedTokens == 108_000)
+        #expect(abs((usage?.contextUsedPercent ?? 0) - 108_000.0 / 244_000.0 * 100) < 0.01)
+        // No rate_limit_reached_type in the record → not limited.
+        #expect(usage?.limitReached == false)
+    }
+
+    /// `rate_limit_reached_type` is the authoritative "at the limit" flag —
+    /// a string while limited, JSON null once it isn't.
+    @Test func limitReachedFlagParses() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("chm-codex-usage-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try ([
+            #"{"payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":100,"resets_at":1760000000},"secondary":{"used_percent":55,"resets_at":1760600000},"rate_limit_reached_type":"primary"}}}"#,
+        ].joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        let usage = ConversationUsageParser.parseCodex(sessionFile: url)
+        #expect(usage?.limitReached == true)
+
+        // Explicit null (the everyday shape) must read as NOT limited.
+        try ([
+            #"{"payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":30,"resets_at":1760000000},"secondary":{"used_percent":20,"resets_at":1760600000},"rate_limit_reached_type":null}}}"#,
+        ].joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+        #expect(ConversationUsageParser.parseCodex(sessionFile: url)?.limitReached == false)
     }
 
     @Test func rolloutWithoutTokenCountYieldsNil() throws {
@@ -192,12 +218,23 @@ struct ClaudeUsageResponseTests {
     @Test func parsesRealResponseIncludingExtraUsage() {
         let json = #"{"five_hour":{"utilization":0.0,"resets_at":null},"seven_day":{"utilization":85.0,"resets_at":"2026-06-14T18:00:00.288459+00:00"},"seven_day_oauth_apps":null,"seven_day_opus":null,"seven_day_sonnet":{"utilization":0.0,"resets_at":null},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":2763.0,"utilization":27.63,"currency":"USD","disabled_reason":null}}"#
         let windows = ClaudeRateLimits.parseUsageResponse(Data(json.utf8))
+        // seven_day_sonnet is present but DORMANT (0%, no reset) — hidden.
         #expect(windows.map(\.label) == ["5h", "Weekly", "Extra"])
         #expect(windows[0].usedPercent == 0.0)
         #expect(windows[1].usedPercent == 85.0)
         #expect(windows[1].resetsAt != nil)
         #expect(windows[2].usedPercent == 27.63)
         #expect(windows[2].detail == "$27.63 of $100")
+    }
+
+    /// Model-scoped weekly windows surface once they're actually tracking
+    /// usage — the data BurstLaw needs to confirm/clear an "Opus limit" burst.
+    @Test func activeOpusWindowSurfaces() {
+        let json = #"{"five_hour":{"utilization":40.0,"resets_at":null},"seven_day_opus":{"utilization":97.5,"resets_at":"2026-06-14T18:00:00+00:00"}}"#
+        let windows = ClaudeRateLimits.parseUsageResponse(Data(json.utf8))
+        #expect(windows.map(\.label) == ["5h", "Opus"])
+        #expect(windows[1].usedPercent == 97.5)
+        #expect(windows[1].resetsAt != nil)
     }
 
     @Test func extraUsageHiddenWhenDisabledAndGarbageYieldsNothing() {

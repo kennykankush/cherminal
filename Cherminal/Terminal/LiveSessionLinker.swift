@@ -19,12 +19,31 @@ enum LiveSessionLinker {
         /// The session id from the process's argv (`claude --resume <id>` /
         /// `codex resume <id>`) — the exact, verified conversation it's running.
         let resumeID: String?
+        /// The full argv line (ProcTable's ps sweep) — lets the ledger see
+        /// flags like `--continue` that change which conversation is meant.
+        let launchArgv: String?
+        /// When the process started (ProcTable's etime) — the ledger refuses
+        /// to link a process to a conversation last written before it existed.
+        let startedAt: Date?
+
+        init(command: String, cwd: String?, openSessionFile: String?,
+             resumeID: String?, launchArgv: String? = nil, startedAt: Date? = nil) {
+            self.command = command
+            self.cwd = cwd
+            self.openSessionFile = openSessionFile
+            self.resumeID = resumeID
+            self.launchArgv = launchArgv
+            self.startedAt = startedAt
+        }
     }
 
-    /// Inspect `pids` (one batched lsof). `argvByPID` — when the caller already
-    /// holds a ProcTable snapshot — supplies each pid's command line so no
-    /// second `ps` is spawned; without it we fall back to our own ps call.
-    static func inspect(pids: [Int32], argvByPID: [Int32: String]? = nil) -> [Int32: ProcessInfo] {
+    /// Inspect `pids` (one batched lsof). `argvByPID` / `startedByPID` — when
+    /// the caller already holds a ProcTable snapshot — supply each pid's
+    /// command line and start time so no second `ps` is spawned; without them
+    /// we fall back to our own ps call (resume ids only).
+    static func inspect(pids: [Int32],
+                        argvByPID: [Int32: String]? = nil,
+                        startedByPID: [Int32: Date]? = nil) -> [Int32: ProcessInfo] {
         guard !pids.isEmpty else { return [:] }
         let home = NSHomeDirectory()
         let roots = [home + "/.claude/projects/", home + "/.codex/sessions/"]
@@ -47,10 +66,13 @@ enum LiveSessionLinker {
         } else {
             resumed = resumeIDs(pids: pids)
         }
-        for (pid, id) in resumed where info[pid] != nil {
+        for pid in info.keys {
             let cur = info[pid]!
             info[pid] = ProcessInfo(command: cur.command, cwd: cur.cwd,
-                                    openSessionFile: cur.openSessionFile, resumeID: id)
+                                    openSessionFile: cur.openSessionFile,
+                                    resumeID: resumed[pid],
+                                    launchArgv: argvByPID?[pid],
+                                    startedAt: startedByPID?[pid])
         }
         return info
     }
