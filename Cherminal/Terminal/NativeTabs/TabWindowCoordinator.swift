@@ -194,11 +194,30 @@ final class TabWindowCoordinator: ObservableObject {
 
         // The 8s live-session reconcile is paused while the app is backgrounded
         // (energy); refresh once the moment it comes forward so live badges /
-        // "your turn" lights are current when you look.
+        // "your turn" lights are current when you look. Also re-assert the
+        // keyboard: ⌘Tab back can land with NO first responder (the window
+        // itself), which reads as "the pane froze — I can't type". Only the
+        // clearly-broken state is corrected; a deliberate focus (a rename
+        // field, another surface) is left alone.
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in await self?.reconcileLiveSessions() }
+            Task { @MainActor in
+                self?.reassertFocusIfLost()
+                await self?.reconcileLiveSessions()
+            }
+        })
+
+        // A surface asked to close (its process exited and the user pressed a
+        // key on the "press any key to close" banner — e.g. an attach to a
+        // session that had ended). Nothing handled this before, so the dead
+        // surface lingered as a black pane until a manual kill.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: Ghostty.Notification.ghosttyCloseSurface, object: nil, queue: .main
+        ) { [weak self] note in
+            MainActor.assumeIsolated {
+                self?.closePane(forSurface: note.object as? Ghostty.SurfaceView)
+            }
         })
     }
 
@@ -381,7 +400,7 @@ final class TabWindowCoordinator: ObservableObject {
         // The async block below clears it (guarded so an empty tray never
         // persists), and parking is suppressed during a quit decision anyway.
         let conversation = pane.conversation
-        let commandOverride = pane.spawnCommandOverride
+        let commandOverride = pane.consumeSpawnCommandOverride()
         Task.detached(priority: .userInitiated) {
             let config = TerminalCommand.surfaceConfig(for: conversation,
                                                        commandOverride: commandOverride)
@@ -778,6 +797,34 @@ final class TabWindowCoordinator: ObservableObject {
         guard let controller = activeController,
               let active = controller.workspace.activePane else { return }
         kill(active)
+    }
+
+    /// Ghostty's close-surface request (the user dismissed a "process exited /
+    /// failed to launch" banner): close that pane like ⌘⇧W would. The park
+    /// guard probes the master fresh, so a genuinely dead process never
+    /// parks; a deliberate close of a live wrapped pane still does.
+    private func closePane(forSurface surface: Ghostty.SurfaceView?) {
+        guard let surface else { return }
+        for controller in controllers {
+            if let pane = controller.workspace.panes.first(where: { $0.surfaceView === surface }) {
+                clog("tabs", "surface requested close → closing pane \(pane.conversation.id)")
+                close(pane, in: controller)
+                return
+            }
+        }
+    }
+
+    /// ⌘Tab back into the app sometimes lands with the window itself as first
+    /// responder — every keystroke vanishes and the pane reads as frozen.
+    /// Re-assert the active pane's surface, but ONLY from that broken state.
+    private func reassertFocusIfLost() {
+        guard let key = NSApp.keyWindow,
+              let controller = controllers.first(where: { $0.window === key }),
+              key.firstResponder === key || key.firstResponder == nil,
+              let pane = controller.workspace.activePane,
+              let surfaceView = pane.surfaceView else { return }
+        clog("tabs", "first responder lost after activation — re-asserting active pane")
+        Ghostty.moveFocus(to: surfaceView)
     }
 
     /// Reentrancy guard + last pgrep time. FSEvents can fire many times a second

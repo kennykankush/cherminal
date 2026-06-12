@@ -241,7 +241,11 @@ struct TerminalCommandTests {
         let cmd = try #require(TerminalCommand.attachBackground(claudeSessionID: id))
         #expect(cmd.contains(" attach \(id)"))
         #expect(cmd.contains("\(id).sock"))            // same socket the resume path would use
-        #expect(!cmd.contains("--resume"))
+        // Graceful degradation: attach to an ENDED session exits nonzero in
+        // ~200ms — the pane must fall through to a cold resume, not die on a
+        // failed-to-launch banner. (A deliberate ^Z detach exits 0 — no fallback.)
+        #expect(cmd.contains("|| exec"))
+        #expect(cmd.contains("--resume \(id)"))
         #expect(TerminalCommand.attachBackground(claudeSessionID: "x; rm -rf /") == nil)
     }
 }

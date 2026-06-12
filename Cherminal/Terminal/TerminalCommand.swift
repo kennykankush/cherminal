@@ -75,10 +75,20 @@ enum TerminalCommand {
     /// pane, so the attach VIEW also survives quit/park — and if the user
     /// later opens the same conversation normally, `dtach -A` reattaches this
     /// same master instead of spawning a competitor.
+    ///
+    /// `|| exec --resume` is the graceful-degradation tail: when the
+    /// supervisor session has ENDED, `attach` exits nonzero in ~200ms ("No
+    /// job matching…") — without the fallback that surfaced as Ghostty's
+    /// failed-to-launch banner and a dead black pane. Now the same pane
+    /// seamlessly cold-resumes the conversation instead (the exact manual
+    /// recovery: kill + reopen — automated). A DELIBERATE ^Z detach exits 0,
+    /// so it never triggers the fallback.
     static func attachBackground(claudeSessionID id: String) -> String? {
         guard let id = safeSessionID(id) else { return nil }
         let bin = Subprocess.quote(BinaryResolver.shared.path(for: "claude"))
-        return Dtach.wrap("\(bin) attach \(id)", id: id)
+        return Dtach.wrap(
+            "\(bin) attach \(id) || exec \(bin) --dangerously-skip-permissions --resume \(id)",
+            id: id)
     }
 
     /// Session IDs are agent-issued UUIDs that we interpolate into a shell

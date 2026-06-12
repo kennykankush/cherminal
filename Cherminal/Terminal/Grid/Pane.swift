@@ -25,9 +25,19 @@ final class Pane: ObservableObject, Identifiable {
     var gridPosition: GridPosition
     /// Last time this pane was focused/spawned — drives LRU suspension.
     var lastActiveAt = Date()
-    /// Replaces the conversation-derived resume command at spawn (the
-    /// background-attach path: `claude attach <id>`). nil = normal spawn.
-    let spawnCommandOverride: String?
+    /// Replaces the conversation-derived resume command at the FIRST spawn
+    /// only (the background-attach path: `claude attach <id>`); consumed by
+    /// spawnSurface. Respawns (a suspended pane resuming) go through the
+    /// normal resume law instead — `dtach -A` on the same socket reattaches
+    /// the live master anyway, and a stale attach against a session that has
+    /// since ended would just fail.
+    private(set) var spawnCommandOverride: String?
+
+    /// One-shot read: returns the override and clears it.
+    func consumeSpawnCommandOverride() -> String? {
+        defer { spawnCommandOverride = nil }
+        return spawnCommandOverride
+    }
 
     init(conversation: Conversation,
          role: PaneRole? = nil,
