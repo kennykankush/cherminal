@@ -113,7 +113,7 @@ struct CodexUsageTests {
         defer { try? FileManager.default.removeItem(at: url) }
         try ([
             #"{"timestamp":"t","type":"event_msg","payload":{"type":"agent_message"}}"#,
-            #"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50},"last_token_usage":{"total_tokens":120000},"model_context_window":256000},"rate_limits":{"primary":{"used_percent":42.5,"resets_at":1760000000},"secondary":{"used_percent":10,"resets_at":1760600000}}}}"#,
+            #"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50},"last_token_usage":{"total_tokens":120000},"model_context_window":256000},"rate_limits":{"primary":{"used_percent":42.5,"window_minutes":300,"resets_at":1760000000},"secondary":{"used_percent":10,"window_minutes":10080,"resets_at":1760600000}}}}"#,
         ].joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
 
         let usage = ConversationUsageParser.parseCodex(sessionFile: url)
@@ -124,6 +124,8 @@ struct CodexUsageTests {
         #expect(usage?.totalOutputTokens == 50)
         #expect(usage?.rateWindows.map(\.label) == ["5h", "Weekly"])
         #expect(usage?.rateWindows.first?.usedPercent == 42.5)
+        // window_minutes feeds PaceLaw (the deficit watch).
+        #expect(usage?.rateWindows.map(\.windowMinutes) == [300, 10_080])
         // Codex's own % math: 12k baseline off both sides (codex-rs
         // percent_of_context_window_remaining) — (120k−12k)/(256k−12k).
         #expect(usage?.contextBudgetTokens == 244_000)

@@ -1,15 +1,17 @@
 import SwiftUI
 import AppKit
 
-/// The Details tab of the right-hand inspector: one calm, card-based,
-/// per-conversation readout. Hierarchy (top → bottom): identity (who/where +
-/// live status), the red burst banner when an account limit is hit, the
-/// user's own name & note, the usage dashboard (context gauge + account
-/// limit meters + token totals — ONE card, the numbers that move together),
-/// the agent's plan and last exchange, then the room (git) and session
-/// metadata. A brand-new agent chat (process running, no session file yet)
-/// gets an explicit "new conversation" state instead of inheriting the
-/// room's previous conversation.
+/// The Details tab of the right-hand inspector — the **Cockpit** layout.
+/// One hero: the context ring with the account limit meters riding beside it
+/// (each meter carries the deficit watch — actual burn vs an even drain of
+/// the window, CodexBar's pace model). Everything else is a flat drawer row
+/// whose collapsed state still shows its key fact ("main · clean",
+/// "106 msgs · 365 MB"), so the closed panel reads as a summary, not a wall.
+/// Drawer open-state persists app-wide (one preference, every tab agrees).
+///
+/// A brand-new agent chat (process running, no session file yet) gets an
+/// explicit "new conversation" state — ring at rest + the account meters,
+/// which apply before the first message is ever sent.
 struct ContextWatchPane: View {
     let conversation: Conversation?
     /// An agent process is running in the pane but no conversation exists on
@@ -26,12 +28,13 @@ struct ContextWatchPane: View {
     @State private var usage: ConversationUsage?
     @State private var pulse: SessionPulse.Pulse?
     @State private var procFacts: TabWindowCoordinator.ProcessFacts?
-    @State private var showTokenDetails = false
     @State private var portsExpanded = false
     @State private var gitStatus: GitStatus?
-    @State private var showGitDetails = false
     @State private var nameDraft = ""
     @State private var noteDraft = ""
+    /// Which drawers are open — comma-joined keys, persisted app-wide so
+    /// every tab's inspector agrees and the preference survives relaunch.
+    @AppStorage("cherminal.detailsDrawers") private var openDrawersRaw = "now"
     /// Live usage accumulator per conversation id, held OUTSIDE the poll task
     /// so a visibility restart (tab switch) resumes folding deltas instead of
     /// re-ingesting the whole session file.
@@ -52,19 +55,24 @@ struct ContextWatchPane: View {
                 portsFooter
             } else if let convo = conversation {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: CHM.Space.md) {
+                    VStack(alignment: .leading, spacing: 0) {
                         headerBlock(convo)
+                            .padding(.bottom, CHM.Space.md)
                         if coordinator.burstingAgents.contains(convo.agent) {
                             BurstBanner(agents: [convo.agent])
+                                .padding(.bottom, CHM.Space.md)
                         }
-                        labelCard(convo)
-                        if let usage { usageCard(usage, agent: convo.agent) }
-                        if let pulse, !pulse.todos.isEmpty { planCard(pulse) }
-                        if let pulse, pulse.lastUserText != nil || pulse.lastAssistantText != nil {
-                            latestCard(pulse, convo)
+                        if let usage {
+                            cockpitHero(usage, agent: convo.agent)
+                                .padding(.bottom, CHM.Space.lg)
                         }
-                        workspaceCard(convo)
-                        sessionCard(convo)
+                        if pulse?.isEmpty == false { nowDrawer(convo) }
+                        noteDrawer(convo)
+                        workspaceDrawer(convo)
+                        if convo.agent == .claudeCode || convo.agent == .codex {
+                            sessionDrawer(convo)
+                        }
+                        if let usage { tokensDrawer(usage) }
                     }
                     .padding(CHM.Space.lg)
                 }
@@ -87,7 +95,6 @@ struct ContextWatchPane: View {
             usage = nil
             pulse = nil
             procFacts = nil
-            showTokenDetails = false
             accumulators = [:]
         }
         // Live-refresh usage for the active conversation. Claude folds in
@@ -164,7 +171,6 @@ struct ContextWatchPane: View {
         // exists only while this window is visible.
         .onChange(of: conversation?.roomPath.path) {
             gitStatus = nil
-            showGitDetails = false
         }
         .task(id: "\(conversation?.roomPath.path ?? "none")-\(windowVisible)") {
             guard windowVisible, let room = conversation?.roomPath else { return }
@@ -201,7 +207,7 @@ struct ContextWatchPane: View {
                 .lineLimit(1)
             }
             Spacer(minLength: CHM.Space.xs)
-            statusChip(convo)
+            statusChip(turnState(convo))
             Button {
                 pins.toggle(convo.id)
             } label: {
@@ -216,28 +222,174 @@ struct ContextWatchPane: View {
     }
 
     /// Live turn state as a quiet capsule — same vocabulary as the minimap.
-    private func statusChip(_ convo: Conversation) -> some View {
-        let (word, color) = turnState(convo)
-        return HStack(spacing: 4) {
-            Circle().fill(color).frame(width: 5, height: 5)
-            Text(word).font(CHM.Font.caption).foregroundStyle(color)
+    private func statusChip(_ state: (word: String, color: Color)) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(state.color).frame(width: 5, height: 5)
+            Text(state.word).font(CHM.Font.caption).foregroundStyle(state.color)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
-        .background(Capsule().fill(color.opacity(0.12)))
+        .background(Capsule().fill(state.color.opacity(0.12)))
     }
 
-    private func turnState(_ convo: Conversation) -> (String, Color) {
+    private func turnState(_ convo: Conversation) -> (word: String, color: Color) {
         if coordinator.awaitingPaneIDs.contains(convo.id) { return ("your turn", CHM.Color.attention) }
         if coordinator.liveConversationIDs.contains(convo.id) { return ("working…", CHM.Color.accent) }
         return ("idle", Color.secondary)
+    }
+
+    // MARK: - Cockpit hero (ring + limit meters + the deficit watch)
+
+    private func cockpitHero(_ u: ConversationUsage, agent: AgentKind) -> some View {
+        VStack(alignment: .leading, spacing: CHM.Space.sm) {
+            HStack(alignment: .center, spacing: CHM.Space.lg) {
+                contextRing(percent: u.contextUsedPercent)
+                VStack(alignment: .leading, spacing: CHM.Space.md) {
+                    if u.rateWindows.isEmpty {
+                        Text("Account limits unavailable")
+                            .font(CHM.Font.caption)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        ForEach(u.rateWindows) { meterRow($0) }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Text(heroSubline(u, agent: agent))
+                .font(CHM.Font.caption)
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+    }
+
+    /// The hero ring. Brand clay while healthy — it's THE centerpiece, the
+    /// one place the accent is spent — shifting to the muted alert red only
+    /// at 90%+ (compaction imminent).
+    private func contextRing(percent: Double) -> some View {
+        ZStack {
+            Circle()
+                .stroke(CHM.Color.hairline, lineWidth: 7)
+            Circle()
+                .trim(from: 0, to: CGFloat(min(1, max(0.005, percent / 100))))
+                .stroke(percent >= 90 ? CHM.Color.alert : CHM.Color.accent,
+                        style: StrokeStyle(lineWidth: 7, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(CHM.Motion.appear, value: percent)
+            VStack(spacing: 1) {
+                Text("\(Int(percent.rounded()))%")
+                    .font(.system(size: 21, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .contentTransition(.numericText())
+                    .animation(CHM.Motion.appear, value: percent)
+                Text("CONTEXT")
+                    .font(.system(size: 8, weight: .semibold))
+                    .tracking(0.8)
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .frame(width: 100, height: 100)
+        .padding(4)
+    }
+
+    /// "590.2k of 1.0M · 376.8k to auto-compact · Fable 5 (1M)".
+    private func heroSubline(_ u: ConversationUsage, agent: AgentKind) -> String {
+        var parts = ["\(formatTokens(u.contextUsedTokens)) of \(formatTokens(u.contextWindowTokens))"]
+        parts.append(agent == .claudeCode
+                     ? "\(formatTokens(u.contextRemainingTokens)) to auto-compact"
+                     : "\(formatTokens(u.contextRemainingTokens)) left")
+        if let model = u.modelDisplayName { parts.append(model) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// One account window: label + %, a bar with a tick at where an EVEN burn
+    /// would sit, and a caption carrying the reset countdown + the deficit
+    /// watch verdict.
+    private func meterRow(_ w: ConversationUsage.RateWindow) -> some View {
+        let pace = PaceLaw.pace(for: w)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(w.label).font(CHM.Font.caption).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Text("\(Int(w.usedPercent))%")
+                    .font(CHM.Font.captionEmphasis)
+                    .foregroundStyle(usageColor(w.usedPercent))
+                    .monospacedDigit()
+            }
+            meterBar(percent: w.usedPercent, expected: pace?.expectedPercent)
+            meterCaption(w, pace: pace)
+        }
+    }
+
+    private func meterBar(percent: Double, expected: Double?) -> some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(CHM.Color.hairline)
+                Capsule()
+                    .fill(usageColor(percent))
+                    .frame(width: max(3, geo.size.width * CGFloat(min(100, percent) / 100)))
+                    .animation(CHM.Motion.appear, value: percent)
+                // The pace tick: where usage WOULD be on an even drain. The
+                // gap between fill and tick IS the deficit/reserve, visually.
+                if let expected {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.45))
+                        .frame(width: 1.5, height: 8)
+                        .offset(x: geo.size.width * CGFloat(min(100, expected) / 100) - 0.75)
+                }
+            }
+        }
+        .frame(height: 5)
+    }
+
+    @ViewBuilder
+    private func meterCaption(_ w: ConversationUsage.RateWindow, pace: PaceLaw.Pace?) -> some View {
+        if let detail = w.detail {
+            // The extra-usage meter's spend footnote ("$27.63 of $100").
+            Text(detail)
+                .font(CHM.Font.caption).foregroundStyle(.tertiary).monospacedDigit()
+        } else {
+            HStack(spacing: 4) {
+                if let resets = w.resetsAt {
+                    HStack(spacing: 3) {
+                        Image(systemName: "clock").font(.system(size: 8))
+                        Text(Self.compactCountdown(to: resets))
+                    }
+                }
+                if let pace {
+                    Text("·")
+                    paceText(pace)
+                }
+            }
+            .font(CHM.Font.caption)
+            .foregroundStyle(.tertiary)
+            .monospacedDigit()
+            .lineLimit(1)
+        }
+    }
+
+    /// The deficit watch verdict: depleting before reset > deficit/reserve >
+    /// on pace. One phrase, color carries the urgency.
+    @ViewBuilder
+    private func paceText(_ pace: PaceLaw.Pace) -> some View {
+        if let eta = pace.runsOutIn {
+            Text("runs out in \(Self.compactCountdown(seconds: eta))")
+                .foregroundStyle(CHM.Color.alert)
+        } else if pace.deltaPercent >= PaceLaw.onPaceBand {
+            Text("+\(Int(pace.deltaPercent))% deficit")
+                .foregroundStyle(CHM.Color.accent)
+        } else if pace.deltaPercent <= -PaceLaw.onPaceBand {
+            Text("\(Int(-pace.deltaPercent))% in reserve")
+        } else {
+            Text("on pace")
+        }
     }
 
     // MARK: - New conversation (agent running, nothing on disk yet)
 
     private func newConversationState(_ agent: AgentKind) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: CHM.Space.md) {
+            VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .center, spacing: CHM.Space.sm) {
                     AgentBadge(agent: agent, size: 26)
                     VStack(alignment: .leading, spacing: 2) {
@@ -248,238 +400,168 @@ struct ContextWatchPane: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: CHM.Space.xs)
-                    HStack(spacing: 4) {
-                        Circle().fill(CHM.Color.accent).frame(width: 5, height: 5)
-                        Text("fresh").font(CHM.Font.caption).foregroundStyle(CHM.Color.accent)
-                    }
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(Capsule().fill(CHM.Color.accent.opacity(0.12)))
+                    statusChip(("fresh", CHM.Color.accent))
                 }
                 .padding(.top, 24)
+                .padding(.bottom, CHM.Space.md)
 
                 if coordinator.burstingAgents.contains(agent) {
                     BurstBanner(agents: [agent])
+                        .padding(.bottom, CHM.Space.md)
                 }
 
-                card("Getting started") {
-                    Text("Send the first message and this panel fills in — name & note, the context gauge, tokens, and history.")
-                        .font(CHM.Font.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                // Account limits apply before the first message is ever sent.
+                // The ring at rest + the ACCOUNT meters — limits apply before
+                // the first message is ever sent.
                 let windows = usageWatch.windows(for: agent)
-                if !windows.isEmpty {
-                    card("Usage limits") { limitsGrid(windows) }
+                HStack(alignment: .center, spacing: CHM.Space.lg) {
+                    ZStack {
+                        Circle().stroke(CHM.Color.hairline, lineWidth: 7)
+                        VStack(spacing: 1) {
+                            Text("—")
+                                .font(.system(size: 21, weight: .bold, design: .rounded))
+                                .foregroundStyle(.tertiary)
+                            Text("CONTEXT")
+                                .font(.system(size: 8, weight: .semibold))
+                                .tracking(0.8)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                    .frame(width: 100, height: 100)
+                    .padding(4)
+                    VStack(alignment: .leading, spacing: CHM.Space.md) {
+                        if windows.isEmpty {
+                            Text("Account limits unavailable")
+                                .font(CHM.Font.caption).foregroundStyle(.tertiary)
+                        } else {
+                            ForEach(windows) { meterRow($0) }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .padding(.bottom, CHM.Space.lg)
 
-                if let convo = conversation { workspaceCard(convo) }
+                Text("Send the first message and this panel fills in — name & note, the context ring, tokens, and history.")
+                    .font(CHM.Font.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, CHM.Space.md)
+
+                if let convo = conversation { workspaceDrawer(convo) }
             }
             .padding(CHM.Space.lg)
         }
     }
 
-    // MARK: - Name & note (user-set, persisted per conversation)
+    // MARK: - Drawers (flat disclosure rows; collapsed = one-line summary)
 
-    private func labelCard(_ convo: Conversation) -> some View {
-        card("Name & note") {
-            VStack(alignment: .leading, spacing: CHM.Space.sm) {
-                TextField(convo.previewText ?? "Name this conversation…", text: $nameDraft)
-                    .textFieldStyle(.plain)
-                    .font(CHM.Font.bodyEmphasis)
-                    .onChange(of: nameDraft) { _, v in labels.setName(v, for: convo.id) }
-                ZStack(alignment: .topLeading) {
-                    if noteDraft.isEmpty {
-                        Text("Leave a note — where you left off, blockers, TODOs…")
+    private func isOpen(_ key: String) -> Bool {
+        openDrawersRaw.split(separator: ",").contains(Substring(key))
+    }
+
+    private func toggleDrawer(_ key: String) {
+        var open = Set(openDrawersRaw.split(separator: ",").map(String.init))
+        if !open.insert(key).inserted { open.remove(key) }
+        openDrawersRaw = open.sorted().joined(separator: ",")
+    }
+
+    private func drawer(_ key: String, _ title: String, meta: String? = nil,
+                        @ViewBuilder content: () -> some View) -> some View {
+        let open = isOpen(key)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(CHM.Motion.appear) { toggleDrawer(key) }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                    Text(title)
+                        .font(CHM.Font.captionEmphasis)
+                        .foregroundStyle(open ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                    Spacer(minLength: CHM.Space.sm)
+                    if !open, let meta {
+                        Text(meta)
                             .font(CHM.Font.caption)
                             .foregroundStyle(.tertiary)
-                            .padding(.top, 8).padding(.leading, 5)
-                            .allowsHitTesting(false)
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
-                    TextEditor(text: $noteDraft)
-                        .font(CHM.Font.caption)
-                        .scrollContentBackground(.hidden)
-                        .frame(minHeight: 52)
-                        .onChange(of: noteDraft) { _, v in labels.setNote(v, for: convo.id) }
                 }
-                .padding(.horizontal, 3)
-                .background(RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
-                    .fill(CHM.Color.fillSubtle))
+                .padding(.vertical, 9)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            if open {
+                content()
+                    .padding(.leading, 14)
+                    .padding(.bottom, CHM.Space.md)
+            }
+        }
+        .overlay(alignment: .top) {
+            Rectangle().fill(CHM.Color.hairline).frame(height: 1)
         }
     }
 
-    // MARK: - Usage (context gauge + account limits + tokens — one dashboard)
+    // MARK: Now — what the agent is doing + where you left off
 
-    private func usageCard(_ u: ConversationUsage, agent: AgentKind) -> some View {
-        card("Usage", detail: u.modelDisplayName) {
-            VStack(alignment: .leading, spacing: CHM.Space.md) {
-                contextBlock(u, agent: agent)
-                if !u.rateWindows.isEmpty {
-                    cardDivider
-                    limitsGrid(u.rateWindows)
+    private func nowDrawer(_ convo: Conversation) -> some View {
+        drawer("now", "Now", meta: nowMeta()) {
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                if let p = pulse, !p.todos.isEmpty { planRows(p) }
+                if let p = pulse, p.lastUserText != nil || p.lastAssistantText != nil {
+                    VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                        if let you = p.lastUserText {
+                            exchangeRow("You", you, lines: 2, primary: false)
+                        }
+                        if let agent = p.lastAssistantText {
+                            exchangeRow(convo.agent.displayName, agent, lines: 4, primary: true)
+                        }
+                    }
                 }
-                cardDivider
-                tokensBlock(u)
             }
         }
     }
 
-    /// The context gauge. The % is the AGENT'S OWN number (used against the
-    /// auto-compact threshold for claude, the baseline-adjusted window for
-    /// codex) so it always agrees with what the user sees in the terminal.
-    private func contextBlock(_ u: ConversationUsage, agent: AgentKind) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text("\(Int(u.contextUsedPercent.rounded()))%")
-                    .font(CHM.Font.metric)
-                    .foregroundStyle(usageColor(u.contextUsedPercent))
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
-                    .animation(CHM.Motion.appear, value: u.contextUsedPercent)
-                Text("of context")
-                    .font(CHM.Font.caption)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-            }
-            usageBar(percent: u.contextUsedPercent)
-            HStack {
-                Text("\(formatTokens(u.contextUsedTokens)) / \(formatTokens(u.contextWindowTokens))")
-                Spacer()
-                Text(agent == .claudeCode
-                     ? "\(formatTokens(u.contextRemainingTokens)) to auto-compact"
-                     : "\(formatTokens(u.contextRemainingTokens)) left")
-            }
-            .font(CHM.Font.caption)
-            .foregroundStyle(.tertiary)
-            .monospacedDigit()
+    /// Collapsed "Now" still answers the question: the in-progress step, or
+    /// the plan tally, or a snippet of the last reply.
+    private func nowMeta() -> String? {
+        guard let p = pulse else { return nil }
+        if let current = p.todos.first(where: { $0.status == .inProgress }) {
+            return "◉ \(current.text)"
         }
+        if !p.todos.isEmpty { return "plan \(p.todosDone)/\(p.todos.count)" }
+        if let last = p.lastAssistantText { return "↳ \(last)" }
+        return nil
     }
 
-    /// Account limit meters, two per row (5h/Weekly, plus Opus/Sonnet/Extra
-    /// when the account reports them).
-    private func limitsGrid(_ windows: [ConversationUsage.RateWindow]) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: CHM.Space.lg),
-                            GridItem(.flexible())],
-                  alignment: .leading, spacing: CHM.Space.md) {
-            ForEach(windows) { windowMeter($0) }
-        }
-    }
-
-    private func windowMeter(_ w: ConversationUsage.RateWindow) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(w.label).font(CHM.Font.caption).foregroundStyle(.secondary)
-                Spacer(minLength: 4)
-                Text("\(Int(w.usedPercent))%")
-                    .font(CHM.Font.captionEmphasis)
-                    .foregroundStyle(usageColor(w.usedPercent))
-                    .monospacedDigit()
-            }
-            usageBar(percent: w.usedPercent)
-            if let detail = w.detail {
-                // The extra-usage meter's spend footnote ("$27.63 of $100").
-                Text(detail)
-                    .font(CHM.Font.caption)
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
-            } else if let resets = w.resetsAt {
-                HStack(spacing: 3) {
-                    Image(systemName: "clock").font(.system(size: 9))
-                    Text("in \(Self.compactCountdown(to: resets))")
-                }
-                .font(CHM.Font.caption)
-                .foregroundStyle(.tertiary)
-                .monospacedDigit()
-            }
-        }
-    }
-
-    private func tokensBlock(_ u: ConversationUsage) -> some View {
-        VStack(alignment: .leading, spacing: CHM.Space.xs) {
-            Text("In \(formatTokens(u.totalInputTokens)) · Out \(formatTokens(u.totalOutputTokens)) · \(Int(u.cacheHitPercent))% cached")
-                .font(CHM.Font.monoSmall)
-                .foregroundStyle(.tertiary)
-            DisclosureGroup(isExpanded: $showTokenDetails) {
-                VStack(spacing: CHM.Space.xs) {
-                    tokenRow("Input", u.totalInputTokens)
-                    tokenRow("Output", u.totalOutputTokens)
-                    tokenRow("Cache read", u.cacheReadTokens)
-                    tokenRow("Cache write", u.cacheCreateTokens)
-                }
-                .padding(.top, CHM.Space.xs)
-            } label: {
-                Text("Token detail").font(CHM.Font.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private func tokenRow(_ label: String, _ value: Int) -> some View {
-        HStack {
-            Text(label).font(CHM.Font.caption).foregroundStyle(.secondary)
-            Spacer()
-            Text(formatTokens(value)).font(CHM.Font.monoSmall).foregroundStyle(.primary)
-        }
-    }
-
-    /// "6d 7h" / "4h 50m" / "12m" — the largest two units until reset.
-    private static func compactCountdown(to date: Date) -> String {
-        let secs = Int(max(0, date.timeIntervalSinceNow))
-        let d = secs / 86_400, h = (secs % 86_400) / 3_600, m = (secs % 3_600) / 60
-        if d > 0 { return "\(d)d \(h)h" }
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m)m"
-    }
-
-    /// Calm ramp: neutral until 75%, the app's clay accent 75–90%, a muted
-    /// (desaturated) red only at 90%+. One color on screen; soft fades.
-    private func usageColor(_ percent: Double) -> Color {
-        switch percent {
-        case ..<75: return .secondary
-        case ..<90: return CHM.Color.accent
-        default:    return CHM.Color.alert
-        }
-    }
-
-    private func usageBar(percent: Double) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(CHM.Color.hairline)
-                Capsule()
-                    .fill(usageColor(percent))
-                    .frame(width: max(3, geo.size.width * CGFloat(min(100, percent) / 100)))
-                    .animation(CHM.Motion.appear, value: percent)
-            }
-        }
-        .frame(height: 5)
-    }
-
-    // MARK: - Plan (the agent's live todo list, read from the session file)
-
-    private func planCard(_ p: SessionPulse.Pulse) -> some View {
+    private func planRows(_ p: SessionPulse.Pulse) -> some View {
         // Long plans collapse their leading completed steps into one summary
         // row — the glance is "what's current + what's left", not history.
         let todos = p.todos
         let collapse = todos.count > 10
         let visible = collapse ? todos.filter { $0.status != .completed } : todos
-        return card("Plan", detail: "\(p.todosDone)/\(todos.count) done") {
-            VStack(alignment: .leading, spacing: CHM.Space.xs) {
-                if collapse, p.todosDone > 0 {
-                    HStack(spacing: 6) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
-                        Text("\(p.todosDone) completed")
-                            .font(CHM.Font.caption).foregroundStyle(.tertiary)
-                    }
-                }
-                ForEach(Array(visible.prefix(10).enumerated()), id: \.offset) { _, todo in
-                    todoRow(todo)
-                }
-                if visible.count > 10 {
-                    Text("+\(visible.count - 10) more")
+        return VStack(alignment: .leading, spacing: CHM.Space.xs) {
+            HStack {
+                Spacer(minLength: 0)
+                Text("\(p.todosDone)/\(todos.count) done")
+                    .font(CHM.Font.caption).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            if collapse, p.todosDone > 0 {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text("\(p.todosDone) completed")
                         .font(CHM.Font.caption).foregroundStyle(.tertiary)
                 }
+            }
+            ForEach(Array(visible.prefix(10).enumerated()), id: \.offset) { _, todo in
+                todoRow(todo)
+            }
+            if visible.count > 10 {
+                Text("+\(visible.count - 10) more")
+                    .font(CHM.Font.caption).foregroundStyle(.tertiary)
             }
         }
     }
@@ -507,21 +589,6 @@ struct ContextWatchPane: View {
         }
     }
 
-    // MARK: - Latest (the last real exchange — harness noise filtered upstream)
-
-    private func latestCard(_ p: SessionPulse.Pulse, _ convo: Conversation) -> some View {
-        card("Latest") {
-            VStack(alignment: .leading, spacing: CHM.Space.sm) {
-                if let you = p.lastUserText {
-                    exchangeRow("You", you, lines: 2, primary: false)
-                }
-                if let agent = p.lastAssistantText {
-                    exchangeRow(convo.agent.displayName, agent, lines: 4, primary: true)
-                }
-            }
-        }
-    }
-
     private func exchangeRow(_ label: String, _ text: String, lines: Int, primary: Bool) -> some View {
         HStack(alignment: .top, spacing: CHM.Space.sm) {
             RoundedRectangle(cornerRadius: 1)
@@ -542,10 +609,48 @@ struct ContextWatchPane: View {
         }
     }
 
-    // MARK: - Workspace (room: git state + location)
+    // MARK: Name & note
 
-    private func workspaceCard(_ convo: Conversation) -> some View {
-        card("Workspace") {
+    private func noteDrawer(_ convo: Conversation) -> some View {
+        drawer("note", "Name & note", meta: noteMeta(convo)) {
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                TextField(convo.previewText ?? "Name this conversation…", text: $nameDraft)
+                    .textFieldStyle(.plain)
+                    .font(CHM.Font.bodyEmphasis)
+                    .onChange(of: nameDraft) { _, v in labels.setName(v, for: convo.id) }
+                ZStack(alignment: .topLeading) {
+                    if noteDraft.isEmpty {
+                        Text("Leave a note — where you left off, blockers, TODOs…")
+                            .font(CHM.Font.caption)
+                            .foregroundStyle(.tertiary)
+                            .padding(.top, 8).padding(.leading, 5)
+                            .allowsHitTesting(false)
+                    }
+                    TextEditor(text: $noteDraft)
+                        .font(CHM.Font.caption)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 52)
+                        .onChange(of: noteDraft) { _, v in labels.setNote(v, for: convo.id) }
+                }
+                .padding(.horizontal, 3)
+                .background(RoundedRectangle(cornerRadius: CHM.Radius.tab, style: .continuous)
+                    .fill(CHM.Color.fillSubtle))
+            }
+        }
+    }
+
+    private func noteMeta(_ convo: Conversation) -> String? {
+        let note = noteDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !note.isEmpty { return "“\(note)”" }
+        let name = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !name.isEmpty { return name }
+        return "add"
+    }
+
+    // MARK: Workspace (room: git state + location)
+
+    private func workspaceDrawer(_ convo: Conversation) -> some View {
+        drawer("workspace", "Workspace", meta: workspaceMeta(convo)) {
             VStack(alignment: .leading, spacing: CHM.Space.sm) {
                 if let g = gitStatus {
                     HStack(spacing: 6) {
@@ -580,33 +685,34 @@ struct ContextWatchPane: View {
                         }
                     }
                     if !g.isClean, !g.changedPaths.isEmpty {
-                        DisclosureGroup(isExpanded: $showGitDetails) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                ForEach(g.changedPaths, id: \.self) { path in
-                                    Text(path)
-                                        .font(CHM.Font.monoSmall)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                }
-                                if g.changedCount > g.changedPaths.count {
-                                    Text("+\(g.changedCount - g.changedPaths.count) more")
-                                        .font(CHM.Font.caption)
-                                        .foregroundStyle(.tertiary)
-                                }
+                        VStack(alignment: .leading, spacing: 2) {
+                            ForEach(g.changedPaths, id: \.self) { path in
+                                Text(path)
+                                    .font(CHM.Font.monoSmall)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
-                            .padding(.top, CHM.Space.xs)
-                        } label: {
-                            Text("Changed files").font(CHM.Font.caption).foregroundStyle(.secondary)
+                            if g.changedCount > g.changedPaths.count {
+                                Text("+\(g.changedCount - g.changedPaths.count) more")
+                                    .font(CHM.Font.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
                         }
                     }
-                    cardDivider
                 }
                 metaRow("Folder", convo.roomName)
                 metaRow("Path", convo.roomPath.path, mono: true)
             }
         }
+    }
+
+    private func workspaceMeta(_ convo: Conversation) -> String {
+        guard let g = gitStatus else { return convo.roomName }
+        let branch = g.branch.isEmpty ? convo.roomName : g.branch
+        if g.isClean { return "\(branch) · clean" }
+        return "\(branch) · \(g.changedCount) file\(g.changedCount == 1 ? "" : "s")"
     }
 
     private func aheadBehind(_ icon: String, _ n: Int) -> some View {
@@ -621,46 +727,51 @@ struct ContextWatchPane: View {
     /// best in conventional colors, kept desaturated to match the calm palette).
     private static let gitAdd = Color(red: 0.38, green: 0.72, blue: 0.47)
 
-    // MARK: - Session (process vitals + identity metadata + actions)
+    // MARK: Session (process vitals + identity metadata + actions)
 
-    @ViewBuilder private func sessionCard(_ convo: Conversation) -> some View {
-        if convo.agent == .claudeCode || convo.agent == .codex {
-            card("Session") {
-                VStack(alignment: .leading, spacing: CHM.Space.sm) {
-                    if let f = procFacts, f.state != .unknown {
-                        HStack(spacing: 6) {
-                            Circle().fill(processColor(f.state)).frame(width: 5, height: 5)
-                            Text(processLabel(f.state))
-                                .font(CHM.Font.caption).foregroundStyle(.secondary)
-                            Spacer(minLength: 4)
-                            Text(processVitals(f))
-                                .font(CHM.Font.monoSmall)
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                        }
-                        cardDivider
+    private func sessionDrawer(_ convo: Conversation) -> some View {
+        drawer("session", "Session", meta: sessionMeta()) {
+            VStack(alignment: .leading, spacing: CHM.Space.sm) {
+                if let f = procFacts, f.state != .unknown {
+                    HStack(spacing: 6) {
+                        Circle().fill(processColor(f.state)).frame(width: 5, height: 5)
+                        Text(processLabel(f.state))
+                            .font(CHM.Font.caption).foregroundStyle(.secondary)
+                        Spacer(minLength: 4)
+                        Text(processVitals(f))
+                            .font(CHM.Font.monoSmall)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
                     }
-                    // Only an exact, trustworthy count (Claude); hidden otherwise.
-                    if let count = usage?.messageCount {
-                        metaRow("Messages", "\(count)")
-                    }
-                    if let first = convo.firstMessageAt {
-                        metaRow("Started", first.formatted(date: .abbreviated, time: .shortened))
-                    }
-                    metaRow("Last activity", convo.lastActivityAt.formatted(date: .abbreviated, time: .shortened))
-                    HStack(spacing: CHM.Space.xs) {
-                        ActionChip(label: "Copy ID") { copyToPasteboard(convo.id) }
-                        if let cmd = TerminalCommand.copyableResume(for: convo) {
-                            ActionChip(label: "Copy resume") { copyToPasteboard(cmd) }
-                        }
-                        ActionChip(label: "Show file") {
-                            NSWorkspace.shared.activateFileViewerSelecting([convo.sessionFile])
-                        }
-                    }
-                    .padding(.top, 2)
                 }
+                // Only an exact, trustworthy count (Claude); hidden otherwise.
+                if let count = usage?.messageCount {
+                    metaRow("Messages", "\(count)")
+                }
+                if let first = convo.firstMessageAt {
+                    metaRow("Started", first.formatted(date: .abbreviated, time: .shortened))
+                }
+                metaRow("Last activity", convo.lastActivityAt.formatted(date: .abbreviated, time: .shortened))
+                HStack(spacing: CHM.Space.xs) {
+                    ActionChip(label: "Copy ID") { copyToPasteboard(convo.id) }
+                    if let cmd = TerminalCommand.copyableResume(for: convo) {
+                        ActionChip(label: "Copy resume") { copyToPasteboard(cmd) }
+                    }
+                    ActionChip(label: "Show file") {
+                        NSWorkspace.shared.activateFileViewerSelecting([convo.sessionFile])
+                    }
+                }
+                .padding(.top, 2)
             }
         }
+    }
+
+    private func sessionMeta() -> String? {
+        var parts: [String] = []
+        if let count = usage?.messageCount { parts.append("\(count) msgs") }
+        if let f = procFacts, let rss = f.rssBytes { parts.append(formatBytes(rss)) }
+        else if let f = procFacts, f.state == .parked { parts.append("parked") }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// "PID 18289 · 365 MB · 4.6%" — the vitals as one quiet line instead of
@@ -716,6 +827,62 @@ struct ContextWatchPane: View {
                 .truncationMode(.middle)
             Spacer(minLength: 0)
         }
+    }
+
+    // MARK: Tokens
+
+    private func tokensDrawer(_ u: ConversationUsage) -> some View {
+        drawer("tokens", "Tokens", meta: "\(formatTokens(u.totalTokens)) total") {
+            VStack(alignment: .leading, spacing: CHM.Space.xs) {
+                tokenRow("Input", u.totalInputTokens)
+                tokenRow("Output", u.totalOutputTokens)
+                tokenRow("Cache read", u.cacheReadTokens)
+                tokenRow("Cache write", u.cacheCreateTokens)
+                Text("\(Int(u.cacheHitPercent))% of input served from cache")
+                    .font(CHM.Font.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+            }
+        }
+    }
+
+    private func tokenRow(_ label: String, _ value: Int) -> some View {
+        HStack {
+            Text(label).font(CHM.Font.caption).foregroundStyle(.secondary)
+            Spacer()
+            Text(formatTokens(value)).font(CHM.Font.monoSmall).foregroundStyle(.primary)
+        }
+    }
+
+    // MARK: - Shared formatting
+
+    /// "6d 7h" / "4h 50m" / "12m" — the largest two units until reset.
+    private static func compactCountdown(to date: Date) -> String {
+        compactCountdown(seconds: date.timeIntervalSinceNow)
+    }
+
+    private static func compactCountdown(seconds: TimeInterval) -> String {
+        let secs = Int(max(0, seconds))
+        let d = secs / 86_400, h = (secs % 86_400) / 3_600, m = (secs % 3_600) / 60
+        if d > 0 { return "\(d)d \(h)h" }
+        if h > 0 { return "\(h)h \(m)m" }
+        return "\(m)m"
+    }
+
+    /// Calm ramp: neutral until 75%, the app's clay accent 75–90%, a muted
+    /// (desaturated) red only at 90%+. One color on screen; soft fades.
+    private func usageColor(_ percent: Double) -> Color {
+        switch percent {
+        case ..<75: return .secondary
+        case ..<90: return CHM.Color.accent
+        default:    return CHM.Color.alert
+        }
+    }
+
+    private func formatTokens(_ n: Int) -> String {
+        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
+        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
+        return "\(n)"
     }
 
     // MARK: - Ports footer (ambient)
@@ -802,52 +969,6 @@ struct ContextWatchPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.bottom, CHM.Space.xxl)
-    }
-
-    /// One inspector card: an eyebrow title (with an optional right-aligned
-    /// detail) over its content, on a quiet rounded fill. The card boundary is
-    /// what groups related numbers — replacing the old floating-label stack
-    /// that read as one undifferentiated column.
-    private func card(_ title: String, detail: String? = nil,
-                      @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: CHM.Space.sm) {
-            HStack(spacing: CHM.Space.xs) {
-                Text(title)
-                    .font(CHM.Font.eyebrow)
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                    .tracking(0.6)
-                if let detail {
-                    Spacer(minLength: 0)
-                    Text(detail)
-                        .font(CHM.Font.caption)
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
-            }
-            content()
-        }
-        .padding(CHM.Space.md)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: CHM.Radius.card, style: .continuous)
-                .fill(CHM.Color.fillSubtle)
-                .overlay(
-                    RoundedRectangle(cornerRadius: CHM.Radius.card, style: .continuous)
-                        .strokeBorder(CHM.Color.hairline.opacity(0.6), lineWidth: 1)
-                )
-        )
-    }
-
-    /// In-card hairline between grouped blocks (gauge / limits / tokens).
-    private var cardDivider: some View {
-        Rectangle().fill(CHM.Color.hairline).frame(height: 1)
-    }
-
-    private func formatTokens(_ n: Int) -> String {
-        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
-        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
-        return "\(n)"
     }
 }
 

@@ -44,6 +44,11 @@ struct ConversationUsage: Sendable, Equatable {
         /// Optional footnote shown where the reset countdown would go —
         /// the extra-usage meter uses it for "$27.63 of $100".
         var detail: String? = nil
+        /// Total window length in minutes (codex reports it; claude's are
+        /// fixed by kind: 5h = 300, weeklies = 10080). Fuels PaceLaw — the
+        /// deficit/reserve watch needs to know how far through the window
+        /// we are.
+        var windowMinutes: Int? = nil
         var id: String { label }
     }
 
@@ -387,6 +392,8 @@ enum ConversationUsageParser {
         let pct = (dict["used_percent"] as? Double) ?? Double(intValue(dict["used_percent"]))
         let resets = (dict["resets_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
             ?? (intValue(dict["resets_at"]) > 0 ? Date(timeIntervalSince1970: Double(intValue(dict["resets_at"]))) : nil)
-        return ConversationUsage.RateWindow(label: label, usedPercent: pct, resetsAt: resets)
+        let minutes = intValue(dict["window_minutes"])
+        return ConversationUsage.RateWindow(label: label, usedPercent: pct, resetsAt: resets,
+                                            windowMinutes: minutes > 0 ? minutes : nil)
     }
 }

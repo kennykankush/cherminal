@@ -13,8 +13,50 @@ enum RateWindowLaw {
                         now: Date = Date()) -> [ConversationUsage.RateWindow] {
         windows.map { w in
             guard let resets = w.resetsAt, resets <= now else { return w }
-            return .init(label: w.label, usedPercent: 0, resetsAt: nil, detail: w.detail)
+            return .init(label: w.label, usedPercent: 0, resetsAt: nil,
+                         detail: w.detail, windowMinutes: w.windowMinutes)
         }
+    }
+}
+
+/// The deficit watch (CodexBar's pace model): compare actual usage to where
+/// it WOULD be if the window drained evenly, and project depletion at the
+/// current burn rate. "+9% in deficit" = burning faster than the window
+/// refills; "in reserve" = headroom; `runsOutIn` non-nil = at this pace the
+/// limit hits BEFORE the reset.
+enum PaceLaw {
+    struct Pace: Equatable {
+        /// Where an even burn would be right now (0–100).
+        let expectedPercent: Double
+        /// actual − expected: positive = deficit, negative = reserve.
+        let deltaPercent: Double
+        /// Seconds until 100% at the current average rate — only when that
+        /// lands BEFORE the reset (nil = lasts until reset).
+        let runsOutIn: TimeInterval?
+    }
+
+    /// Pace deltas under this magnitude read as "on pace" — sub-2% is noise.
+    static let onPaceBand = 2.0
+
+    static func pace(for w: ConversationUsage.RateWindow, now: Date = Date()) -> Pace? {
+        guard let resets = w.resetsAt,
+              let minutes = w.windowMinutes, minutes > 0 else { return nil }
+        let duration = TimeInterval(minutes) * 60
+        let untilReset = resets.timeIntervalSince(now)
+        // Expired or nonsensical (reset further out than the window is long).
+        guard untilReset > 0, untilReset <= duration else { return nil }
+        let elapsed = duration - untilReset
+        // Too early in the window to project anything meaningful.
+        guard elapsed >= 60 else { return nil }
+        let expected = min(100, max(0, elapsed / duration * 100))
+        let delta = w.usedPercent - expected
+        var runsOutIn: TimeInterval?
+        let rate = w.usedPercent / elapsed   // % per second, average so far
+        if rate > 0 {
+            let eta = (100 - w.usedPercent) / rate
+            if eta < untilReset { runsOutIn = eta }
+        }
+        return Pace(expectedPercent: expected, deltaPercent: delta, runsOutIn: runsOutIn)
     }
 }
 

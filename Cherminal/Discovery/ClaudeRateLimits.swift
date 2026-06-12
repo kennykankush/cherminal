@@ -81,11 +81,16 @@ actor ClaudeRateLimits {
     static func parseUsageResponse(_ data: Data) -> [ConversationUsage.RateWindow] {
         guard let usage = try? JSONDecoder().decode(UsageResponse.self, from: data) else { return [] }
         var out: [ConversationUsage.RateWindow] = []
+        // Window lengths are fixed by kind (codex reports its own in-file;
+        // claude's API doesn't, but the kinds define them) — PaceLaw needs
+        // them for the deficit/reserve watch.
         if let w = usage.five_hour, let pct = w.utilization {
-            out.append(.init(label: "5h", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+            out.append(.init(label: "5h", usedPercent: pct, resetsAt: isoDate(w.resets_at),
+                             windowMinutes: 300))
         }
         if let w = usage.seven_day, let pct = w.utilization {
-            out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+            out.append(.init(label: "Weekly", usedPercent: pct, resetsAt: isoDate(w.resets_at),
+                             windowMinutes: 10_080))
         }
         // Model-scoped weekly windows (Max plans report these; shape pinned
         // from a real payload). They matter twice: the meters, and BurstLaw —
@@ -94,11 +99,13 @@ actor ClaudeRateLimits {
         // running) stay hidden — a permanent "Sonnet 0%" meter is clutter.
         if let w = usage.seven_day_opus, let pct = w.utilization,
            pct > 0 || w.resets_at != nil {
-            out.append(.init(label: "Opus", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+            out.append(.init(label: "Opus", usedPercent: pct, resetsAt: isoDate(w.resets_at),
+                             windowMinutes: 10_080))
         }
         if let w = usage.seven_day_sonnet, let pct = w.utilization,
            pct > 0 || w.resets_at != nil {
-            out.append(.init(label: "Sonnet", usedPercent: pct, resetsAt: isoDate(w.resets_at)))
+            out.append(.init(label: "Sonnet", usedPercent: pct, resetsAt: isoDate(w.resets_at),
+                             windowMinutes: 10_080))
         }
         if let e = usage.extra_usage, e.is_enabled == true, let pct = e.utilization {
             var detail: String?

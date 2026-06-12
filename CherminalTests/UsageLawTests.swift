@@ -52,6 +52,56 @@ struct UsageLawTests {
         #expect(fresh[2].usedPercent == 27)
     }
 
+    // MARK: - Pace (the deficit watch)
+
+    @Test func paceComputesDeficitAndReserve() {
+        // Halfway through a 5h window (resets in 150 min), 60% used →
+        // expected 50%, +10% deficit; rate won't deplete before reset?
+        // rate = 60/9000s → eta = 40/(60/9000) = 6000s < 9000s → runs out!
+        let hot = ConversationUsage.RateWindow(
+            label: "5h", usedPercent: 60,
+            resetsAt: now.addingTimeInterval(150 * 60), windowMinutes: 300)
+        let hotPace = PaceLaw.pace(for: hot, now: now)
+        #expect(hotPace?.expectedPercent == 50)
+        #expect(hotPace?.deltaPercent == 10)
+        #expect(hotPace?.runsOutIn == 6_000)
+
+        // Same point, 30% used → 20% in reserve, lasts to reset (eta nil).
+        let cool = ConversationUsage.RateWindow(
+            label: "5h", usedPercent: 30,
+            resetsAt: now.addingTimeInterval(150 * 60), windowMinutes: 300)
+        let coolPace = PaceLaw.pace(for: cool, now: now)
+        #expect(coolPace?.deltaPercent == -20)
+        #expect(coolPace?.runsOutIn == nil)
+    }
+
+    @Test func paceNeedsSignal() {
+        // No window length / no reset → no pace.
+        #expect(PaceLaw.pace(for: window("5h", 50, resetsIn: 3_600), now: now) == nil)
+        let noReset = ConversationUsage.RateWindow(label: "5h", usedPercent: 50,
+                                                   resetsAt: nil, windowMinutes: 300)
+        #expect(PaceLaw.pace(for: noReset, now: now) == nil)
+        // Window just started (< 1 min elapsed) → too early to project.
+        let fresh = ConversationUsage.RateWindow(
+            label: "5h", usedPercent: 1,
+            resetsAt: now.addingTimeInterval(300 * 60 - 30), windowMinutes: 300)
+        #expect(PaceLaw.pace(for: fresh, now: now) == nil)
+        // Reset already passed → freshen's territory, not pace's.
+        let expired = ConversationUsage.RateWindow(
+            label: "5h", usedPercent: 100,
+            resetsAt: now.addingTimeInterval(-60), windowMinutes: 300)
+        #expect(PaceLaw.pace(for: expired, now: now) == nil)
+    }
+
+    @Test func freshenKeepsWindowMinutes() {
+        let expired = ConversationUsage.RateWindow(
+            label: "5h", usedPercent: 100,
+            resetsAt: now.addingTimeInterval(-60), windowMinutes: 300)
+        let fresh = RateWindowLaw.freshen([expired], now: now)
+        #expect(fresh[0].usedPercent == 0)
+        #expect(fresh[0].windowMinutes == 300)
+    }
+
     // MARK: - Burst arbitration
 
     @Test func burstClearsWhenResetPassesDespiteVisibleBanner() {
