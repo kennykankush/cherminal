@@ -743,6 +743,43 @@ final class TabWindowCoordinator: ObservableObject {
         clog("tabs", "killed detached agent \(agent.id)")
     }
 
+    /// Kill a pane outright (⌥⌘⇧W, the minimap's "Kill Pane"): SIGTERM its
+    /// dtach master — the agent dies with it — and close the pane with NO
+    /// parking. Kill ends the PROCESS, not the history: the session file
+    /// stays on disk, so the sidebar can still cold-resume the conversation.
+    func kill(_ pane: Pane) {
+        guard let controller = controllers.first(where: { c in
+            c.workspace.panes.contains { $0 === pane }
+        }) else { return }
+        // The socket is keyed on the OPENED identity (an adopted hand-launch
+        // runs on its wrapped shell's socket) — base.id either way.
+        let socketID = pane.base.id
+        let convoID = pane.conversation.id
+        Dtach.kill(id: socketID)
+        clog("tabs", "killed pane \(convoID) (socket \(socketID))")
+        let ws = controller.workspace
+        if ws.panes.count > 1 {
+            ws.removePane(id: pane.id)
+            controller.window?.contentView?.layoutSubtreeIfNeeded()
+            schedulePersist()
+        } else {
+            // Last pane → window close. The close path's park guard probes
+            // master liveness fresh, and we just killed it — so no tray cell.
+            controller.window?.performClose(nil)
+        }
+        // Bound the SIGTERM race: if the close-path park won against the
+        // master's death, drop the cell (a killed pane must never park).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.detachedAgents.removeAll { $0.id == socketID || $0.id == convoID }
+        }
+    }
+
+    func killActivePane() {
+        guard let controller = activeController,
+              let active = controller.workspace.activePane else { return }
+        kill(active)
+    }
+
     /// Reentrancy guard + last pgrep time. FSEvents can fire many times a second
     /// while an agent works; without these, each fire would spawn one `pgrep`
     /// Process per parked agent — a process storm. The guard collapses

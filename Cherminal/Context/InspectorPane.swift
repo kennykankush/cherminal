@@ -291,7 +291,8 @@ private struct MiniPaneCell: View {
                 Button("Jump Here") { coordinator.reveal(pane) }
                 Button("Zoom Pane") { coordinator.toggleZoom(pane) }
                 Divider()
-                Button("Close Pane", role: .destructive) { coordinator.close(pane) }
+                Button("Close Pane (park)", role: .destructive) { coordinator.close(pane) }
+                Button("Kill Pane", role: .destructive) { coordinator.kill(pane) }
             }
             .help(tooltip(state))
     }

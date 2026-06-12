@@ -35,6 +35,10 @@ struct CherminalApp: App {
                         AppEnvironment.shared.coordinator.toggleZoomActivePane()
                     }
                     .keyboardShortcut(.return, modifiers: [.command, .shift])
+                    Button("Kill Pane") {
+                        AppEnvironment.shared.coordinator.killActivePane()
+                    }
+                    .keyboardShortcut("w", modifiers: [.command, .shift, .option])
                     Divider()
                     Button("Show Next Tab") {
                         AppEnvironment.shared.coordinator.selectNextTab()
@@ -393,8 +397,12 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
         } else if mods == [.command, .shift] {
             if chars == "]" || chars == "}" { coordinator.selectNextTab(); return true }
             if chars == "[" || chars == "{" { coordinator.selectPreviousTab(); return true }
-            if chars == "w" || chars == "W" { coordinator.closeActivePane(); return true }   // close pane
+            if chars == "w" || chars == "W" { coordinator.closeActivePane(); return true }   // close pane (parks agents)
             if chars == "\r" { coordinator.toggleZoomActivePane(); return true }             // zoom pane
+        } else if mods == [.command, .shift, .option] {
+            // ⌥ layered on the close chord = close HARDER: kill the process,
+            // no parking.
+            if chars == "w" || chars == "W" { coordinator.killActivePane(); return true }    // kill pane
         }
         return false
     }
