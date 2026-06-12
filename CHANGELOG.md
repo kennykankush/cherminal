@@ -2,7 +2,75 @@
 
 All notable changes to Cherminal. Newest first.
 
-## [Unreleased] — "Hand-launched agents survive too" (2026-06-10)
+## [Unreleased] — "The Details panel tells the truth" (2026-06-13)
+
+### Fixed
+- **Context gauge parity (the 3–4% gap).** The gauge measured against the
+  raw model window; the agents don't. `ContextBudgetLaw` now mirrors each
+  agent's own math — Claude (extracted from the installed binary): window −
+  20k output reserve − 13k auto-compact buffer is the real ceiling (1M →
+  967k); Codex (codex-rs): a 12k baseline off both numerator and
+  denominator. The % now agrees with what the agent shows in the terminal,
+  and the sub-line reads "X to auto-compact".
+- **Stale CLAUDE/CODEX BURST.** The terminal-banner scrape is no longer the
+  law: `BurstLaw` arbitrates it against authoritative account windows
+  (Claude OAuth, now incl. active Opus/Sonnet weeklies; codex's in-file
+  `rate_limit_reached_type`), and `RateWindowLaw` zeroes any window whose
+  reset has passed — the red banner clears at the actual reset instead of
+  living as long as the text sits in the viewport. Works in reverse too: a
+  limit hit in a background session flags without any visible banner.
+- **New chats no longer inherit the room's last conversation.** A fresh
+  `claude` writes no session file until the first message, so the linker's
+  cwd+recency fallback adopted the PREVIOUS conversation ("BELVEDERE FABLE
+  on a brand-new chat"). ProcTable now carries process start times (`ps
+  etime`); the ledger refuses to link a conversation last written before
+  the process existed (`--continue` keeps pure recency — there the room's
+  latest IS the selection). Until the first message, Details shows an
+  honest **New conversation** state.
+- **Harness noise is not your prompt.** `<task-notification>` records no
+  longer show as "YOU: …" in Latest.
+- **Dead-attach pane chain healed** — attach falls back to resume,
+  close-surface requests close the pane, lost focus re-asserts on
+  activation.
+- **Rate-limit meters resilience** — keep-last-good bounded at 15 min (a
+  429 storm reads as absent, not frozen); codex "premium" account shape
+  survives; Claude's extra-usage spend surfaces ("$27.63 of $100").
+
+### Added
+- **Usage-limit notifications** (`UsageWatch` + `UsageAlertLaw`, pure and
+  test-pinned): a window crossing 90% ("5h limit at 92% — resets in 1h
+  04m"), a high window refreshing ("clear to run"), burst began/lifted
+  (with reset countdown), and the active conversation's context window
+  crossing 90% (fires once; re-arms below 75% after a compact).
+- **Kill Pane (⌥⌘⇧W)** — end the process outright; close's ⌥ variant, no
+  parking.
+- **Homebrew tap lives in-repo** (`Casks/cherminal.rb`) — no separate
+  homebrew-tap repo to keep in sync.
+
+### Changed
+- **Details panel rebuilt as cards.** Identity header (your name for the
+  chat as the title, agent · workspace beneath, live status chip, pin); ONE
+  Usage dashboard card (context gauge + account limit meters in a two-up
+  grid + token totals behind a disclosure); a quieter Latest with quote
+  bars; Workspace (branch, changes, path) and Session (one-line process
+  vitals: "PID 18289 · 365 MB · 4.6%", dates, copy actions) merged cards.
+  The burst banner counts down to its binding reset.
+
+## [0.2.0] — build 5 (2026-06-11)
+
+First signed + notarized release: one-command release pipeline (Developer
+ID, notarization staple, strips the debugger entitlement plain xcodebuild
+injects), three install modes (brew cask, curl installer, dmg), version
+auto-bump incl. the in-repo cask. Bundles every "[Unreleased]" chapter
+below, plus:
+
+### Added
+- **Pane zoom (⇧⌘↩)** — and grid cell identity follows the pane, not the
+  slot.
+- **Inspector knows the conversation** — Plan, Latest, Process, and copy
+  actions (the foundation today's Details redesign builds on).
+
+## "Hand-launched agents survive too" (2026-06-10, shipped in 0.2.0)
 
 ### Added
 - **Background sessions in the sidebar.** A new **Background** section lists
@@ -91,7 +159,7 @@ All notable changes to Cherminal. Newest first.
   now have the same survival guarantee. Live-tested E2E (quit → master
   survives → relaunch → same pid reattached).
 
-## [Unreleased] — "The foundation pass" (2026-06-10)
+## "The foundation pass" (2026-06-10, shipped in 0.2.0)
 
 A first-principles strengthening of the bank logic — who owns which
 conversation, in which pane, on which socket — plus a large cut in standing
@@ -153,7 +221,7 @@ cost. No feature changes; the same app on much firmer ground.
   dtach quoting, TurnState fixtures, persisted-shape migrations, path
   classification.
 
-## [Unreleased] — "Persistent sessions & live fleet awareness" (2026-06-09)
+## "Persistent sessions & live fleet awareness" (2026-06-09, shipped in 0.2.0)
 
 Agents now survive across launches, and Cherminal surfaces what every one of
 them is doing at a glance — a status minimap, finish alerts, and per-room git —
@@ -217,7 +285,7 @@ all observe-externally (no hooks, no injection).
 - Ambient polls (ports, context/usage, live-session reconcile, sub-agent scan)
   pause while the app is backgrounded and catch up on return.
 
-## [Unreleased] — "Complete Overhaul" (2026-05-30)
+## "Complete Overhaul" (2026-05-30, shipped in 0.2.0)
 
 A deep audit + bug-hunt + UI pass: two multi-agent audits and a bug-swarm,
 every finding adversarially verified before fixing. Build green, 23 tests
