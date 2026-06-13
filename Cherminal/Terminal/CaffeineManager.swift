@@ -1,45 +1,64 @@
 import Combine
 import Foundation
+import IOKit.pwr_mgt
 
-/// The coffee button — a one-click "keep this Mac awake" toggle. Mirrors the
-/// user's `goodnight` alias forever-mode: `caffeinate -di` (prevent display +
-/// idle sleep). On → spawn caffeinate; off → kill it. The child is parented to
-/// the app, so quitting Cherminal also ends the caffeinate (no lingering
-/// keep-awake). Pure external utility — no injection.
+/// The coffee button — a one-click "keep this Mac awake" toggle. Same effect
+/// as `caffeinate -di` (prevent display sleep + idle system sleep), but held
+/// as IOKit power assertions IN-PROCESS rather than by spawning a child.
+///
+/// Why not spawn `caffeinate`: a child process is NOT killed when its parent
+/// exits — Unix reparents it to launchd, where a `caffeinate -di` keeps
+/// asserting "never sleep" forever. Every Cherminal quit/crash with the
+/// toggle on leaked one immortal caffeinate (four found alive in the wild,
+/// the oldest 4 days, 2026-06-13) and the Mac could never idle-sleep again.
+/// IOKit assertions are owned by THIS process; the kernel releases them the
+/// instant the process dies — crash, force-quit, or clean quit — so the leak
+/// is structurally impossible. Pure external utility — no injection.
 @MainActor
 final class CaffeineManager: ObservableObject {
     @Published private(set) var active = false
 
-    private var process: Process?
+    /// The two assertions that together equal `caffeinate -di`: keep the
+    /// display awake (`-d`) and prevent idle system sleep (`-i`). 0 = unheld.
+    private var displayAssertion: IOPMAssertionID = 0
+    private var systemAssertion: IOPMAssertionID = 0
 
     func toggle() { active ? stop() : start() }
 
     private func start() {
-        guard process == nil else { return }
-        let p = Process()
-        p.launchPath = "/usr/bin/caffeinate"
-        p.arguments = ["-di"]   // -d no display sleep, -i no idle sleep (cf. `goodnight`)
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
-        // If caffeinate exits on its own (killed externally, etc.) flip back off.
-        p.terminationHandler = { [weak self] _ in
-            Task { @MainActor in self?.clear() }
-        }
-        do { try p.run() } catch { return }
-        process = p
+        guard !active else { return }
+        let reason = "Cherminal keep-awake" as CFString
+        let display = createAssertion(kIOPMAssertionTypePreventUserIdleDisplaySleep, reason)
+        let system = createAssertion(kIOPMAssertionTypePreventUserIdleSystemSleep, reason)
+        // If neither assertion could be created, leave the toggle off rather
+        // than claim a keep-awake we aren't actually holding.
+        guard display != 0 || system != 0 else { return }
+        displayAssertion = display
+        systemAssertion = system
         active = true
-        clog("caffeine", "on (caffeinate -di pid=\(p.processIdentifier))")
+        clog("caffeine", "on (IOKit display=\(display) system=\(system))")
     }
 
     private func stop() {
-        process?.terminationHandler = nil   // we're ending it deliberately
-        process?.terminate()
-        clear()
+        release(&displayAssertion)
+        release(&systemAssertion)
+        active = false
         clog("caffeine", "off")
     }
 
-    private func clear() {
-        process = nil
-        active = false
+    private func createAssertion(_ type: String, _ reason: CFString) -> IOPMAssertionID {
+        var id: IOPMAssertionID = 0
+        let result = IOPMAssertionCreateWithName(
+            type as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            reason,
+            &id)
+        return result == kIOReturnSuccess ? id : 0
+    }
+
+    private func release(_ id: inout IOPMAssertionID) {
+        guard id != 0 else { return }
+        IOPMAssertionRelease(id)
+        id = 0
     }
 }
