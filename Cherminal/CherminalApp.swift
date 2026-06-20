@@ -110,6 +110,13 @@ final class CherminalAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard !isRunningTests else { return }
         let env = AppEnvironment.shared
+        // v2 canvas engine kernel. When CANVAS_V2 is set, open the canvas window
+        // instead of the normal session and skip restore. Dormant otherwise (env
+        // gate), so it never affects normal use until the pivot wires it primary.
+        if ProcessInfo.processInfo.environment["CANVAS_V2"] != nil {
+            CanvasV2.launch(ghostty: env.ghostty)
+            return
+        }
         env.metrics.startIfEnabled()   // headless perf CSV (off unless cherminal.metrics)
         env.backgroundAgents.start()   // supervisor session list for the sidebar
         installTabShortcutMonitor()
