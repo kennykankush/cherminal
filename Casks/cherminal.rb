@@ -1,6 +1,6 @@
 cask "cherminal" do
-  version "0.2.0"
-  sha256 "176108d9bdb72eef771a5e37b348560ffd0cdd7ee6f1c70d6f804b4da2ab33e8"
+  version "0.2.1"
+  sha256 "534b65c644f5da0a2f2c29705508e7c109c09aaa500b997ab535120b54412851"
 
   url "https://github.com/kennykankush/cherminal/releases/download/v#{version}/Cherminal-#{version}.dmg"
   name "Cherminal"
