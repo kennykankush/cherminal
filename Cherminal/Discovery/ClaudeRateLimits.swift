@@ -14,8 +14,21 @@ import Security
 ///   path). Once read, the token is cached to ~/.cherminal/claude-oauth.json
 ///   (0600) so future polls and launches read our file, not the Keychain —
 ///   we only re-touch the Keychain when the token is missing/expired.
+///
+/// Two guards keep that last resort from becoming a prompt treadmill, because
+/// on macOS Claude Code keeps NO plaintext credentials file — the Keychain is
+/// the only refill source, so every miss lands on a dialog:
+///   • We read the item's modification date first (an attributes-only query,
+///     which the ACL doesn't gate — it protects the DATA), and skip the prompt
+///     entirely when the item hasn't been rewritten since our last read. A
+///     revoked token that 401s can't spin here: prompting would only hand back
+///     the same rejected value until Claude Code itself refreshes.
+///   • A denied/cancelled/locked read backs off (5m, doubling to 1h) instead of
+///     re-prompting at the poll cadence.
 actor ClaudeRateLimits {
     static let shared = ClaudeRateLimits()
+
+    private static let keychainService = "Claude Code-credentials"
 
     private var cachedWindows: [ConversationUsage.RateWindow] = []
     private var lastFetch = Date.distantPast
@@ -28,6 +41,11 @@ actor ClaudeRateLimits {
     private let staleAfter: TimeInterval = 15 * 60
 
     private var token: (value: String, expiresAt: Date)?
+    /// Modification date of the Keychain item as of our last successful data
+    /// read — the "is there anything new behind the prompt?" watermark.
+    private var lastKeychainRead: Date?
+    private var keychainBackoff: TimeInterval = 0
+    private var keychainRetryAt = Date.distantPast
     private let tokenCacheURL = URL(fileURLWithPath:
         (NSHomeDirectory() as NSString).appendingPathComponent(".cherminal/claude-oauth.json"))
 
@@ -163,13 +181,41 @@ actor ClaudeRateLimits {
             token = t; cacheToken(t); return t.value
         }
         // 4. Keychain — the only prompting path; we land here rarely (token
-        //    missing or expired), not on every poll.
-        if let t = readTokenFromKeychain() {
+        //    missing or expired), not on every poll, and only when there's a
+        //    newer token to be had.
+        if let t = refillFromKeychain() {
             token = t; cacheToken(t); return t.value
         }
         return nil
     }
 
+    /// The Keychain read, gated on "has the item changed?" and on the backoff.
+    /// Returns nil without raising a dialog whenever a prompt couldn't tell us
+    /// anything we don't already know.
+    private func refillFromKeychain() -> (value: String, expiresAt: Date)? {
+        let now = Date()
+        guard now >= keychainRetryAt else { return nil }
+        // Prompt-free: attribute queries aren't ACL-gated, only data reads are.
+        let modified = keychainItemModified()
+        if let modified, let last = lastKeychainRead, modified <= last { return nil }
+
+        guard let t = readTokenFromKeychain() else {
+            keychainBackoff = keychainBackoff == 0 ? 300 : min(keychainBackoff * 2, 3600)
+            keychainRetryAt = now.addingTimeInterval(keychainBackoff)
+            return nil
+        }
+        keychainBackoff = 0
+        keychainRetryAt = .distantPast
+        // Fall back to `now` when the item carries no modification date, so a
+        // failed attribute read still advances the watermark (one prompt, not
+        // one per poll).
+        lastKeychainRead = modified ?? now
+        return t
+    }
+
+    /// Drop a token the API rejected. The Keychain isn't re-read until Claude
+    /// Code writes a new one (the modification-date gate above) — re-reading now
+    /// would return the same rejected value.
     private func invalidateToken() {
         token = nil
         try? FileManager.default.removeItem(at: tokenCacheURL)
@@ -193,10 +239,26 @@ actor ClaudeRateLimits {
         return parseToken(obj)
     }
 
+    /// When the credentials item was last written, WITHOUT decrypting it. The
+    /// ACL guards the secret, not the metadata, so this never prompts — which is
+    /// what lets us decide whether a prompt is worth raising at all.
+    private func keychainItemModified() -> Date? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: Self.keychainService,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
+              let attributes = item as? [String: Any] else { return nil }
+        return attributes[kSecAttrModificationDate as String] as? Date
+    }
+
     private func readTokenFromKeychain() -> (value: String, expiresAt: Date)? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "Claude Code-credentials",
+            kSecAttrService as String: Self.keychainService,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]

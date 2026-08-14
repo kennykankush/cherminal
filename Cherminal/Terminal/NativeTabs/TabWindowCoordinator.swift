@@ -1022,7 +1022,8 @@ final class TabWindowCoordinator: ObservableObject {
         let pidToPane = foregroundPIDs(table: table)
         guard !pidToPane.isEmpty else { return [:] }
         let info = LiveSessionLinker.inspect(pids: Array(pidToPane.keys),
-                                             argvByPID: table?.argv)
+                                             argvByPID: table?.argv,
+                                             childrenByParent: table?.childrenByParent)
         var out: [UUID: Conversation] = [:]
         var adopted = Set<String>()   // mirror reconcileLiveSessions: one pane per convo
         for (pid, pane) in pidToPane where pane.base.agent == .shell {
@@ -1665,7 +1666,8 @@ final class TabWindowCoordinator: ObservableObject {
             }
             let info = LiveSessionLinker.inspect(pids: resolved.map { $0.pid },
                                                  argvByPID: table.argv,
-                                                 startedByPID: table.startedAt)
+                                                 startedByPID: table.startedAt,
+                                                 childrenByParent: table.childrenByParent)
             return (resolved, info)
         }.value
         guard let (resolved, info) = probed else { return }

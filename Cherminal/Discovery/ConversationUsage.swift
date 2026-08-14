@@ -326,10 +326,18 @@ enum ConversationUsageParser {
                   (payload["type"] as? String) == "token_count" else { continue }
 
             if windows == nil, let limits = payload["rate_limits"] as? [String: Any] {
+                // Label each window from its OWN `window_minutes`, not its slot:
+                // codex moved the weekly limit into `primary` (window_minutes
+                // 10080) and now leaves `secondary` null, so positional labels
+                // printed "5h" over a 7-day meter. Slot names stay as the
+                // fallback for older rollouts that omit the field. The label is
+                // the RateWindow id, so drop a duplicate rather than hand
+                // SwiftUI two rows with the same identity.
+                var seen = Set<String>()
                 let parsed = [
-                    rateWindow(limits["primary"], label: "5h"),
-                    rateWindow(limits["secondary"], label: "Weekly"),
-                ].compactMap { $0 }
+                    rateWindow(limits["primary"], fallbackLabel: "5h"),
+                    rateWindow(limits["secondary"], fallbackLabel: "Weekly"),
+                ].compactMap { $0 }.filter { seen.insert($0.label).inserted }
                 if !parsed.isEmpty { windows = parsed }
                 // `rate_limit_reached_type` rides on the same record: a string
                 // while the account is limited, JSON null once it isn't. Take
@@ -387,13 +395,27 @@ enum ConversationUsageParser {
         return zero
     }
 
-    private static func rateWindow(_ any: Any?, label: String) -> ConversationUsage.RateWindow? {
+    private static func rateWindow(_ any: Any?, fallbackLabel: String) -> ConversationUsage.RateWindow? {
         guard let dict = any as? [String: Any] else { return nil }
         let pct = (dict["used_percent"] as? Double) ?? Double(intValue(dict["used_percent"]))
         let resets = (dict["resets_at"] as? Double).map { Date(timeIntervalSince1970: $0) }
             ?? (intValue(dict["resets_at"]) > 0 ? Date(timeIntervalSince1970: Double(intValue(dict["resets_at"]))) : nil)
         let minutes = intValue(dict["window_minutes"])
-        return ConversationUsage.RateWindow(label: label, usedPercent: pct, resetsAt: resets,
+        return ConversationUsage.RateWindow(label: windowLabel(minutes: minutes) ?? fallbackLabel,
+                                            usedPercent: pct,
+                                            resetsAt: resets,
                                             windowMinutes: minutes > 0 ? minutes : nil)
+    }
+
+    /// A rate window's own duration as a meter label — "5h", "Weekly", "30m".
+    /// nil when codex didn't report one, so the caller keeps its slot name.
+    static func windowLabel(minutes: Int) -> String? {
+        guard minutes > 0 else { return nil }
+        switch minutes {
+        case 10080: return "Weekly"            // 7d — matches Claude's wording
+        case let m where m % 1440 == 0: return m == 1440 ? "Daily" : "\(m / 1440)d"
+        case let m where m % 60 == 0: return "\(m / 60)h"
+        default: return "\(minutes)m"
+        }
     }
 }

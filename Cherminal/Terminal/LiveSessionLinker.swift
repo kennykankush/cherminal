@@ -10,6 +10,15 @@ import Foundation
 ///   • Claude opens/appends/closes per write, so it never shows the file open.
 ///     But its process cwd is the room it's writing under, so we fall back to
 ///     the most-recently-active Claude conversation in that room.
+///
+/// Neither signal lands on the tab's foreground process when the agent ships a
+/// launcher: the npm `codex` is a `#!/usr/bin/env node` shim that re-execs the
+/// platform binary as a CHILD, so the tty's foreground process is `node` with
+/// nothing open, while the child holds the rollout. We therefore probe each
+/// foreground pid together with its descendants and fold the agent-looking one
+/// back onto the pid the caller asked about. (Claude ships a single native
+/// binary, so it was never affected — which is exactly why Claude tabs linked
+/// and Codex tabs silently stayed bare shells.)
 enum LiveSessionLinker {
     struct ProcessInfo: Sendable {
         let command: String
@@ -37,44 +46,138 @@ enum LiveSessionLinker {
         }
     }
 
-    /// Inspect `pids` (one batched lsof). `argvByPID` / `startedByPID` — when
-    /// the caller already holds a ProcTable snapshot — supply each pid's
-    /// command line and start time so no second `ps` is spawned; without them
-    /// we fall back to our own ps call (resume ids only).
+    /// Inspect `pids` (one batched lsof), each together with its descendants.
+    /// `argvByPID` / `startedByPID` / `childrenByParent` — when the caller
+    /// already holds a ProcTable snapshot — supply each pid's command line,
+    /// start time, and the process tree so no second `ps` is spawned; without
+    /// them we fall back to our own ps call (resume ids only) and probe the
+    /// foreground pids alone.
     static func inspect(pids: [Int32],
                         argvByPID: [Int32: String]? = nil,
-                        startedByPID: [Int32: Date]? = nil) -> [Int32: ProcessInfo] {
+                        startedByPID: [Int32: Date]? = nil,
+                        childrenByParent: [Int32: [Int32]]? = nil) -> [Int32: ProcessInfo] {
         guard !pids.isEmpty else { return [:] }
         let home = NSHomeDirectory()
         let roots = [home + "/.claude/projects/", home + "/.codex/sessions/"]
-        let list = pids.map(String.init).joined(separator: ",")
+        let descendants = descendantsByRoot(pids: pids, childrenByParent: childrenByParent)
+        let probePIDs = pids + descendants.values.flatMap { $0 }
+        let list = probePIDs.map(String.init).joined(separator: ",")
 
         // +c 0: full command names. -Fpcfn: pid, command, fd, name fields — the
         // fd tells us which `n` is the cwd vs a regular open file.
         guard let raw = run("/usr/sbin/lsof", ["-p", list, "+c", "0", "-Fpcfn"]) else { return [:] }
-        var info = parse(raw, roots: roots)
-        // Merge in the exact resume id from each process's argv — lsof's command
-        // field is only the name. This is the accurate session link for a
-        // resumed agent (vs. guessing by room recency).
+        let probed = parse(raw, roots: roots)
+        // Resume ids come from argv — lsof's command field is only the name.
+        // This is the accurate session link for a resumed agent (vs. guessing by
+        // room recency), and under a shim it lives on whichever process in the
+        // chain actually got the `resume <id>` arguments.
         let resumed: [Int32: String]
         if let argvByPID {
             var out: [Int32: String] = [:]
-            for (pid, argv) in argvByPID where info[pid] != nil {
-                if let id = parseResumeID(argv) { out[pid] = id }
+            for pid in probePIDs {
+                if let argv = argvByPID[pid], let id = parseResumeID(argv) { out[pid] = id }
             }
             resumed = out
         } else {
-            resumed = resumeIDs(pids: pids)
+            resumed = resumeIDs(pids: probePIDs)
         }
-        for pid in info.keys {
-            let cur = info[pid]!
-            info[pid] = ProcessInfo(command: cur.command, cwd: cur.cwd,
-                                    openSessionFile: cur.openSessionFile,
-                                    resumeID: resumed[pid],
-                                    launchArgv: argvByPID?[pid],
-                                    startedAt: startedByPID?[pid])
+
+        var info: [Int32: ProcessInfo] = [:]
+        for pid in pids {
+            info[pid] = resolve(root: pid, descendants: descendants[pid] ?? [],
+                                probed: probed, resumed: resumed,
+                                argvByPID: argvByPID, startedByPID: startedByPID)
         }
         return info
+    }
+
+    /// Fold a foreground process and its descendants into the one ProcessInfo
+    /// the caller asked about. Pure, so the shim case is unit-testable without
+    /// spawning lsof. nil when lsof reported nothing for the root.
+    static func resolve(root: Int32,
+                        descendants: [Int32],
+                        probed: [Int32: ProcessInfo],
+                        resumed: [Int32: String],
+                        argvByPID: [Int32: String]? = nil,
+                        startedByPID: [Int32: Date]? = nil) -> ProcessInfo? {
+        guard let own = probed[root] else { return nil }
+        var merged = own
+        // Only look past the foreground process when it hasn't identified
+        // itself — a real agent (or anything holding a session file) always wins
+        // over its own children.
+        if !identifiesAgent(own), let child = agentDescendant(descendants, in: probed) {
+            merged = ProcessInfo(command: child.command,
+                                 cwd: own.cwd ?? child.cwd,
+                                 openSessionFile: child.openSessionFile,
+                                 resumeID: nil)
+        }
+        // argv/start time stay ROOT-first: the shim's argv carries the same
+        // flags the ledger reads (`--continue`), and its start time is the
+        // earlier one — the moment the invocation began, which is what "was
+        // this conversation written before the process existed?" means.
+        let chain = [root] + descendants
+        return ProcessInfo(command: merged.command,
+                           cwd: merged.cwd,
+                           openSessionFile: merged.openSessionFile,
+                           resumeID: chain.compactMap { resumed[$0] }.first,
+                           launchArgv: chain.compactMap { argvByPID?[$0] }.first,
+                           startedAt: chain.compactMap { startedByPID?[$0] }.first)
+    }
+
+    /// Descendant pids of each root, breadth-first. Bounded on both axes so a
+    /// chatty agent (one that spawns a tool subprocess per turn) can't grow the
+    /// lsof argument list without limit — depth 2 covers the shim → binary hop
+    /// with room to spare. Other roots are never traversed into, so one pane can
+    /// never adopt the agent running in another.
+    static func descendantsByRoot(pids: [Int32],
+                                  childrenByParent: [Int32: [Int32]]?,
+                                  maxDepth: Int = 2,
+                                  maxPerRoot: Int = 8) -> [Int32: [Int32]] {
+        guard let childrenByParent, !childrenByParent.isEmpty else { return [:] }
+        let rootSet = Set(pids)
+        var out: [Int32: [Int32]] = [:]
+        for root in pids {
+            var found: [Int32] = []
+            var seen: Set<Int32> = [root]
+            var frontier = (childrenByParent[root] ?? []).sorted()
+            var depth = 1
+            while !frontier.isEmpty, depth <= maxDepth, found.count < maxPerRoot {
+                var next: [Int32] = []
+                for pid in frontier {
+                    guard found.count < maxPerRoot else { break }
+                    guard !rootSet.contains(pid), seen.insert(pid).inserted else { continue }
+                    found.append(pid)
+                    next.append(contentsOf: (childrenByParent[pid] ?? []).sorted())
+                }
+                frontier = next
+                depth += 1
+            }
+            if !found.isEmpty { out[root] = found }
+        }
+        return out
+    }
+
+    /// Whether a process has told us what it is: it holds a session file open,
+    /// or it's named for an agent.
+    static func identifiesAgent(_ info: ProcessInfo) -> Bool {
+        info.openSessionFile != nil || isAgentCommand(info.command)
+    }
+
+    static func isAgentCommand(_ command: String) -> Bool {
+        let c = command.lowercased()
+        return c.hasPrefix("claude") || c.hasPrefix("codex")
+    }
+
+    /// The descendant that best explains what a wrapper is running: one holding
+    /// a session file open beats one merely named for an agent. Deterministic
+    /// (the caller's chain is pid-ordered) so a tab's identity doesn't flip
+    /// between ticks when several children qualify.
+    private static func agentDescendant(
+        _ pids: some Sequence<Int32>, in probed: [Int32: ProcessInfo]
+    ) -> ProcessInfo? {
+        let candidates = pids.compactMap { probed[$0] }
+        return candidates.first { $0.openSessionFile != nil }
+            ?? candidates.first { isAgentCommand($0.command) }
     }
 
     /// pid → session id parsed from its argv (`--resume`/`-r`/`resume <id>`).

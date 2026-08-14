@@ -6,12 +6,31 @@
 #
 # Usage: scripts/install.sh
 #
-# Note: this is an ad-hoc-signed local build — fine for your own Mac (no
-# Gatekeeper warning since you built it). Sharing with others needs the
-# notarized Developer ID path (see memory: distribution-plan).
+# Signs with your Developer ID cert when one is in the keychain, else ad-hoc.
+# That choice is not cosmetic: a keychain ACL entry ("Always Allow" on Claude
+# Code's credentials, which the rate-limit meters read) binds to the app's code
+# identity. A Developer ID signature is a stable identity that survives every
+# reinstall; an ad-hoc/linker-signed one is just a hash of the binary, and this
+# script replaces the bundle wholesale — so the grant is void by the next
+# launch and macOS asks again. Sharing with others still needs the notarized
+# path (scripts/release.sh).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+TEAM="483LU3J5WJ"
+IDENTITY="$(security find-identity -v -p codesigning \
+    | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)"
+if [[ -n "$IDENTITY" ]]; then
+  SIGN_ARGS=(CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IDENTITY"
+             DEVELOPMENT_TEAM="$TEAM" ENABLE_HARDENED_RUNTIME=YES
+             CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO)
+  echo ":: signing as: $IDENTITY"
+else
+  SIGN_ARGS=(CODE_SIGNING_ALLOWED=NO)
+  echo ":: no Developer ID cert found — ad-hoc signing (keychain 'Always Allow'"
+  echo "   will not survive reinstalls; see the note at the top of this script)"
+fi
 
 echo ":: xcodegen generate"
 xcodegen generate >/dev/null
@@ -24,7 +43,7 @@ echo ":: building Release (arm64) → build/Build/Products/Release"
 LOG=/tmp/cherminal-release-build.log
 if ! xcodebuild -project Cherminal.xcodeproj -scheme Cherminal \
   -configuration Release -derivedDataPath build \
-  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES "${SIGN_ARGS[@]}" build \
   >"$LOG" 2>&1; then
   echo "✗ Release build FAILED — last lines of $LOG:"
   tail -25 "$LOG"

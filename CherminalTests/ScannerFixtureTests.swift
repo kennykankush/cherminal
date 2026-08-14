@@ -154,6 +154,39 @@ struct CodexUsageTests {
         #expect(ConversationUsageParser.parseCodex(sessionFile: url)?.limitReached == false)
     }
 
+    /// Codex moved its weekly limit into `primary` (window_minutes 10080) and
+    /// leaves `secondary` null, so the label must come from the window's own
+    /// duration — a positional "5h" would mislabel a 7-day meter.
+    @Test func labelsRateWindowsFromTheirOwnDuration() throws {
+        let url = Fixtures.writeJSONL([
+            #"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"total_tokens":5},"model_context_window":258400},"rate_limits":{"limit_id":"codex","primary":{"used_percent":41,"window_minutes":10080,"resets_at":1787199675},"secondary":null}}}"#,
+        ], name: "codex-weekly-primary")
+        defer { Fixtures.remove(url) }
+
+        let usage = ConversationUsageParser.parseCodex(sessionFile: url)
+        #expect(usage?.rateWindows.map(\.label) == ["Weekly"])
+        #expect(usage?.rateWindows.first?.usedPercent == 41)
+    }
+
+    /// Labels are the RateWindow id — two windows of the same duration must not
+    /// produce two rows with the same identity.
+    @Test func dropsDuplicateWindowLabels() throws {
+        let url = Fixtures.writeJSONL([
+            #"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":5}},"rate_limits":{"primary":{"used_percent":41,"window_minutes":10080},"secondary":{"used_percent":12,"window_minutes":10080}}}}"#,
+        ], name: "codex-dup-window")
+        defer { Fixtures.remove(url) }
+        #expect(ConversationUsageParser.parseCodex(sessionFile: url)?.rateWindows.map(\.label) == ["Weekly"])
+    }
+
+    @Test func windowLabelReadsMinutes() {
+        #expect(ConversationUsageParser.windowLabel(minutes: 300) == "5h")
+        #expect(ConversationUsageParser.windowLabel(minutes: 10080) == "Weekly")
+        #expect(ConversationUsageParser.windowLabel(minutes: 1440) == "Daily")
+        #expect(ConversationUsageParser.windowLabel(minutes: 4320) == "3d")
+        #expect(ConversationUsageParser.windowLabel(minutes: 45) == "45m")
+        #expect(ConversationUsageParser.windowLabel(minutes: 0) == nil)   // absent → caller's fallback
+    }
+
     @Test func rolloutWithoutTokenCountYieldsNil() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("chm-codex-usage-\(UUID().uuidString).jsonl")
